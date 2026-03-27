@@ -1,0 +1,47 @@
+iq_config:
+  IQ_FPADD:
+    module: FPADD
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    EN_COND: true
+    BITS_COND: 8
+    EN_DLY: true
+    BITS_DLY: 4
+    EN_INC: true
+    BITS_INC: 4
+    BITS_EMBED: 3
+    BITS_EMBED_END: 6
+    BITS_CODE: 10
+    INC_HIGH: 7
+    INC_LOW: 3
+
+  IQ_STB:
+    module: STB
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    EN_INC: true
+    BITS_INC: 13    # STB/LDB的INC位宽较大
+    BITS_CODE: 7
+
+  IQ_RTOVR:
+    module: RTOVR
+    count: 39 # 对应 39 个生产者 (DVR)
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    EN_DLY: true
+    BITS_DLY: 4
+    BITS_CODE: 7
+
+  IQ_UR_READ:
+    module: UR_READ
+    count: 4
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    BITS_CODE: 12
+
+  IQ_UR_WRITE:
+    module: UR_WRITE
+    count: 4
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    BITS_CODE: 28

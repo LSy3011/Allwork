@@ -1,0 +1,68 @@
+modules:
+  FPADD:
+    type: compute
+    latency: 4
+    inputs: [DVR-FPADD-S0, DVR-FPADD-S1]
+    outputs: [DR-FPADD-D, DR-FPADD-ST]
+    code_bits: 10
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_prec, bits: 1} # 0:16bit, 1:32bit
+      - {name: dst_prec, bits: 1} # 0:16bit, 1:32bit
+      - {name: up_stat_en, bits: 1}
+      - {name: add_or_sub, bits: 1} # 0:ADD, 1:SUB
+      - {name: smc_id_en, bits: 5}
+    parallelism:
+      prec_16bit:
+        lanes: 8
+        formula: "DR_D[x], DR_ST[x] = S0[x] +/- S1[x] (x=0..7)"
+      prec_32bit:
+        lanes: 4
+        formula: "DR_D[x], DR_ST[x] = S0[x] +/- S1[x] (x=0..3)"
+
+  FPMUL:
+    type: compute
+    latency: 4
+    inputs: [DVR-FPMUL-S0, DVR-FPMUL-S1]
+    outputs: [DR-FPMUL-D]
+    code_bits: 8
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_prec, bits: 1} # 0:16bit, 1:32bit
+      - {name: dst_prec, bits: 1} # 0:16bit, 1:32bit
+      - {name: smc_id_en, bits: 5}
+    # 核心拆分对齐逻辑
+    parallelism:
+      prec_16bit:
+        lanes: 8
+        formula: "DR_D[x] = S0[x] * S1[x] (x=0..7)"
+      prec_32bit:
+        lanes: 4
+        formula: "DR_D[x] = S0[x] * S1[x] (x=0..3)"
+
+  RTOVR:
+    type: router
+    latency: 1
+    code_bits: 7
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: dr_index, bits: 6} # 对应端子编号 0~33
+
+  UR_READ:
+    type: memory_access
+    latency: 1
+    code_bits: 12
+    code_fields:
+      - {name: re, bits: 1}
+      - {name: rbank, bits: 3}
+      - {name: raddr, bits: 8}
+
+  UR_WRITE:
+    type: memory_access
+    latency: 1
+    code_bits: 28
+    code_fields:
+      - {name: we, bits: 1}
+      - {name: wbank, bits: 3}
+      - {name: waddr, bits: 8}
+      - {name: wbe, bits: 16}
