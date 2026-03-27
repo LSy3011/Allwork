@@ -1,0 +1,35 @@
+# AIACC 硬件物理参数 (唯一数据源)
+# 修改此文件后，运行 /refactor-aiacc 工作流自动同步所有下游
+
+resource:
+  smc_num: 32
+  ur_bank_num: 8
+  ur_bank_depth: 256
+  ur_read_ports: 4
+  ur_write_ports: 4
+
+rtovr:
+  port_num: 4
+  mutex_groups:
+    - [0, 2]
+    - [1, 3]
+  # connectivity 详细映射见 connectivity.xlsx
+
+timing:
+  UR_READ: 1
+  UR_WRITE: 1
+  RtoVR: 1
+  FPADD: 3
+  FPMUL: 3
+  INTADD: 1
+  FP16MUL: 2
+  LOGIC: 1
+  FPtoFP: 1
+  FP32ADDTREE5TO1: 2
+  FP32ADDTREE8TO1: 3
+
+encoding:
+  bits_dly: 4       # DLY 最大值 = 2^4 - 1 = 15
+  bits_loops: 8     # LOOP 最大值 = 2^8 - 1 = 255
+  bits_iq_addr: 8   # Bank 内偏移
+  embed_max_level: 6
