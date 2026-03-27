@@ -23,23 +23,24 @@ class HSTSStitcher:
         op_mask = FootprintFactory.from_smt_result(ops, smt_result)
         
         # 2. 搜索最早的安全合入点
+        # 初始步进为 1 拍周期，直到无物理冲突 (IQ/BANK/SLOT)
         offset = 0
         while self.global_mask.conflicts_with(op_mask, offset=offset):
             offset += 1
             
-        # 3. 确定入场！合并足迹到全局表
+        # 3. 确定入场！合并足迹到全局表 (带原子计数功能)
         self.global_mask.merge(op_mask, offset=offset)
         
         # 4. 克隆并平移算子的物理坐标
         for op in ops:
-            # 使用 deepcopy 保证不影响原始算子定义
             new_op = copy.deepcopy(op)
-            # 记录平移后的全局时间
-            new_t = smt_result[op.node_id] + offset
-            new_op.metadata["global_t"] = new_t
+            t_rel = smt_result[op.node_id]
+            # 记录平移后的全局时间与原始相对时间
+            new_op.metadata["t"] = t_rel
+            new_op.metadata["global_t"] = t_rel + offset
             new_op.metadata["instance_name"] = name
             self.global_ops.append(new_op)
-            self.max_t = max(self.max_t, new_t)
+            self.max_t = max(self.max_t, t_rel + offset)
             
         print(f"HSTS: Operator [{name}] stitched safely at offset {offset}.")
         return offset
