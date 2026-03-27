@@ -33,10 +33,10 @@ master (受保护)
 
 | 任务 | 角色 | 产出 | Git 提交规范 |
 |:--- |:--- |:--- |:--- |
-| 创建 hw_config/ 五源数据文件 | HCO | YAML/xlsx | `data: 新增 pipeline_delays.yaml` |
-| 实现 HardwareSpec.load() | IE | src/api/hw_spec.py | `feat(api): 五源加载` |
-| 实现 Pydantic 校验 | IE | src/api/hw_spec.py | `feat(api): 参数校验` |
-| 写测试 + Mock 工厂 | TFD | tests/conftest.py | `test(api): make_mock_spec` |
+| 创建 hw_config/ 五源数据文件 | HCO | YAML/xlsx | [Done] |
+| 实现 HardwareSpec.load() | IE | src/api/hw_spec.py | [Done] |
+| 实现 Pydantic 校验 | IE | src/api/hw_spec.py | [Done] |
+| 写测试 + Mock 工厂 | TFD | tests/conftest.py | [Done] |
 | 验证 | PVO | 测试报告 | - |
 
 **Sprint 1 Definition of Done**:
@@ -52,11 +52,11 @@ git tag v5.0-S01
 
 | 任务 | 角色 | 产出 | Git 提交规范 |
 |:--- |:--- |:--- |:--- |
-| 实现 IRNode + trace_id | IE | src/ir/base.py | `feat(ir): 公共基类` |
-| 实现 HIRProgram | IE | src/ir/hir.py | `feat(ir): HIR 算子图` |
-| 实现 MIROp + FootprintMask | IE | src/ir/mir/ | `feat(ir): MIR 脉冲层` |
-| 实现 LIROp + 41-bit 编解码 | IE | src/ir/lir/ | `feat(ir): LIR 编解码` |
-| 写各层测试 | TFD | tests/unit/test_ir.py | `test(ir): trace 贯穿` |
+| 实现 IRNode + trace_id | IE | src/ir/base.py | [Done] |
+| 实现 HIRProgram | IE | src/ir/hir.py | [Done] |
+| 实现 MIROp + FootprintMask | IE | src/ir/mir/ | [Done] |
+| 实现 LIROp + 41-bit 编解码 | IE | src/ir/lir/ | [Done] |
+| 写各层测试 | TFD | tests/unit/test_ir.py | [Done] |
 
 **Sprint 2 DoD**:
 ```bash
@@ -156,8 +156,8 @@ git tag v5.0-release
 ## 三、进度追踪: Git Tag 里程碑
 
 ```
-v5.0-S01  HardwareSpec 可用           ▓░░░░░ 15%
-v5.0-S02  三层 IR 打通                ▓▓░░░░ 30%
+v5.0-S01  HardwareSpec 可用           ▓▓░░░░ 30%
+v5.0-S02  三层 IR 打通                ▓▓▓▓░░ 60%
 v5.0-S03  sin APB 合成成功            ▓▓▓░░░ 50%  ★关键里程碑
 v5.0-S04  sin+cos 缝合无冲突          ▓▓▓▓░░ 70%
 v5.0-S05  Bank 着色 + 二进制打包      ▓▓▓▓▓░ 85%
