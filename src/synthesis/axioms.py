@@ -53,9 +53,10 @@ class SynthesisAxioms:
                 for i, op_i in enumerate(slot_ops):
                     consumers = [o for o in ops if op_i.node_id in o.metadata.get("depends_on", [])]
                     for cons in consumers:
-                        lat = spec.delays.get(cons.op_type, 1)
+                        # 物理特性：一旦计算单元启动（t_vars[cons.node_id]），数据即被 Latch 进流水线。
+                        # Slot 在下一拍即可释放给其他算子。
                         t_start = t_vars[op_i.node_id]
-                        t_end = t_vars[cons.node_id] + lat - 1
+                        t_end = t_vars[cons.node_id]
                         for j, op_j in enumerate(slot_ops):
                             if i == j: continue
                             uid = "_".join(sorted([op_i.node_id, op_j.node_id]))
