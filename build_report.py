@@ -33,6 +33,8 @@ SECTIONS = [
 
     # Part 3: 架构决策记录
     "adm/adr/ADR-001_rtovr.md",
+    "adm/adr/ADR-002_bank_allocation.md",
+    "adm/adr/ADR-003_lowering.md",
 
     # Part 4: 路线图
     "adm/roadmap.md",
