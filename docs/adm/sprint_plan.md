@@ -94,31 +94,35 @@ git tag v5.0-S03
 
 | 任务 | 角色 | 产出 | Git 提交规范 |
 |:--- |:--- |:--- |:--- |
-| FootprintMask (Bank+Port+Unit) | IE | src/orchestrator/footprint.py | `feat(hsts): 足迹掩码` |
-| AdvancedResTable | IE | src/orchestrator/resource.py | `feat(hsts): 资源表` |
-| Stitcher (Phase Shift + DLY) | IE | src/orchestrator/stitcher.py | `feat(hsts): 相位缝合` |
-| StreamScanner | IE | src/verification/stream_scanner.py | `feat(verify): LIR 扫描` |
-| ConstraintChecker | IE | src/verification/constraint_checker.py | `feat(verify): 约束检查` |
-| R-R/Port 冲突测试 | TFD | tests/unit/test_stitcher.py | `test(hsts): 冲突消解` |
+| FootprintMask (Bank+Port+Unit) | IE | src/orchestrator/footprint.py | [Done] |
+| AdvancedResTable | IE | src/orchestrator/resource.py | [Done] |
+| Stitcher (Phase Shift + DLY) | IE | src/orchestrator/stitcher.py | [Done] |
+| StreamScanner | IE | src/verification/stream_scanner.py | [Done] |
+| ConstraintChecker | IE | src/verification/constraint_checker.py | [Done] |
+| R-R/Port 冲突测试 | TFD | tests/unit/test_stitcher.py | [Done] |
+
+**Sprint 4 Achievement (Finalized)**:
+- [x] Conflict-free operator stitching on Single SMC.
+- [x] Latch-aware slot de-allocation for extreme throughput (3 cycles/op).
+- [x] Gapless HSTS Specification Export (.gapless.spec).
 
 **Sprint 4 DoD**:
 ```bash
-pytest tests/unit/test_stitcher.py -v   # Phase Shift 正确
-# StreamScanner.assert_clean() 通过
+pytest tests/unit/test_stitcher_robust.py -v   # Phase Shift 正确 (3-Sin Verified)
 git tag v5.0-S04
 ```
 
 ---
 
-### Sprint 5: 空间与驱动层 (目标: Bank 着色 + 二进制打包)
+### Sprint 5: 空间与驱动层 (目标: Bank 着色 + 二进制打包) - **IN_PROGRESS**
 **时长**: 3-5 天 | **里程碑**: M16-M19
 
 | 任务 | 角色 | 产出 | Git 提交规范 |
 |:--- |:--- |:--- |:--- |
+| BalancedBankColorer (均衡着色) | IE | src/orchestrator/colorer.py | `feat(layout): 均衡着色` |
 | 生命周期分析 | IE | src/layout/liveness.py | `feat(layout): 生命周期` |
-| 8-Bank 着色 (受 exclusions 约束) | IE | src/layout/allocator.py | `feat(layout): Bank 着色` |
-| 循环压缩 | IE | src/driver/compressor.py | `feat(driver): 循环压缩` |
-| 41-bit 打包 | IE | src/driver/emitter.py | `feat(driver): 二进制打包` |
+| 8-Bank 地址映射与隔离 | IE | src/orchestrator/memory_allocator.py | `feat(layout): 地址映射` |
+| LIR 41-bit 二进制指令打包 | IE | src/driver/emitter.py | `feat(driver): 二进制打包` |
 | 着色+打包测试 | TFD | tests/unit/test_layout.py | `test(layout): 着色无冲突` |
 
 **Sprint 5 DoD**:
