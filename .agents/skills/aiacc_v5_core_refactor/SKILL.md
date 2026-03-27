@@ -3,139 +3,98 @@ name: aiacc_v5_core_refactor
 description: AIACC 编译器 V5.0 核心模块（SMT 合成 & HSTS 编排）的标准化开发流，包含 Rtovr 物理路由约束。
 ---
 
-# AIACC V5.0 硬件更新对齐流程
+# AIACC V5.0 硬件更新对齐流程 (7 角色版)
 
 当用户提供硬件信息时，Agent 必须按以下流程执行。
-**核心原则：每个角色只改自己的文件，每个文件 < 100 行。**
 
 ---
 
-## Step 1: 判定变更等级 (戴 HCO 帽子)
-
-读取用户提供的硬件信息，判断属于哪一类：
+## Step 1: 判定变更等级 (HCO)
 
 | 等级 | 判断标准 | 示例 |
 |:--- |:--- |:--- |
 | **L0** | 数值变了，字段不变 | FPADD 延时 3→5 |
-| **L1** | 字段变了，结构不变 | 新增一个 timing 条目 |
+| **L1** | 字段变了，结构不变 | 新增 timing 条目 |
 | **L2** | 需要新增算法逻辑 | 新增 Rtovr 公理 |
-| **L3** | 需要重构模块接口 | Bank 8→16，地址位宽不够 |
+| **L3** | 需要重构模块接口 | Bank 8→16 |
 
-然后在 `aiacc_v5_docs/hco/hw_changelog.md` 追加一行记录：
-```
-| 日期 | 等级 | 变更内容 | YAML 字段 | ADR |
-```
+在 `docs/hco/hw_changelog.md` 追加记录。
 
----
+## Step 2: 更新硬件数据源 (HCO)
 
-## Step 2: 更新硬件数据源 (仍然 HCO)
-
-修改 `smi_iq/aiacc_refactor/hw_config/hw_params.yaml`。
-这个文件约 40 行，可以安全编辑。
-
-- L0/L1：修改已有字段或新增字段。
-- L2/L3：新增配置段（如 `rtovr:`）。
-
----
+修改 `hw_config/hw_params.yaml`（约 40 行）。
 
 ## Step 3: 根据等级分流
 
-### L0/L1 路径（参数变更，简单流程）
+- **L0/L1**：跳到 Step 7
+- **L2/L3**：继续 Step 4
 
-直接跳到 Step 6（跑测试验证）。
-不需要创建 ADR，不需要改架构文档。
+## Step 4: 创建 ADR (ADM)
 
-### L2/L3 路径（架构变更，完整流程）
+在 `docs/adm/adr/ADR-NNN.md` 创建决策文档（5 章，< 100 行）。
+同时更新 `docs/adm/roadmap.md`。
 
-继续 Step 4 和 Step 5。
+## Step 5: 更新源码结构 (SE) [NEW]
 
----
+根据 ADR 第 3 章（算法影响），评估对代码结构的影响：
 
-## Step 4: 创建 ADR (戴 ADM 帽子)
+### 5a. 更新 `docs/se/source_structure.md`
+- 是否需要新增源码文件？（如 `synthesis/rtovr_axioms.py`）
+- 是否需要新增目录？
 
-在 `aiacc_v5_docs/adm/adr/` 下创建新文件 `ADR-NNN_feature_name.md`。
+### 5b. 更新 `docs/se/module_contracts.md`
+- 现有接口的输入/输出是否需要扩展？
+- 是否需要新增接口？
 
-ADR 固定 5 章，控制在 100 行以内：
-
-```
-# ADR-NNN: [特性名称]
-## 1. 硬件变更描述
-## 2. 对 hw_params.yaml 的影响
-## 3. 对算法层的影响 (哪些公理/模块需要新增或修改)
-## 4. 对 Roadmap 的影响 (哪些里程碑需要新增/修改)
-## 5. 对 TDD 的影响 (新增哪些测试函数)
-```
-
-同时更新以下 ADM 文件：
-- `aiacc_v5_docs/adm/roadmap.md` — 在对应 Phase 下追加新里程碑
-- `aiacc_v5_docs/adm/baseline.md` — **不改内容**，只在底部追加 ADR 引用
-
----
-
-## Step 5: 更新测试规格 (戴 TFD 帽子)
-
-根据 ADR 第 5 章列出的测试函数，更新：
-- `aiacc_v5_docs/tfd/tdd_spec.md` — 追加新的测试函数签名
-- `aiacc_v5_docs/tfd/verification.md` — 如有新的验证支柱，追加描述
-
----
-
-## Step 6: 验证影响 (戴 PVO 帽子)
-
-列出受影响的已有测试，告知用户需要重跑哪些：
-
-### L0/L1 影响范围速查表
-
-| YAML 字段 | 受影响的测试 |
+### SE 影响判定矩阵
+| ADR 算法影响 | SE 需要做什么 |
 |:--- |:--- |
-| `timing.*` | `test_raw_constraints`, `test_sin_synthesis` |
-| `resource.ur_read_ports` | `test_bus_width_axiom`, `test_bus_overflow` |
-| `rtovr.port_num` | `test_rtovr_connectivity`, `test_port_mutex` |
-| `rtovr.mutex_groups` | `test_port_mutex`, `test_port_collision_shift` |
-| `encoding.bits_dly` | `test_dly_within_bits`, `test_41bit_encode` |
+| 新增 SMT 公理 | `axioms.py` 新增函数签名 |
+| 扩展足迹维度 | `FootprintMask` 接口扩展 |
+| 新增代码模块 | `source_structure.md` 新增文件 |
+| 修改模块接口 | `module_contracts.md` 更新契约 |
+| 无代码影响 | 无需更新 SE 文件 |
 
-### L2/L3 影响范围
+## Step 6: 更新测试规格 (TFD)
 
-由 ADR 第 5 章定义。所有新增的测试函数都需要先写红灯测试。
+根据 ADR 第 5 章 + SE 的接口定义：
+- 更新 `docs/tfd/tdd_spec.md`
+- 更新对应 `docs/tfd/phase*.md`
+
+## Step 7: 列出影响范围 (PVO)
+
+### L0/L1 影响速查
+| YAML 字段 | 受影响测试 |
+|:--- |:--- |
+| `timing.*` | `test_raw_constraints` |
+| `resource.ur_read_ports` | `test_bus_width_axiom` |
+| `rtovr.port_num` | `test_rtovr_connectivity` |
+| `rtovr.mutex_groups` | `test_port_mutex` |
+| `encoding.bits_dly` | `test_dly_within_bits` |
+
+### L2/L3 影响
+由 ADR 第 5 章定义。
+
+## Step 8: 更新门禁 (IG)
+
+- 如果新增了里程碑 → 更新 `docs/ig/gate_checklist.md`
+- 如果变更了已冻结 Phase → 标记"解冻重验"
 
 ---
 
-## Step 7: 更新门禁 (戴 IG 帽子)
+## 完整路径对比
 
-检查 `aiacc_v5_docs/ig/gate_checklist.md`：
-- 如果新增了里程碑，在对应 Phase 的门禁清单中追加检查项。
-- 如果变更了已冻结的 Phase，标记为"解冻重验"。
-
----
-
-## 完整执行示例
-
-### 示例 A: FPADD 延时 3→5 (L0)
-
+### L0 路径 (改数字): 3 步
 ```
-Step 1: 判定 L0（数值变了，字段不变）
-Step 2: hw_params.yaml timing.FPADD: 5
-Step 3: L0 路径 → 跳到 Step 6
-Step 6: 需重跑 test_raw_constraints, test_sin_synthesis
-Step 7: 无需更新门禁
+HCO → hw_params.yaml → PVO 列出测试 → 完成
+改 2 个文件
 ```
 
-共修改 **2 个文件**：hw_changelog.md + hw_params.yaml
-
-### 示例 B: 新增 DMA 通道 (L2)
-
+### L2 路径 (加功能): 8 步
 ```
-Step 1: 判定 L2（需要新增 DMA 调度公理）
-Step 2: hw_params.yaml 新增 dma 段
-Step 3: L2 路径 → 继续
-Step 4: 创建 ADR-002_dma_channel.md
-        更新 roadmap.md（M08 新增 DMA 公理函数）
-Step 5: 更新 tdd_spec.md（新增 M08-F07 add_dma_axiom）
-Step 6: 列出受影响测试 + 新增测试
-Step 7: Phase 3 门禁新增 DMA 公理检查项
+HCO → ADM → SE → TFD → IE → PVO → IG → 完成
+改 7+ 个文件，每个 < 100 行
 ```
-
-共修改 **5 个文件**，每个都 < 100 行。
 
 ---
 
@@ -143,12 +102,14 @@ Step 7: Phase 3 门禁新增 DMA 公理检查项
 
 | 角色 | 文件 | 路径 |
 |:--- |:--- |:--- |
-| HCO | 变更日志 | `aiacc_v5_docs/hco/hw_changelog.md` |
-| HCO | 硬件参数 | `smi_iq/aiacc_refactor/hw_config/hw_params.yaml` |
-| ADM | 架构基线 | `aiacc_v5_docs/adm/baseline.md` |
-| ADM | 路线图 | `aiacc_v5_docs/adm/roadmap.md` |
-| ADM | 决策记录 | `aiacc_v5_docs/adm/adr/ADR-NNN.md` |
-| TFD | TDD 规格 | `aiacc_v5_docs/tfd/tdd_spec.md` |
-| TFD | 验证支柱 | `aiacc_v5_docs/tfd/verification.md` |
-| PVO | Golden 基准 | `aiacc_v5_docs/pvo/golden_baseline.md` |
-| IG | 门禁清单 | `aiacc_v5_docs/ig/gate_checklist.md` |
+| HCO | 变更日志 | `docs/hco/hw_changelog.md` |
+| HCO | 硬件参数 | `hw_config/hw_params.yaml` |
+| ADM | 架构基线 | `docs/adm/baseline.md` |
+| ADM | 路线图 | `docs/adm/roadmap.md` |
+| ADM | 决策记录 | `docs/adm/adr/ADR-NNN.md` |
+| **SE** | **源码结构** | **`docs/se/source_structure.md`** |
+| **SE** | **模块接口** | **`docs/se/module_contracts.md`** |
+| TFD | TDD 规格 | `docs/tfd/tdd_spec.md` |
+| TFD | 验证支柱 | `docs/tfd/verification.md` |
+| PVO | Golden 基准 | `docs/pvo/golden_baseline.md` |
+| IG | 门禁清单 | `docs/ig/gate_checklist.md` |

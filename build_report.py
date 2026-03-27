@@ -37,7 +37,11 @@ SECTIONS = [
     # Part 4: 路线图
     "adm/roadmap.md",
 
-    # Part 5: 测试与验证 (TFD)
+    # Part 5: 软件工程 (SE)
+    "se/source_structure.md",
+    "se/module_contracts.md",
+
+    # Part 6: 测试与验证 (TFD)
     "tfd/tdd_spec.md",
     "tfd/verification.md",
     "tfd/detail_guards.md",
