@@ -27,10 +27,11 @@
 - **M15**: 全 Bank 压力测试
 
 ## Phase 5: 空间与驱动 (2-3天)
-- **M16**: 生命周期分析
-- **M17**: 8-Bank 着色分配
-- **M18**: 循环压缩 + INC 折叠
-- **M19**: 41-bit 二进制打包
+- **M16**: 生命周期分析与 Slot 冲突审计 (HSTSVerifier)
+- **M17**: 8-Bank 着色分配与物理寻址 (BalancedBankColorer)
+- **M18**: 多维循环拓扑折叠与 INC 注入 (Compactor v2)
+- **M19**: 41-bit 物理预算平衡微码封装 (BitPacker v5)
+- **M19B**: NOP-Loop 极致空隙压缩 (Sprint 5 Final)
 
 ## Phase 6: 集成 (5-7天)
 - **M20-M21**: 原子/组合算子模板

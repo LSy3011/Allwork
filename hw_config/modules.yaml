@@ -66,3 +66,11 @@ modules:
       - {name: wbank, bits: 3}
       - {name: waddr, bits: 8}
       - {name: wbe, bits: 16}
+
+  STB:
+    type: transfer
+    latency: 1
+    code_bits: 7
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: slot_id, bits: 6}

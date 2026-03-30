@@ -32,6 +32,14 @@
 - [ ] **[SE]** Stitcher 的 `stitch()` 签名与 `module_contracts.md` 一致
 - [ ] 零 FAIL, 零 SKIP
 
+### Sprint 5: 空间与驱动 (Binary Driver)
+- [x] **G5-1**: Slot 生命周期无 WAW/WAR 冲突 (HSTSVerifier 通关)
+- [x] **G5-2**: 所有模块支持 41-bit 动态位封装 (BitPacker 通关)
+- [x] **G5-3**: NOP-Loop 压缩指令物理长度对齐通过 (LIRPacker 通关)
+- [x] **G5-4**: 位预算冲突预警机制验证完成
+- [ ] LIR 算子序列化与反序列化一致性校验
+- [ ] LIR 内存布局与物理地址映射对齐
+
 ## Phase 5 → Phase 6 门禁
 - [ ] 8 Bank 着色无冲突
 - [ ] 循环 257 次正确拆分为两层嵌套

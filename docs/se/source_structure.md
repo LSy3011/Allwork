@@ -37,8 +37,10 @@ src/
 │   └── allocator.py              # 8-Bank 着色 (受 SMT exclusions 约束)
 │
 ├── driver/
-│   ├── emitter.py                # 41-bit 打包
-│   └── compressor.py             # 循环压缩 + 地址折叠
+│   ├── emitter.py                # LIRPacker (总调度与位预算审计)
+│   ├── compactor.py              # Compactor (RLE 压缩与 NOP-Loop 处理)
+│   ├── packer.py                 # BitPacker (ISA 统合位封装)
+│   └── field_mapper.py           # FieldMapper (逻辑到物理字段映射)
 │
 ├── core/
 │   ├── pipeline.py               # PassManager (11-Pass 级联)

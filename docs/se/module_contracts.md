@@ -39,11 +39,12 @@ class AllocationResult:
     # 断言: bank_map 必须满足所有 exclusions
 ```
 
-## 4. layout → driver 接口
+## 4. layout → driver 接口 (LIR Packer v5)
 ```python
 class EmissionResult:
     lir_stream: List[LIROp]
-    binary: bytes
+    iq_bin_map: Dict[str, bytes]    # iq_id → binary_image
+    compression_ratio: float
 ```
 
 ## 5. 接口原则
