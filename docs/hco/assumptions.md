@@ -14,6 +14,8 @@
 | A07 | R-W 冲突处理：写操作必须在同 Bank 读操作完成后执行 | orchestrator | RAW 顺序守卫 | ✅已确认 |
 | A08 | INC 字段仅针对 UR_READ/UR_WRITE 的地址偏移有效 | compactor.py | 地址折叠逻辑 | ✅已确认 |
 | A09 | EMBED 字段全 IQ 通用，通过 EMBED_END 位掩码配合嵌套 | packer.py    | 嵌套循环合成 | ✅已确认 |
+| A10 | SMC 的 8 个 Bank 物理离散，不支持跨 Bank 寻址 | allocator.py | 显存空间隔离 | ✅已确认 |
+| A11 | Bank 着色冲突时，触发 HSTS 重调度 (插入 NOP) | colorer.py   | 自动重调引擎 | ✅已确认 |
 
 ## 状态说明
 - ❓待确认：大模型的假设，需要你确认是否正确

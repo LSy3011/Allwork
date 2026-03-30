@@ -26,6 +26,8 @@
 - **M19-F02**: `LIRPacker.check_bit_budget_collision(code_width, tools_width) -> bool`
 - **M19-F03**: `Compactor.compress_with_nop_loop(stream) -> List[LIRPacket]`
 - **M19-F04**: `HSTSVerifier.trace_slot_lifetime(stream) -> Dict[int, Range]`
+- **M20-F01**: `BalancedBankColorer.assign_banks(tensor_objs, conflicts) -> Dict[str, int]`
+- **M20-F02**: `InterferenceAnalyzer.analyze_tensor_coexistence(dfg) -> List[Tuple[str, str]]`
 
 ## 测试原则
 - **属性测试优先**：测"所有 schedule 满足 RAW"，不测"sin 拍数=12"

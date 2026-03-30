@@ -1,41 +1,61 @@
-from typing import List, Dict
-from ir.mir.mir_op import MIROp
+from typing import List, Dict, Tuple, Set
 
 class BalancedBankColorer:
     """
-    AIACC 均衡 Bank 着色器：
-    利用启发式算法在 DFG 层面对 Bank 进行指派，以最小化 HSTS 调度中的资源冲突。
+    AIACC 8-Bank 均衡着色分配器。
+    基于图着色启发式算法，解决 8-Bank SMC 物理资源冲突。
     """
     @staticmethod
-    def color_dfg(ops: List[MIROp], num_banks: int = 8) -> List[MIROp]:
+    def assign_banks(tensors: List, conflicts: List[Tuple[str, str]], bank_num: int = 8):
         """
-        自动为 DFG 中的 UR_READ/UR_WRITE 节点分配 bank_id。
-        采用 Round-Robin 为主的散列分配策略，优先分散并发加载。
+        分配 Bank ID。
+        返回: (coloring, success)
         """
-        # 1. 提取所有需要 Bank 资源的节点
-        mem_ops = [op for op in ops if op.op_type in ["UR_READ", "UR_WRITE"]]
+        adj = {}
+        for t in tensors:
+            adj[t.name] = []
+            
+        for u, v in conflicts:
+            if u in adj and v in adj:
+                adj[u].append(v)
+                adj[v].append(u)
         
-        # 2. 简单的负载均衡指派（Round-Robin）
-        # 后续可以升级为基于逻辑依赖深度的“冲突敏感型”指派
-        current_bank = 0
-        
-        for op in mem_ops:
-            # 如果是常量系数，我们将其聚集在 Bank 2-5 (模拟典型 AIACC 布局)
-            if op.node_id.startswith("c"):
-                # 假设常量分布在特定范围，减少对变量 Bank 的挤占
-                if "1" in op.node_id: op.metadata["bank_id"] = 2
-                elif "2" in op.node_id: op.metadata["bank_id"] = 3
-                elif "3" in op.node_id: op.metadata["bank_id"] = 4
-                else: op.metadata["bank_id"] = 5
-            else:
-                # 变量 (x, y, out) 使用 0, 1, 6, 7 均衡扩展
-                available_variable_banks = [0, 1, 6, 7]
-                op.metadata["bank_id"] = available_variable_banks[current_bank % len(available_variable_banks)]
-                current_bank += 1
-                
-        return ops
+        coloring = {}
+        # 1. 处理手动锁定
+        for t in tensors:
+            if hasattr(t, 'manual_bank') and t.manual_bank is not None:
+                coloring[t.name] = t.manual_bank
 
-    @staticmethod
-    def get_auto_mapping(ops: List[MIROp]) -> Dict[str, int]:
-        """返回节点到 Bank 的映射关系表"""
-        return {op.node_id: op.metadata.get("bank_id") for op in ops if "bank_id" in op.metadata}
+        # 2. 启发式：按度数排序
+        unassigned = [t for t in tensors if t.name not in coloring]
+        unassigned.sort(key=lambda t: len(adj[t.name]), reverse=True)
+        
+        success = True
+        for t in unassigned:
+            used_colors = {coloring[neighbor] for neighbor in adj[t.name] if neighbor in coloring}
+            
+            # 计算合法 Bank 的负载情况
+            bank_load = {b: 0 for b in range(bank_num)}
+            for name, b in coloring.items():
+                if b < bank_num: # 仅统计物理 Bank 的负载
+                    bank_load[b] += 1
+            
+            # 寻找负载均衡下的最佳位置
+            best_color = None
+            min_load = float('inf')
+            for b in range(bank_num):
+                if b not in used_colors:
+                    if bank_load[b] < min_load:
+                        min_load = bank_load[b]
+                        best_color = b
+            
+            if best_color is not None:
+                coloring[t.name] = best_color
+            else:
+                success = False
+                # 冲突无法消除，暂时溢出 (Overflow) 分配。
+                # 溢出号计算：max(used_colors) + 1，确保之后计算 used_colors 时不会撞车
+                ov_color = max(used_colors) + 1 if used_colors else bank_num
+                coloring[t.name] = ov_color
+                
+        return coloring, success
