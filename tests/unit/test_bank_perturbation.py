@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 from orchestrator.stitcher import HSTSStitcher
 
 def stress_test_bank_combinations(num_trials=5):
@@ -28,7 +28,7 @@ def stress_test_bank_combinations(num_trials=5):
                 op.metadata["bank_id"] = random_banks[op.node_id]
         
         # 尝试求解与缝合
-        smt_res = synthesizer.solve(ops, mode="extreme")
+        smt_res = synthesizer.solve(ops, strategy="extreme")
         if not smt_res:
             print(f"Trial {i}: [FAILED] SMT UNSAT with local Bank mapping.")
             continue

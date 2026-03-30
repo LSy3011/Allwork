@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.cos import get_cos_8order_dfg
+from library.atomic.transcendentals.cos import get_cos_8order_dfg
 from orchestrator.stitcher import HSTSStitcher
 from orchestrator.spec_renderer import HSTSSpecRenderer
 
@@ -18,13 +18,13 @@ class TestCosStitcher(unittest.TestCase):
         
         ops = get_cos_8order_dfg()
         # 求解单个 Cos 的物理最优解
-        smt_res = synthesizer.solve(ops, mode="extreme")
+        smt_res = synthesizer.solve(ops, strategy="extreme")
         self.assertIsNotNone(smt_res)
         
         # 三联 Cos 串联
         stitcher.add_operator("cos_A", ops, smt_res)
-        stitcher.add_operator("cos_B", ops, smt_res)
-        stitcher.add_operator("cos_C", ops, smt_res)
+        stitcher.add_operator("cos_B", get_cos_8order_dfg(), smt_res)
+        stitcher.add_operator("cos_C", get_cos_8order_dfg(), smt_res)
         
         final_stream = stitcher.get_final_stream()
         

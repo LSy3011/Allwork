@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 from orchestrator.factory import FootprintFactory
 
 class TestHSTSStitcher(unittest.TestCase):
@@ -18,7 +18,7 @@ class TestHSTSStitcher(unittest.TestCase):
         ops = get_sin_8order_dfg()
         
         # 1. 合成第一个 sin 指令流并转化为 FootprintMask
-        result = synthesizer.solve(ops, mode="extreme")
+        result = synthesizer.solve(ops, strategy="extreme")
         self.assertIsNotNone(result)
         mask_master = FootprintFactory.from_smt_result(ops, result)
         

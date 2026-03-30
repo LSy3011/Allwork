@@ -20,10 +20,10 @@ def test_conv2d_multi_dim_folding(ur_read_iq):
     """
     # 1. 产生线性物理流
     gen = Conv2DGenerator(in_shape=(1, 4, 4), kernel=(2, 2), stride=1)
-    mock_op_list = gen.emit_mock_stream(bank=0)
+    mock_op_list = gen.generate_parallel_lir(ibank=0, wbank=1)
     
     # 格式转换: [(t, payload, is_rigid), ...] 为 Compactor 输入
-    stream = [(op["t"], op["payload"], False) for op in mock_op_list]
+    stream = [(op["t"], op["raddr"], False) for op in mock_op_list if op.get("iq_id") == 0]
     
     # 2. 调用 7D 极致压缩
     folded = Compactor.compress_iq_stream(stream, ur_read_iq)

@@ -4,7 +4,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_mir_chain
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 
 def test_sin_8th_order_synthesis():
     print("🚀 开始合成物理级联版 sin APB 时序 (UR->RtoVR->Unit->...->UR_W)...")
@@ -13,7 +13,7 @@ def test_sin_8th_order_synthesis():
     synthesizer = SMTSynthesizer(spec)
     
     # 1. 加载模板
-    ops = get_sin_mir_chain()
+    ops = get_sin_8order_dfg()
     print(f"   [Input] 模板共有 {len(ops)} 个脉冲节点")
     
     # 2. 求解

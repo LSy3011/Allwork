@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
 from synthesis.regression_manager import RegressionManager
-from library.atomic.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 
 class TestOperatorStability(unittest.TestCase):
     """
@@ -25,7 +25,7 @@ class TestOperatorStability(unittest.TestCase):
         for mode in ["stable", "extreme"]:
             with self.subTest(mode=mode):
                 print(f"Running Stability Check: {name} in {mode} mode...")
-                result = self.synthesizer.solve(ops, mode=mode)
+                result = self.synthesizer.solve(ops, strategy=mode)
                 
                 # 基准校验 1: 必须有解 (SAT) - 如果连 SAT 都没了，公理层就写崩了
                 self.assertIsNotNone(result, f"❌ FATAL: {name} in {mode} is now UNSAT. Axiom regression detected!")

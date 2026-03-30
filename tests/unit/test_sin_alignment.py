@@ -4,7 +4,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_dfg_template
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 
 def print_data_path_alignment_table(ops, result):
     """
@@ -48,7 +48,7 @@ def print_data_path_alignment_table(ops, result):
 def test_sin_detailed_alignment():
     spec = HardwareSpec.load("hw_config")
     synthesizer = SMTSynthesizer(spec)
-    ops = get_sin_dfg_template()
+    ops = get_sin_8order_dfg()
     result = synthesizer.solve(ops)
     
     if result:

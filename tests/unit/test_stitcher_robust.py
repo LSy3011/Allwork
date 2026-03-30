@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 from orchestrator.stitcher import HSTSStitcher
 
 import os
@@ -19,12 +19,12 @@ class TestRobustStitcher(unittest.TestCase):
         stitcher = HSTSStitcher()
         
         ops = get_sin_8order_dfg()
-        smt_res = synthesizer.solve(ops, mode="extreme")
+        smt_res = synthesizer.solve(ops, strategy="extreme")
         self.assertIsNotNone(smt_res)
         
         stitcher.add_operator("sin_A", ops, smt_res)
-        stitcher.add_operator("sin_B", ops, smt_res)
-        stitcher.add_operator("sin_C", ops, smt_res)
+        stitcher.add_operator("sin_B", get_sin_8order_dfg(), smt_res)
+        stitcher.add_operator("sin_C", get_sin_8order_dfg(), smt_res)
         
         final_stream = stitcher.get_final_stream()
         

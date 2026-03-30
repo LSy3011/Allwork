@@ -4,7 +4,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_dfg_template
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 
 def generate_ascii_timeline(ops, result):
     if not result: return "UNSAT"
@@ -40,7 +40,7 @@ def generate_ascii_timeline(ops, result):
 def test_sin_dfg_report():
     spec = HardwareSpec.load("hw_config")
     synthesizer = SMTSynthesizer(spec)
-    ops = get_sin_dfg_template()
+    ops = get_sin_8order_dfg()
     result = synthesizer.solve(ops)
     
     print("\n" + "="*80)

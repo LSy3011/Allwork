@@ -70,6 +70,7 @@ class HSTSStitcher:
             
             # 属性刷新
             op.metadata["global_t"] = global_t
+            op.metadata["t"] = local_t
             op.metadata["instance_name"] = instance_name
             
             # 全局物理足迹占用

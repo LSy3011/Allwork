@@ -4,7 +4,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 
 def get_char(name):
     if "FPMUL" in name: return "m"
@@ -48,7 +48,7 @@ def run_sin_spec_review():
     print("\n[SECTION 2: DUAL-MODE PERFORMANCE BENCHMARKING]")
     
     for mode in ["stable", "extreme"]:
-        result = synthesizer.solve(ops, mode=mode)
+        result = synthesizer.solve(ops, strategy=mode)
         if not result:
             print(f"❌ {mode.upper()} MODE: UNSAT (Physical Constraint Conflict Detected)")
             continue

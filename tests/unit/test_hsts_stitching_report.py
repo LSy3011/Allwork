@@ -4,7 +4,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from api.hw_spec import HardwareSpec
 from synthesis.backend import SMTSynthesizer
-from library.atomic.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.sin import get_sin_8order_dfg
 
 def get_char(op_type, instance_tag):
     chars = {"FPMUL": "m", "FPADD": "a", "RTOVR": "r", "UR_READ": "L", "UR_WRITE": "S"}
@@ -17,7 +17,7 @@ def render_stitched_wave(offset: int = 2):
     spec = HardwareSpec.load("hw_config")
     synthesizer = SMTSynthesizer(spec)
     ops = get_sin_8order_dfg()
-    result = synthesizer.solve(ops, mode="extreme")
+    result = synthesizer.solve(ops, strategy="extreme")
     if not result: return
     
     max_t_single = max(result.values())
