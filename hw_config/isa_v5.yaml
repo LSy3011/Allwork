@@ -1,0 +1,26 @@
+# AIACC V5.0 Unified ISA Specification (41-bit)
+# 职责：定义 LIR Packer 在封装位流时的绝对物理偏移与字段优先级逻辑
+
+common_header:
+  - { name: VLD,        offset: 40, width: 1 }
+  - { name: JUMP,       offset: 39, width: 1 }
+  - { name: EMBED,      offset: 36, width: 3 }
+  - { name: EMBED_END,  offset: 30, width: 6 }
+
+compaction_tools:
+  - { name: LOOPS,      offset: 20, width: 10 }
+  - { name: COND,       offset: 13, width: 7 }
+  - { name: DLY,        offset: 10, width: 3 }
+
+# 业务载荷区 (CODE与INC及其它扩展属性的复用区)
+payload_region:
+  - { name: INC,        offset: 6,  width: 4 }
+  - { name: INC_EMBED,  offset: 0,  width: 6 }
+  - { name: CODE,       offset: 0,  width: 30 } # 最大的 CODE 跨度可覆盖到 COND 之下
+
+# 针对不同 IQ 的 Payload 提取规则 (映射自 modules.yaml)
+iq_profiles:
+  FPADD:    { code_lsb: 0, code_width: 10, use_inc: true }
+  FPMUL:    { code_lsb: 0, code_width: 8,  use_inc: true }
+  UR_WRITE: { code_lsb: 0, code_width: 28, use_inc: false } # UR_WRITE 占用位宽大，会盖掉 DLY/INC
+  RTOVR:    { code_lsb: 0, code_width: 7,  use_inc: false }

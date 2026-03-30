@@ -15,6 +15,14 @@ iq_config:
     INC_HIGH: 7
     INC_LOW: 3
 
+  IQ_FPMUL:
+    module: FPMUL
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    EN_DLY: true
+    BITS_DLY: 4
+    BITS_CODE: 8
+
   IQ_STB:
     module: STB
     EN_LOOPS: true
