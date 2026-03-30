@@ -1,50 +1,64 @@
-import copy
-from typing import List, Dict, Tuple
+from typing import List, Dict, Set
 from ir.mir.mir_op import MIROp
-from .footprint import FootprintMask
-from .factory import FootprintFactory
 
 class HSTSStitcher:
     """
-    AIACC HSTS 缝合器：将多个已合成的算子物理流合并为一个全局指令流。
-    核心原则：物理资源绝对互斥。
+    异构算子缝合器 (Heterogeneous Stitcher)。
+    负责将多个独立算子的物理足迹在统一的时间轴上进行“无冲突咬合”。
     """
     def __init__(self):
-        self.global_mask = FootprintMask()
-        self.global_ops: List[MIROp] = []
-        self.max_t = 0
+        self.final_stream: List[MIROp] = []
+        self.occupied_t_iq: Dict[int, Set[int]] = {}   # {global_t: set(iq_ids)}
+        self.occupied_t_bank: Dict[int, Set[int]] = {} # {global_t: set(bank_ids)}
+        self.current_max_t = 0
+        self.op_instances = []
 
-    def add_operator(self, name: str, ops: List[MIROp], smt_result: Dict[str, int]) -> int:
-        """
-        向全局流中安全插入一个算子。
-        返回该算子被安置的起始 Phase (Offset)。
-        """
-        # 1. 提取该算子的足迹
-        op_mask = FootprintFactory.from_smt_result(ops, smt_result)
-        
-        # 2. 搜索最早的安全合入点
-        # 初始步进为 1 拍周期，直到无物理冲突 (IQ/BANK/SLOT)
+    def _check_conflict(self, stream: List[MIROp], synthesis_res: Dict[str, int], offset: int) -> bool:
+        """检查在该偏移量下是否存在 IQ 发射或 Bank 访问冲突"""
+        for op in stream:
+            # 使用 SMT 求解出的 t
+            local_t = synthesis_res[op.node_id]
+            global_t = local_t + offset
+            
+            # 1. 检查 IQ 冲突
+            if global_t in self.occupied_t_iq:
+                if "iq_id" in op.metadata and op.metadata["iq_id"] in self.occupied_t_iq[global_t]:
+                    return True
+            
+            # 2. 检查 Bank 冲突
+            if global_t in self.occupied_t_bank:
+                if "bank_id" in op.metadata and op.metadata["bank_id"] in self.occupied_t_bank[global_t]:
+                    return True
+        return False
+
+    def add_operator(self, name: str, stream: List[MIROp], synthesis_res: Dict[str, int]) -> int:
         offset = 0
-        while self.global_mask.conflicts_with(op_mask, offset=offset):
+        while self._check_conflict(stream, synthesis_res, offset):
             offset += 1
             
-        # 3. 确定入场！合并足迹到全局表 (带原子计数功能)
-        self.global_mask.merge(op_mask, offset=offset)
+        instance_name = f"{name}_{len(self.op_instances)}"
+        self.op_instances.append(instance_name)
         
-        # 4. 克隆并平移算子的物理坐标
-        for op in ops:
-            new_op = copy.deepcopy(op)
-            t_rel = smt_result[op.node_id]
-            # 记录平移后的全局时间与原始相对时间
-            new_op.metadata["t"] = t_rel
-            new_op.metadata["global_t"] = t_rel + offset
-            new_op.metadata["instance_name"] = name
-            self.global_ops.append(new_op)
-            self.max_t = max(self.max_t, t_rel + offset)
+        for op in stream:
+            local_t = synthesis_res[op.node_id]
+            global_t = local_t + offset
+            
+            # 注入时序信息
+            op.metadata["t"] = local_t
+            op.metadata["global_t"] = global_t
+            op.metadata["instance_name"] = instance_name
+            
+            # 更新全局占用
+            if "iq_id" in op.metadata:
+                self.occupied_t_iq.setdefault(global_t, set()).add(op.metadata["iq_id"])
+            if "bank_id" in op.metadata:
+                self.occupied_t_bank.setdefault(global_t, set()).add(op.metadata["bank_id"])
+            
+            self.final_stream.append(op)
+            self.current_max_t = max(self.current_max_t, global_t)
             
         print(f"HSTS: Operator [{name}] stitched safely at offset {offset}.")
         return offset
 
     def get_final_stream(self) -> List[MIROp]:
-        """返回有序的全局指令流"""
-        return sorted(self.global_ops, key=lambda x: x.metadata["global_t"])
+        return sorted(self.final_stream, key=lambda x: x.metadata["global_t"])

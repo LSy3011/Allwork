@@ -10,6 +10,7 @@ from orchestrator.stitcher import HSTSStitcher
 from orchestrator.colorer import BalancedBankColorer
 from orchestrator.memory_allocator import MemoryAllocator
 from orchestrator.spec_renderer import HSTSSpecRenderer
+from orchestrator.verifier import HSTSVerifier
 
 # 批量导出工业级算子 (Final Sweep) - 覆盖 15-20 个工业级顶级负载
 from library.atomic.transcendentals.sin_cos_exp import get_sin_industrial_dfg, get_exp_industrial_dfg
@@ -57,7 +58,11 @@ class TestBatch6FinalStress(unittest.TestCase):
                 op.metadata["p_addr"] = mem_alloc.allocate(op.node_id, op.metadata["bank_id"], 
                                                           inst_idx=op.metadata["instance_name"], is_const=is_c)
 
-        # 3. 产物固化
+        # 3. 物理规格审计 (Bit-Perfect Audit)
+        is_valid = HSTSVerifier.verify(final_stream, spec)
+        self.assertTrue(is_valid, "Final Physical Stream failed Timing/Resource Audit!")
+
+        # 4. 产物固化
         build_dir = Path(__file__).parent.parent.parent / "build" / "test" / "batch6_final"
         os.makedirs(build_dir, exist_ok=True)
         spec_file = str(build_dir / "batch6.precision.spec")
@@ -66,7 +71,7 @@ class TestBatch6FinalStress(unittest.TestCase):
         last_offset = max((op.metadata["global_t"] - op.metadata["t"] for op in final_stream))
         avg_ph = last_offset / (len(workload)-1)
         print(f"\n[STRESS] Final Batch 6 (15 Ops) COMPLETED. Avg Phase Shift: {avg_ph:.2f} cycles/op")
-        print(f"✅ Spec Solidified at: {spec_file}")
+        print(f"✅ Spec Solidified and Audited at: {spec_file}")
 
 if __name__ == "__main__":
     unittest.main()
