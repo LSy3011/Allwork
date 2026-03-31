@@ -57,11 +57,15 @@ class HSTSStitcher:
         while self._check_conflict(stream, synthesis_res, offset):
             offset += 1
             
-        # 4. 提交缝合结果，并记录本实例元数据
+        # 4. 提交缝合结果 (由高保真物理持续时间驱动)
+        # 🛸 关键物理对齐：end_t 必须涵盖数据处理的 64 拍 (如果是 256 元素)
+        # 我们假设 synthesis_res 中包含的是发射偏移，这里增加物理 Busy 时间
         max_local_t = max(synthesis_res.values()) if synthesis_res else 0
+        busy_cycles = 64 # 256 位宽的物理实消耗拍数
+        
         self.op_metadata[instance_name] = {
             "start_t": offset,
-            "end_t": offset + max_local_t
+            "end_t": offset + max_local_t + busy_cycles 
         }
         
         for op in stream:

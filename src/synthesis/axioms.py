@@ -92,7 +92,21 @@ class SynthesisAxioms:
 
     @staticmethod
     def add_bank_conflict_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef]):
-        pass
+        """
+        Bank 端口物理隔离公理。
+        同一个 Bank 在同一拍只能被一个 UR_READ 或 UR_WRITE 访问。
+        """
+        bank_ops = [o for o in ops if "bank_id" in o.metadata]
+        bank_groups = {}
+        for op in bank_ops:
+            bid = op.metadata["bank_id"]
+            bank_groups.setdefault(bid, []).append(op.node_id)
+        
+        for bid, op_ids in bank_groups.items():
+            if len(op_ids) > 1:
+                SynthesisAxioms._add_constraint(
+                    solver, z3.Distinct([t_vars[oid] for oid in op_ids]), 
+                    f"bank_mutex_{bid}")
 
     @staticmethod
     def add_objective(solver: z3.Optimize, t_vars: Dict[str, z3.ArithRef]):

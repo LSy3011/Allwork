@@ -96,14 +96,40 @@ class Compactor:
         return chain
 
     @staticmethod
-    def _pass1_linear_folding(stream: List[Tuple[int, int, bool]], iq_conf) -> List[Dict]:
-        """与 V5/V6/V7 逻辑一致。"""
+    def _pass1_linear_folding(stream, iq_conf) -> List[Dict]:
+        """与 V5/V6/V7 逻辑一致。兼容 tuple 和 dict 输入。"""
         if not stream: return []
+        
+        # 归一化：兼容 tuple (t, payload, flag) 和 dict {"t":, "payload":} 两种格式
+        normalized = []
+        for item in stream:
+            if isinstance(item, dict):
+                normalized.append((item["t"], item["payload"], False))
+            else:
+                normalized.append(item)
+        stream = normalized
+        
         res = []
         i = 0
+        next_expected_t = 0 # 🛰️ 全局物理对位点
         max_loops = (1 << iq_conf.BITS_LOOPS) - 1 if iq_conf.EN_LOOPS else 0
+        
         while i < len(stream):
             t_curr, p_curr, _ = stream[i]
+            
+            # --- 🛸 核心修复：物理气泡注入 (Gap Filling) ---
+            # 如果 SMT 算出的点火时间 t_curr 超过了预期时间，说明中间有气泡。
+            # 补齐有效位 VALID=0 的物理指令。
+            while next_expected_t < t_curr:
+                res.append({
+                    "t": next_expected_t, 
+                    "payload": 0, 
+                    "loops": 0, "dly": 0, "inc": 0, 
+                    "embed": 0, "embed_end": 0,
+                    "valid": 0  # 明确标记为 NOP
+                })
+                next_expected_t += 1
+            
             loops, stride = 0, 0
             if iq_conf.EN_INC and i + 1 < len(stream):
                 t_next, p_next, _ = stream[i+1]
@@ -114,18 +140,26 @@ class Compactor:
                         while j < len(stream) and loops < max_loops:
                             t_j, p_j, _ = stream[j]
                             if t_j == t_curr + (j - i) and p_j == p_curr + stride * (j - i):
-                                loops += 1
-                                j += 1
+                                loops += 1; j += 1
                             else: break
+            
             if loops == 0 and iq_conf.EN_LOOPS:
                 j = i + 1
                 while j < len(stream) and loops < max_loops:
                     t_j, p_j, _ = stream[j]
                     if t_j == t_curr + (j - i) and p_j == p_curr:
-                        loops += 1
-                        j += 1
+                        loops += 1; j += 1
                     else: break
-            cmd = {"t": t_curr, "payload": p_curr, "loops": loops, "dly": 0, "inc": stride, "embed": 0, "embed_end": 0}
+            
+            cmd = {
+                "t": t_curr, "payload": p_curr, 
+                "loops": loops, "dly": 0, "inc": stride, 
+                "embed": 0, "embed_end": 0,
+                "valid": 1 # 物理点火
+            }
             i += (loops + 1)
+            # 物理时间轴推进包含循环占据的周期
+            next_expected_t = t_curr + (loops + 1)
             res.append(cmd)
+            
         return res
