@@ -27,9 +27,9 @@ class BitPacker:
         header |= ((jump & 1) << 39)            # [39]
         header |= (1 << 40)                     # [40] VLD
 
-        # 2. 纵向级联 (CODE 是 MSB, Header 是 LSB)
+        # 2. 纵向级联 (Header 是 MSB, CODE 是 LSB)
         bits_code = iq_conf.BITS_CODE
-        full_instr = (payload << 41) | (header & 0x1FFFFFFFFFF)
+        full_instr = (header << bits_code) | (payload & ((1 << bits_code) - 1))
         
         return full_instr
 
