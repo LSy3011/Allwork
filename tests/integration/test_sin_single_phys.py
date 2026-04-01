@@ -1,100 +1,45 @@
-import os, sys, json, numpy as np, unittest, subprocess, struct
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
-sys.path.append(str(Path(__file__).parent.parent.parent / "sim"))
-
-from api.hw_spec import HardwareSpec
-from synthesis.backend import SMTSynthesizer
-from orchestrator.stitcher import HSTSStitcher
+import pytest
+import numpy as np
 from library.atomic.transcendentals.sin import get_sin_8order_dfg
+from api.op_tester import OperatorPhysicalTester
 
-class TestSinSingle(unittest.TestCase):
-    def test_single_element_phys(self):
-        ws = Path(__file__).parent.parent.parent
-        out = ws / "build" / "sin_audit_single"
-        if out.exists(): import shutil; shutil.rmtree(out)
-        out.mkdir(parents=True, exist_ok=True)
-
-        # 1. 🛸 数据生成 (对齐 Bit-Perfect 验证)
-        num_elements = 1
-        x_data = np.random.uniform(-3.14, 3.14, num_elements).astype(np.float32)
-        golden_y = np.sin(x_data).astype(np.float32)
+class TestSinPhysicalIndustrialized:
+    """
+    [Standard SOP] 使用工业化测座 v6.6 进行 Sin 算子单点物理验证。
+    """
+    def test_sin_parity_baseline(self):
+        # 1. 初始化测试基座 (统一规格)
+        tester = OperatorPhysicalTester()
         
-        # 存入标准路径
-        np.savez(out / "input_data.npz", x=x_data)
-        np.savez(out / "golden_data.npz", y=golden_y)
-
-        # 2. 🛸 编译器核心流程: SMT 寻优 & 物理缝合
-        spec = HardwareSpec.load("hw_config")
-        synthesizer = SMTSynthesizer(spec)
-        stitcher = HSTSStitcher()
+        # 2. 生成 8 阶泰勒 DFG
+        dfg_ops = get_sin_8order_dfg()
         
-        sin_ops = get_sin_8order_dfg()
-        sin_res = synthesizer.solve(sin_ops, strategy="balanced")
-        stitcher.add_operator("Sin", sin_ops, sin_res)
-        final_stream = stitcher.get_final_stream()
-
-        # 3. 🛸 全算法驱动: 自动反射 DFG 的物理 Bank 分配与张量元数据
-        banks = {i: [0]*4 for i in range(8)}
-        tensors_meta = []
+        # 3. 准备物理测试数据
+        x = np.array([1.5707], dtype=np.float32)
+        y_ref = np.sin(x).astype(np.float32)
         
-        for op in sin_ops:
-            if "bank_id" in op.metadata:
-                b = op.metadata["bank_id"]
-                node = op.node_id
-                if node == "x_rd" or node == "x_f_rd":
-                    banks[b] = [x_data[0], 0, 0, 0]
-                elif node == "c1_rd": banks[b] = [0.00019841, 0, 0, 0]
-                elif node == "c2_rd": banks[b] = [0.00833333, 0, 0, 0]
-                elif node == "c3_rd": banks[b] = [0.16666667, 0, 0, 0]
-                elif node == "c4_rd": banks[b] = [1.0, 0, 0, 0]
-                elif node == "w_y": banks[b] = [x_data[0]**2, 0, 0, 0] # 物理辅助点火
-                
-                # 构造元数据以对齐 Emitter(bank_id) 和 physical_runner(bank)
-                role = "output" if node == "w_fin" else "input"
-                name = "y" if node == "w_fin" else node.replace("_rd", "").replace("_f", "")
-                tensors_meta.append({
-                    "name": name, "bank": b, "bank_id": b, 
-                    "addr": 0, "offset": 0, "shape": [1], 
-                    "role": role, "initial_data": None
-                })
-
-        class ProgramProxy:
-            def __init__(self, banks_dict, tensors):
-                class Allocator: pass
-                self.memory_allocator = Allocator()
-                self.memory_allocator.banks = banks_dict
-                self.tensors = {t["name"]: type("T", (), t) for t in tensors}
+        # 泰勒级数常量表 (严格对齐 8 阶展开系数)
+        sin_constants = {
+            "c1_rd": 1.984127e-4, 
+            "c2_rd": 8.333333e-3, 
+            "c3_rd": 1.666667e-1, 
+            "c4_rd": 1.0,          
+            "w_y": x[0]**2        
+        }
         
-        prog = ProgramProxy(banks, tensors_meta)
-
-        # 4. 🛸 发射标准 ACB 目录结构 (Emitter 会自动打包 tensors 到 sim_config)
-        from driver.emitter import LIRPacker
-        packer = LIRPacker("hw_config")
-        print(f"\n[DEBUG] final_stream has {len(final_stream)} ops.")
-        packer.emit_from_stream(final_stream, str(out), program=prog)
+        # 4. 执行全自动物理验证 (向 build/sin/ 归档)
+        success, msg = tester.run_full_stack_verification(
+            op_name="Sin",
+            dfg_ops=dfg_ops,
+            input_data={"x_rd": x, "x_f_rd": x},
+            golden_y=y_ref,
+            constants=sin_constants,
+            strategies=["balanced"], # 走标准平衡策略
+            max_cycles=120
+        )
         
-        # 修正 sim_config.json 中的 max_cycles 为 120 (对齐标准时序)
-        conf_path = out / "sim_config.json"
-        with open(conf_path, "r") as f: sim_conf = json.load(f)
-        sim_conf["max_cycles"] = 120
-        with open(conf_path, "w") as f: json.dump(sim_conf, f, indent=2)
-        
-        print(f"\n[DONE] Algorithm-Driven Sin Case emitted to: {out}")
+        assert success, f"Sin 物理对齐测试失败: {msg}"
+        print(f"\n✅ Sin 工业化分层验证 (v6.6) PASSED")
 
-        # 5. 🛸 启动物理仿真器 (它会自动基于 tensors_meta 进行验证)
-        env = os.environ.copy()
-        env["PYTHONPATH"] = f"{ws}:{ws}/src:{ws}/sim:" + env.get("PYTHONPATH", "")
-        runner = ws / "sim" / "smc_simulator" / "tools" / "physical_runner.py"
-        res = subprocess.run([sys.executable, str(runner), str(out)], env=env, capture_output=True, text=True)
-        
-        print(res.stdout)
-        if res.returncode != 0:
-            print(res.stderr)
-            self.fail("Simulation verification failed! See logs above.")
-        
-        print("✅ Correctness Verified via Dynamic Algorithm Metadata!")
-
-if __name__ == "__main__": unittest.main()
-
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    pytest.main([__file__, "-s"])
