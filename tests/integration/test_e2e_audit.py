@@ -61,8 +61,8 @@ def run_step_by_step_audit(case_dir: str, max_cycles: int = 40):
             break
 
 if __name__ == "__main__":
-    # 默认路径：由 test_e2e.py 生成的 build 目录
-    case_path = "build/e2e_sin_atan2_acb"
+    # 默认路径：由 test_sin_single_phys.py 生成的 build 目录
+    case_path = "build/sin_audit_single"
     if not os.path.exists(case_path):
         print(f"Error: Case directory {case_path} not found. Run test_e2e.py first.")
     else:

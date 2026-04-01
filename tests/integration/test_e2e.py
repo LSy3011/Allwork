@@ -135,36 +135,9 @@ class TestE2EValidation(unittest.TestCase):
                     "shape": [256], "role": t.role
                 })
 
-        # 7. 生成仿真器 Config
-        sim_config = {
-            "smc_id": 0, "max_cycles": 2000,
-            "iq_init": {
-                "IQ_UR_READ": "smc_0/iq_ur-r0.hex", "IQ_UR_WRITE": "smc_0/iq_ur-w0.hex",
-                "IQ_FPADD": "smc_0/iq_fpadd.hex", "IQ_FPMUL": "smc_0/iq_fpmul.hex", "IQ_RTOVR": "smc_0/iq_rtovr-X.hex"
-            },
-            "ur_init": { str(t.bank_id): f"smc_0/ur_data/bank{t.bank_id}.hex" for t in allocated_tensors if t.role != "scratch"},
-            "tensors": tensor_specs
-        }
-        with open(output_dir / "sim_config.json", "w") as f:
-            json.dump(sim_config, f, indent=4)
-            
-        # 7. 导出高保真指令流 (.hex 格式)
-        from driver.emitter import LIRPacker
-        smc_output = output_dir / "smc_0"
-        os.makedirs(smc_output, exist_ok=True)
-        
+        # 7. 导出高保真指令流与 Config (.hex 格式，标准 ACB 布局)
         packer = LIRPacker(str(workspace_dir / "hw_config"))
-        packer.emit_from_stream(final_stream, str(smc_output))
-        
-        # 8. 🛸 自动刷新仿真器加载 Config
-        iq_init_map = {}
-        for hf in smc_output.glob("*.hex"):
-            iq_key = hf.stem.upper()
-            iq_init_map[iq_key] = f"smc_0/{hf.name}"
-            
-        sim_config["iq_init"] = iq_init_map
-        with open(output_dir / "sim_config.json", "w") as f:
-            json.dump(sim_config, f, indent=4)
+        packer.emit_from_stream(final_stream, str(output_dir))
         # 9. 写入 Bank HEX
         def write_bank_hex(bank_id, tensor_data_list):
             with open(ur_data_dir / f"bank{bank_id}.hex", "w") as f:

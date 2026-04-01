@@ -128,20 +128,16 @@ class TestSoftwareArchitectureCoverage(unittest.TestCase):
         )
         
         # 4. 利用仿真器的原生物理解码器进行截取解析
-        header_bits = hex_val >> iq_conf.BITS_CODE
-        vld = (header_bits >> 40) & 1
-        loops = (header_bits >> 20) & 0x3FF
-        dly = (header_bits >> 10) & 0x7
-        inc = (header_bits >> 6) & 0xF
+        decoded_instr = decoder.decode(hex_val)
         
-        # 验证物理 Header 对齐
-        self.assertEqual(vld, 1, "VLD bit mismatch")
-        self.assertEqual(loops, header_kwargs.get("loops", 0), "Loops field mismatch")
-        self.assertEqual(dly, header_kwargs.get("dly", 0), "DLY field mismatch")
-        self.assertEqual(inc, header_kwargs.get("inc", 0), "INC field mismatch")
+        # 验证物理 Header 对齐 (利用解码器返回的语义字段)
+        self.assertEqual(decoded_instr.VLD, 1, "VLD bit mismatch")
+        self.assertEqual(decoded_instr.LOOPS, header_kwargs.get("loops", 0), "Loops field mismatch")
+        self.assertEqual(decoded_instr.DLY, header_kwargs.get("dly", 0), "DLY field mismatch")
+        self.assertEqual(decoded_instr.INC, header_kwargs.get("inc", 0) if header_kwargs.get("inc", 0) >= 0 else header_kwargs.get("inc", 0), "INC field mismatch")
         
         # 验证物理 Payload 位截取
-        fields = decoder.decode(hex_val).to_dict()
+        fields = decoded_instr.to_dict()
         
         pos = 0
         for field in u_spec.micro_instructions:
