@@ -20,3 +20,6 @@ micro_instructions:
 - field: ADDR
   width: 8
   default: 0
+- field: SMC_ID
+  width: 5
+  default: 0

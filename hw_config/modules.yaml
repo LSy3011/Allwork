@@ -7,10 +7,10 @@ modules:
     code_bits: 10
     code_fields:
       - {name: vld, bits: 1}
-      - {name: src_prec, bits: 1} # 0:16bit, 1:32bit
-      - {name: dst_prec, bits: 1} # 0:16bit, 1:32bit
+      - {name: src_prec, bits: 1}
+      - {name: dst_prec, bits: 1}
       - {name: up_stat_en, bits: 1}
-      - {name: add_or_sub, bits: 1} # 0:ADD, 1:SUB
+      - {name: add_or_sub, bits: 1}
       - {name: smc_id_en, bits: 5}
     parallelism:
       prec_16bit:
@@ -28,8 +28,8 @@ modules:
     code_bits: 8
     code_fields:
       - {name: vld, bits: 1}
-      - {name: src_prec, bits: 1} # 0:16bit, 1:32bit
-      - {name: dst_prec, bits: 1} # 0:16bit, 1:32bit
+      - {name: src_prec, bits: 1}
+      - {name: dst_prec, bits: 1}
       - {name: smc_id_en, bits: 5}
     # 核心拆分对齐逻辑
     parallelism:
@@ -51,21 +51,23 @@ modules:
   UR_READ:
     type: memory_access
     latency: 1
-    code_bits: 12
+    code_bits: 17
     code_fields:
       - {name: re, bits: 1}
       - {name: rbank, bits: 3}
       - {name: raddr, bits: 8}
+      - {name: smc_id_en, bits: 5}
 
   UR_WRITE:
     type: memory_access
     latency: 1
-    code_bits: 28
+    code_bits: 33
     code_fields:
       - {name: we, bits: 1}
       - {name: wbank, bits: 3}
       - {name: waddr, bits: 8}
       - {name: wbe, bits: 16}
+      - {name: smc_id_en, bits: 5}
 
   STB:
     type: transfer
@@ -74,3 +76,20 @@ modules:
     code_fields:
       - {name: vld, bits: 1}
       - {name: slot_id, bits: 6}
+
+  INTADD:
+    type: compute
+    latency: 1
+    code_bits: 18
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src0_prec, bits: 2}
+      - {name: src1_prec, bits: 2}
+      - {name: src2_prec, bits: 2}
+      - {name: src0_sign, bits: 1}
+      - {name: src1_sign, bits: 1}
+      - {name: src2_sign, bits: 1}
+      - {name: dst_sign, bits: 1}
+      - {name: update_st, bits: 1}
+      - {name: add_sub, bits: 1}
+      - {name: smc_id_en, bits: 5}

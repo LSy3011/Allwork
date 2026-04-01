@@ -33,6 +33,9 @@ micro_instructions:
   encoding:
     0: PREC_16
     1: PREC_32
+- field: SMC_ID
+  width: 5
+  default: 0
 behavioral_semantics:
   latching: pre_load_on_valid_or_nonzero # 支持“数据先到、指令后发”模式
   data_layouts:

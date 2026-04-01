@@ -18,9 +18,10 @@ payload_region:
   - { name: INC_EMBED,  offset: 0,  width: 6 }
   - { name: CODE,       offset: 0,  width: 30 } # 最大的 CODE 跨度可覆盖到 COND 之下
 
-# 针对不同 IQ 的 Payload 提取规则 (映射自 modules.yaml)
 iq_profiles:
   FPADD:    { code_lsb: 0, code_width: 10, use_inc: true }
   FPMUL:    { code_lsb: 0, code_width: 8,  use_inc: true }
-  UR_WRITE: { code_lsb: 0, code_width: 28, use_inc: false } # UR_WRITE 占用位宽大，会盖掉 DLY/INC
+  UR_READ:  { code_lsb: 0, code_width: 17, use_inc: false }
+  UR_WRITE: { code_lsb: 0, code_width: 33, use_inc: false } # UR_WRITE 占用位宽大，会盖掉 DLY/INC
   RTOVR:    { code_lsb: 0, code_width: 7,  use_inc: false }
+  INTADD:   { code_lsb: 0, code_width: 18, use_inc: true }

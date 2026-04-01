@@ -45,11 +45,17 @@ iq_config:
     count: 4
     EN_LOOPS: true
     BITS_LOOPS: 8
-    BITS_CODE: 12
+    BITS_CODE: 17
 
   IQ_UR_WRITE:
     module: UR_WRITE
     count: 4
     EN_LOOPS: true
     BITS_LOOPS: 8
-    BITS_CODE: 28
+    BITS_CODE: 33
+
+  IQ_INTADD:
+    module: INTADD
+    EN_LOOPS: true
+    BITS_LOOPS: 8
+    BITS_CODE: 18

@@ -26,10 +26,10 @@ resource_constraints:
   bus_width: 128
 
 iq_registry:
-  UR_READ: 12
-  UR_WRITE: 28
+  UR_READ: 17
+  UR_WRITE: 33
   RTOVR: 7
-  INTADD: 13
+  INTADD: 18
   FPMUL: 8
   FPADD: 10
   FPTOFP: 5
@@ -48,10 +48,10 @@ iq_registry:
 iq_header:
   - field: INC_EMBED
     width: 6
-  - field: DLY
-    width: 3
   - field: INC
     width: 4
+  - field: DLY
+    width: 3
   - field: COND
     width: 7
   - field: LOOPS

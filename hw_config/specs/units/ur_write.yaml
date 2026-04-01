@@ -20,6 +20,15 @@ micro_instructions:
 - field: ADDR
   width: 8
   default: 0
-- field: RESERVED
+- field: wbe
+- field: SMC_ID
+  width: 5
+  default: 0
   width: 16
+- field: SMC_ID
+  width: 5
+  default: 0
+  default: 0
+- field: SMC_ID
+  width: 5
   default: 0
