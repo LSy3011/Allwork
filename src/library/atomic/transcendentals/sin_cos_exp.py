@@ -10,7 +10,7 @@ def get_sin_industrial_dfg() -> List[MIROp]:
     IQ_MUL, IQ_ADD = 100, 101
     S_MUL0, S_MUL1 = 3, 4
     S_ADD0, S_ADD1 = 5, 6
-    S_WDATA = 38
+    S_WDATA = 35 # 物理对齐：ur-w0 对应 UVR_WDATA_0 (Slot 35)
     ops = []
     def m_op(t, n, p, d, b=None, m=""):
         meta = {"depends_on": d, "math": m}
