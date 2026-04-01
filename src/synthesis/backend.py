@@ -25,6 +25,26 @@ class SMTSynthesizer:
         for op_id in t:
             solver.add(t[op_id] >= 0)
 
+        # 1.5. 物理端口变量化 (Dynamic Port Allocation)
+        iq_vars = {}
+        for op in ops:
+            if op.op_type.upper() == "UR_READ":
+                iv = z3.Int(f"iq_{op.node_id}")
+                iq_vars[op.node_id] = iv
+                if op.metadata.get("iq_id") is not None:
+                    solver.add(iv == op.metadata["iq_id"])
+                else:
+                    # 允许求解器自由将其分配在 200~203 之间
+                    solver.add(iv >= 200, iv <= 203)
+            elif op.op_type.upper() == "UR_WRITE":
+                iv = z3.Int(f"iq_{op.node_id}")
+                iq_vars[op.node_id] = iv
+                # 默认 UR_WRITE 端口为 204~207
+                if op.metadata.get("iq_id") is not None:
+                    solver.add(iv == op.metadata["iq_id"])
+                else:
+                    solver.add(iv >= 204, iv <= 207)
+
         # 2. 数据依赖约束 (RAW) — 128-bit 归一化 Latency
         # Latency 包含点火那一拍，故流水等待为 (L-1)。
         # 数据离开计算单元进入 RtoVR 选通网需要 +1 拍 (transit)。
@@ -38,23 +58,33 @@ class SMTSynthesizer:
                     solver.add(t[op.node_id] >= t[dep_id] + (delay - 1) + transit)
 
         # 3. 物理资源互斥约束 — 委托给 axioms.py 的模块化公理
-        # A. IQ 发射互斥 (原始三维互斥: iq_id + bank_id + slot_id)
         for i in range(len(ops)):
             for j in range(i + 1, len(ops)):
                 op_i, op_j = ops[i], ops[j]
                 
-                # A. IQ 发射互斥
-                if ("iq_id" in op_i.metadata and "iq_id" in op_j.metadata and 
-                    op_i.metadata["iq_id"] == op_j.metadata["iq_id"]):
-                    solver.add(t[op_i.node_id] != t[op_j.node_id])
+                # A. 静态与动态 IQ 发射互斥
+                # 如果两个算子最终被分配到同一个物理端口，则它们不能在同一拍点火
+                iq_i = iq_vars.get(op_i.node_id, op_i.metadata.get("iq_id"))
+                iq_j = iq_vars.get(op_j.node_id, op_j.metadata.get("iq_id"))
+                
+                if iq_i is not None and iq_j is not None:
+                    if isinstance(iq_i, (int, float)) and isinstance(iq_j, (int, float)):
+                        if iq_i == iq_j:
+                            solver.add(t[op_i.node_id] != t[op_j.node_id])
+                    else:
+                        # 符号化互斥约束
+                        solver.add(z3.Implies(iq_i == iq_j, t[op_i.node_id] != t[op_j.node_id]))
                 
                 # B. 物理 Slot 占用互斥 (同拍改写同一槽位)
                 if ("slot_id" in op_i.metadata and "slot_id" in op_j.metadata and 
                     op_i.metadata["slot_id"] == op_j.metadata["slot_id"]):
                     solver.add(t[op_i.node_id] != t[op_j.node_id])
 
-        # C. Bank 冲突公理 — 委托 axioms.py
+        # C. Bank 冲突公理
         SynthesisAxioms.add_bank_conflict_axiom(solver, ops, t)
+        
+        # D. Liveness 防冲刷公理 (Register Allocation)
+        SynthesisAxioms.add_liveness_flush_axiom(solver, ops, t, iq_vars)
 
         # 4. 影子绑定 (Sibling Sync)
         # 如果一个计算单元 (FPMUL/FPADD/UR_WRITE) 依赖多个 RtoVR，
@@ -77,6 +107,10 @@ class SMTSynthesizer:
 
         if solver.check() == z3.sat:
             model = solver.model()
+            # 将推导出的硬件队列号写回 AST Metadata，实现寄存器自适应分配
+            for op in ops:
+                if op.node_id in iq_vars:
+                    op.metadata["iq_id"] = model[iq_vars[op.node_id]].as_long()
             return {op_id: model[t[op_id]].as_long() for op_id in t}
         
         return None

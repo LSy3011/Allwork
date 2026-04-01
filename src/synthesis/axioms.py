@@ -91,6 +91,43 @@ class SynthesisAxioms:
                             SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.node_id] < t_start, t_vars[op_j.node_id] > t_end), f"iq_ival_{iq}_{uid}")
 
     @staticmethod
+    def add_liveness_flush_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], iq_vars: Dict[str, z3.ArithRef]):
+        """
+        防冲刷公理 (Liveness Flush Axiom)
+        通过区间严格互斥，保证同一个读队列上的前序数据在被所有消费者使用完之前，不能被覆盖。
+        这赋予了 SMT 彻底抛弃硬编码 iq_id，自动进行队列(Register)分配的能力！
+        """
+        read_ops = [o for o in ops if o.op_type.upper() == "UR_READ"]
+        
+        for i in range(len(read_ops)):
+            for j in range(i + 1, len(read_ops)):
+                op_A = read_ops[i]
+                op_B = read_ops[j]
+                
+                consumers_A = [o for o in ops if op_A.node_id in o.metadata.get("depends_on", [])]
+                consumers_B = [o for o in ops if op_B.node_id in o.metadata.get("depends_on", [])]
+                
+                # B 的点火必须晚于 A 的全部消费者
+                if consumers_A:
+                    cond_B_after_A = z3.And([t_vars[op_B.node_id] > t_vars[c.node_id] for c in consumers_A])
+                else:
+                    cond_B_after_A = t_vars[op_B.node_id] > t_vars[op_A.node_id]
+                    
+                # A 的点火必须晚于 B 的全部消费者
+                if consumers_B:
+                    cond_A_after_B = z3.And([t_vars[op_A.node_id] > t_vars[c.node_id] for c in consumers_B])
+                else:
+                    cond_A_after_B = t_vars[op_A.node_id] > t_vars[op_B.node_id]
+                
+                # 如果 A 和 B 碰巧被分配到了同一个物理端口 (iq_A == iq_B)，则必须生命周期不交叉
+                solver.add(
+                    z3.Implies(
+                        iq_vars[op_A.node_id] == iq_vars[op_B.node_id],
+                        z3.Or(cond_B_after_A, cond_A_after_B)
+                    )
+                )
+
+    @staticmethod
     def add_bank_conflict_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef]):
         """
         Bank 端口物理隔离公理。
