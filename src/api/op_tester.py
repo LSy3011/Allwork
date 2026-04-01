@@ -49,8 +49,8 @@ class OperatorPhysicalTester:
             
             # 1. 物理约束注入 (Bank-ID)
             for op in dfg_ops:
-                if op.node_id in static_banks:
-                    op.metadata["bank_id"] = static_banks[op.node_id]
+                if op.trace_id in static_banks:
+                    op.metadata["bank_id"] = static_banks[op.trace_id]
 
             # 2. SMT 合成
             res = SMTSynthesizer(self.spec).solve(dfg_ops, strategy=strategy)
@@ -72,14 +72,14 @@ class OperatorPhysicalTester:
             for op in dfg_ops:
                 if "bank_id" in op.metadata:
                     b = op.metadata["bank_id"]
-                    pkey = get_phys_key(op.node_id)
+                    pkey = get_phys_key(op.trace_id)
                     
                     if pkey not in phys_mapping:
                         addr = bank_cursors[b]
                         phys_mapping[pkey] = (b, addr)
                         
                         # 🛸 填充 128-bit 矢量数据 (SMD: 4 x float32)
-                        val = input_data.get(op.node_id, constants.get(pkey, constants.get(op.node_id)))
+                        val = input_data.get(op.trace_id, constants.get(pkey, constants.get(op.trace_id)))
                         if val is not None:
                             val_arr = np.array(val).flatten()
                             if val_arr.size == 4:
@@ -97,8 +97,8 @@ class OperatorPhysicalTester:
                     # ⚠️ 强制纠正别名算子的物理 Bank (如果它之前写死的是其它值，如 x_f_rd 写成了 0)
                     op.metadata["bank_id"] = target_b
                     
-                    name = "y" if op.node_id == "w_fin" else pkey
-                    role = "output" if op.node_id == "w_fin" else "input"
+                    name = "y" if op.trace_id == "w_fin" else pkey
+                    role = "output" if op.trace_id == "w_fin" else "input"
                     if not any(tm["name"] == name for tm in tensors_meta):
                         tensors_meta.append({"name": name, "bank": target_b, "offset": target_addr, "shape": [1, 4], "role": role})
 

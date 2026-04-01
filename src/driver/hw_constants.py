@@ -11,8 +11,8 @@ IQ_BASE_UR_WRITE = 204  # UR-Write 单元在 SMT 中的基础索引
 # 对应 rtovr_config.yaml 中的物理编号
 PORT_OFFSET_UR_RDATA = 30  # UR 读取数据进入 Crossbar 的起始编号 (30-33)
 PORT_ID_INTADD_D0    = 0   # 整数加法输出端子
-PORT_ID_FPMUL_D      = 3   # 浮点乘法输出端子
-PORT_ID_FPADD_D      = 4   # 浮点加法输出端子
+PORT_ID_FPMUL_D      = 3   # 浮点乘法输出端子 (Confirmed: Line 8 in yaml is index 3)
+PORT_ID_FPADD_D      = 4   # 浮点加法输出端子 (Confirmed: Line 9 in yaml is index 4)
 
 # --- 3. 指令头 (IQ Header) 物理布局定义 ---
 # 对应 isa_v5.yaml 及其解码器布局

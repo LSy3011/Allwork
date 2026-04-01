@@ -28,55 +28,48 @@ class LIRPacker:
             
         (root / "sim_trace.log").touch()
         
-        # 1. 建立物理端子 ID 映射表 (基于硬件宏定义)
+        # 1. 建立物理端子 ID 映射表 (基于硬件规格动态反查)
         node_to_src_id = {}
         for op in final_stream:
-            m_type = op.op_type.upper()
-            if m_type == "UR_READ":
-                rid = op.metadata.get("iq_id", IQ_BASE_UR_READ)
-                # 计算逻辑：基础端口偏移 + (IQ_ID - 基准偏移)
-                iq_idx = rid - IQ_BASE_UR_READ if rid >= IQ_BASE_UR_READ else rid
-                node_to_src_id[op.node_id] = PORT_OFFSET_UR_RDATA + iq_idx
-            elif m_type == "FPMUL": 
-                node_to_src_id[op.node_id] = PORT_ID_FPMUL_D
-            elif m_type == "FPADD": 
-                node_to_src_id[op.node_id] = PORT_ID_FPADD_D
-            elif m_type == "INTADD":
-                node_to_src_id[op.node_id] = PORT_ID_INTADD_D0
+            iq_id = op.metadata.get("iq_id")
+            if iq_id is not None:
+                iq_name = self.hw_spec.get_iq_name(iq_id)
+                # 🛸 动态映射 RtoVR 的 Source ID：UR_READ 映射到 30-33 端口
+                if "ur-r" in iq_name:
+                    idx = int(iq_name.replace("ur-r", ""))
+                    node_to_src_id[op.trace_id] = PORT_OFFSET_UR_RDATA + idx
+                else:
+                    # ALU 路由直连 (待后续 RtoVR YAML 统一)
+                    if op.op_type.upper() == "FPMUL": node_to_src_id[op.trace_id] = PORT_ID_FPMUL_D
+                    elif op.op_type.upper() == "FPADD": node_to_src_id[op.trace_id] = PORT_ID_FPADD_D
+                    elif op.op_type.upper() == "INTADD": node_to_src_id[op.trace_id] = PORT_ID_INTADD_D0
 
         # 2. 分桶聚合所有物理 IQ 流
         module_streams = {}
         for op in final_stream:
-            m_name = op.op_type.upper()
+            iq_id = op.metadata.get("iq_id")
+            m_type = op.op_type.upper()
             
-            # --- 物理端口名对齐 (DASH Convention) ---
-            if m_name == "UR_READ":
-                idx = op.metadata.get("iq_id", IQ_BASE_UR_READ)
-                idx = idx - IQ_BASE_UR_READ if idx >= IQ_BASE_UR_READ else idx
-                name = f"ur-r{idx}"
-            elif m_name == "UR_WRITE":
-                idx = op.metadata.get("iq_id", IQ_BASE_UR_WRITE)
-                idx = idx - IQ_BASE_UR_WRITE if idx >= IQ_BASE_UR_WRITE else idx
-                name = f"ur-w{idx}"
-            elif m_name == "RTOVR":
+            # --- 🛰️ 物理对齐：不再手动推导，直接询问规格书 ---
+            if iq_id is not None:
+                name = self.hw_spec.get_iq_name(iq_id)
+            elif m_type == "RTOVR":
                 name = f"rtovr-{op.metadata.get('slot_id', 0)}"
+                # 注入 p_src_id 以便 FieldMapper 能识别
                 deps = op.metadata.get("depends_on", [])
                 if deps and deps[0] in node_to_src_id:
-                    src_id = node_to_src_id[deps[0]]
-                    op.metadata["p_src_id"] = src_id
-                    # 🚀 物理对齐：直接注入 YAML 期望的字段名，绕过任何驱动推断
-                    op.metadata["dr_index"] = src_id 
+                    op.metadata["p_src_id"] = node_to_src_id[deps[0]]
             else:
-                name = m_name.lower()
+                name = m_type.lower()
 
-            lookup = f"IQ_{m_name}"
-            if "RTOVR" in m_name: lookup = "IQ_RTOVR"
+            lookup = f"IQ_{m_type}"
+            if "RTOVR" in m_type: lookup = "IQ_RTOVR"
             if lookup not in self.hw_spec.iqs: continue
             
             # DEBUG PRINT
-            print(f"[EMIT-LOG] Op:{op.node_id} Type:{m_name} IQ:{name} T:{op.metadata['global_t']}")
+            print(f"[EMIT-LOG] Op:{op.trace_id} Type:{m_type} IQ:{name} T:{op.metadata['global_t']}")
 
-            mod_spec = self.hw_spec.modules.get(m_name)
+            mod_spec = self.hw_spec.modules.get(m_type)
             if not mod_spec: continue
             
             payload = FieldMapper.map_op_to_payload(op, mod_spec)
@@ -95,13 +88,8 @@ class LIRPacker:
                 times = [s["t"] for s in stream]
                 print(f"[EMIT-TRACE] IQ: ur-r1 | Op T-seq: {times}")
 
-            # 推导逻辑基类以检索精确位宽
-            base_type = "UR_READ" if "ur-r" in name else "UR_WRITE" if "ur-w" in name else "RTOVR" if "rtovr" in name else name.upper()
-            bits_code = iq_reg.get(base_type, DEFAULT_BITS_CODE)
-            
-            # 物理副本隔离保护
+            # 🛸 直接采用硬件规格中定义的物理位宽，不再依赖由于巧合导致的 iq_reg 映射
             local_iq_conf = copy.deepcopy(stream[0]["iq_conf"])
-            local_iq_conf.BITS_CODE = bits_code
             
             stream.sort(key=lambda x: x["t"])
             compressed = Compactor.compress_iq_stream(stream, local_iq_conf)

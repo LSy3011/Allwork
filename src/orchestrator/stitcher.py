@@ -17,7 +17,7 @@ class HSTSStitcher:
     def _check_conflict(self, stream: List, synthesis_res: Dict[str, int], offset: int) -> bool:
         """物理层突发冲突审计 (IQ/Bank)"""
         for op in stream:
-            local_t = synthesis_res[op.node_id]
+            local_t = synthesis_res[op.trace_id]
             global_t = local_t + offset
             
             # IQ 并发审计
@@ -44,7 +44,6 @@ class HSTSStitcher:
         instance_name = f"{name}_{self.instance_count[name] - 1}"
         
         # 2. 计算最小起始偏移 (Min Offset)
-        # 基准偏移为当前最大时间的末尾，或者是所有依赖算子的 end_t + 1
         min_offset = 0
         if depends_on:
             for dep in depends_on:
@@ -58,8 +57,6 @@ class HSTSStitcher:
             offset += 1
             
         # 4. 提交缝合结果 (由高保真物理持续时间驱动)
-        # 🛸 关键物理对齐：end_t 必须涵盖数据处理的 64 拍 (如果是 256 元素)
-        # 我们假设 synthesis_res 中包含的是发射偏移，这里增加物理 Busy 时间
         max_local_t = max(synthesis_res.values()) if synthesis_res else 0
         busy_cycles = 64 # 256 位宽的物理实消耗拍数
         
@@ -69,7 +66,7 @@ class HSTSStitcher:
         }
         
         for op in stream:
-            local_t = synthesis_res[op.node_id]
+            local_t = synthesis_res[op.trace_id]
             global_t = local_t + offset
             
             # 属性刷新

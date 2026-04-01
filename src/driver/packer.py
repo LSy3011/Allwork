@@ -28,6 +28,7 @@ class BitPacker:
         header |= (1 << 40)                     # [40] VLD
 
         # 2. 纵向级联 (Header 是 MSB, CODE 是 LSB)
+        # 🛸 物理对齐：保持 Header 在高位，Payload 在低位。
         bits_code = iq_conf.BITS_CODE
         full_instr = (header << bits_code) | (payload & ((1 << bits_code) - 1))
         

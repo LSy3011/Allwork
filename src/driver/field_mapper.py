@@ -58,13 +58,13 @@ class FieldMapper:
                         break
                 
             elif fname in SEMANTIC_PREC:
-                prec = "f32"
+                prec_val = "f32"
                 for k in SEMANTIC_PREC:
                     if k in meta and meta[k] is not None:
-                        prec = meta[k]
+                        prec_val = str(meta[k]).lower()
                         break
-                # PREC_32 映射到 1 (来自 YAML encoding 的常规共识，若 YAML 覆盖则以 YAML 优先)
-                fval = 1 if "f32" in str(prec).lower() else 0
+                # 🎉 兼容性对齐：支持 f32, prec_32, p32 等多种写法
+                fval = 1 if ("f32" in prec_val or "32" in prec_val) else 0
                 
             elif fname in SEMANTIC_SRCID:
                 for k in SEMANTIC_SRCID:
@@ -78,10 +78,8 @@ class FieldMapper:
             elif "smc_id" in fname:
                 fval = int(meta.get("smc_id_en", 0))
 
-            if op.node_id in ["c4_rd", "w_y"]:
-                print(f"[DEBUG-FIELDMAPPER] op={op.node_id} field={fname} fval={fval} meta_addr={meta.get('addr')} meta_bank={meta.get('bank_id')}")
-
-            # --- 物理级联与掩码保护 (Physical Marshalling) ---
+            # --- 🚀 物理级联与掩码保护 (Physical Marshalling) ---
+            # 修正：移入循环内部，确保每一位都被拼装
             fmask = (1 << fbits) - 1
             payload |= ((fval & fmask) << current_pos)
             current_pos += fbits

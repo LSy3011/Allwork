@@ -24,6 +24,27 @@ resource_constraints:
   total_write_ports: 4
   max_parallel_iq: 999
   bus_width: 128
+  # 🚀 物理对齐：显式定义计算单元实例数量
+  unit_instances:
+    # 基础计算流
+    FPMUL: 1
+    FPADD: 1
+    INTADD: 1
+    LOGIC: 1
+    # 转换单元
+    FPTOFP: 1
+    FPTOINT: 1
+    INTTOFP: 1
+    INTTOINT: 1
+    # 打包/特殊算子
+    INT8TOFP16: 1
+    FP16MUL: 1
+    # 累加树
+    FP32ADDTREE5TO1: 1
+    FP32ADDTREE8TO1: 1
+    # 位移操作
+    SHIFTUP: 1
+    SHIFTDN: 1
 
 iq_registry:
   UR_READ: 17

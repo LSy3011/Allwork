@@ -93,3 +93,51 @@ class HardwareSpec(BaseModel):
                         modules_data[mname]["latency"] = u_data.get("latency", modules_data[mname]["latency"])
 
         return cls(**spec_data)
+
+    @property
+    def config(self):
+        """兼容层：将 system_core 暴露为 config 字典"""
+        return self.system_core if self.system_core else {}
+
+    def get_iq_ids(self, unit_type: str) -> List[int]:
+        """
+        根据物理单元类型获取其下所有实例的 IQ ID。
+        """
+        registry = self.config.get("iq_registry", {})
+        instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
+        
+        # 1. 处理 UR 特殊端口 (硬分配 200/204 偏移以兼容仿真驱动)
+        if unit_type.upper() == "UR_READ":
+            count = self.config["resource_constraints"].get("total_read_ports", 4)
+            return [200 + i for i in range(count)]
+        if unit_type.upper() == "UR_WRITE":
+            count = self.config["resource_constraints"].get("total_write_ports", 4)
+            return [204 + i for i in range(count)]
+            
+        # 2. 处理 ALU 常规端口 (基于 Registry 偏移)
+        if unit_type.upper() in instances:
+            base_id = registry.get(unit_type.upper(), 0)
+            count = instances[unit_type.upper()]
+            return [base_id + i for i in range(count)]
+        
+        return []
+
+    def get_iq_name(self, iq_id: int) -> str:
+        """
+        反向寻址：根据物理 IQ ID 获取其实例化名称 (用于生成的 HEX 文件名)。
+        """
+        # 1. 探测 UR 端口
+        if 200 <= iq_id <= 203: return f"ur-r{iq_id - 200}"
+        if 204 <= iq_id <= 207: return f"ur-w{iq_id - 204}"
+        
+        # 2. 探测 ALU 端口
+        registry = self.config.get("iq_registry", {})
+        instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
+        
+        for u_type, base_id in registry.items():
+            count = instances.get(u_type, 0)
+            if base_id <= iq_id < base_id + count:
+                idx = iq_id - base_id
+                return f"{u_type.lower()}-{idx}" if count > 1 else u_type.lower()
+        
+        return "unknown"

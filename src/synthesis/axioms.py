@@ -15,25 +15,23 @@ class SynthesisAxioms:
     def add_latency_axiom(solver, ops: List[MIROp], 
                          t_vars: Dict[str, z3.ArithRef], spec: HardwareSpec, mode="stable"):
         """
-        时序因果链条：
-        - Stable: 核心计算链刚性，但允许加载指令弹性偏移，防止 IQ 拥堵死锁。
-        - Extreme: 全链路弹性，依赖区间锁保证安全。
+        时序因果链条公理：保证 RAW 依赖正确。
+        已切换至 trace_id 索引。
         """
         for op in ops:
             for dep_id in op.metadata.get("depends_on", []):
-                producer = next((o for o in ops if o.node_id == dep_id), None)
+                producer = next((o for o in ops if o.trace_id == dep_id), None)
                 if not producer: continue
                 lat = spec.delays.get(producer.op_type, 1)
                 
-                label = f"lat_{op.node_id}_{dep_id}_{mode}"
+                label = f"lat_{op.trace_id}_{dep_id}_{mode}"
                 if mode == "stable":
-                    # 允许 UR_READ 滑动，其余锁死
                     if producer.op_type == "UR_READ":
-                        SynthesisAxioms._add_constraint(solver, t_vars[op.node_id] >= t_vars[dep_id] + lat, f"flex_{label}")
+                        SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, f"flex_{label}")
                     else:
-                        SynthesisAxioms._add_constraint(solver, t_vars[op.node_id] == t_vars[dep_id] + lat, label)
+                        SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] == t_vars[dep_id] + lat, label)
                 else:
-                    SynthesisAxioms._add_constraint(solver, t_vars[op.node_id] >= t_vars[dep_id] + lat, label)
+                    SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label)
 
     @staticmethod
     def add_rtovr_crossbar_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], spec: HardwareSpec, mode="stable"):
@@ -45,22 +43,18 @@ class SynthesisAxioms:
 
         for slot, slot_ops in slot_groups.items():
             if mode == "stable":
-                # Stable 模式只需保证单拍 Slot ID 不冲突 (因为链路是刚性的，数据不留存)
                 if len(slot_ops) > 1:
-                    SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[o.node_id] for o in slot_ops]), f"slot_dist_{slot}")
+                    SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[o.trace_id] for o in slot_ops]), f"slot_dist_{slot}")
             else:
-                # Extreme 模式必须检查全周期区间锁
                 for i, op_i in enumerate(slot_ops):
-                    consumers = [o for o in ops if op_i.node_id in o.metadata.get("depends_on", [])]
+                    consumers = [o for o in ops if op_i.trace_id in o.metadata.get("depends_on", [])]
                     for cons in consumers:
-                        # 物理特性：一旦计算单元启动（t_vars[cons.node_id]），数据即被 Latch 进流水线。
-                        # Slot 在下一拍即可释放给其他算子。
-                        t_start = t_vars[op_i.node_id]
-                        t_end = t_vars[cons.node_id]
+                        t_start = t_vars[op_i.trace_id]
+                        t_end = t_vars[cons.trace_id]
                         for j, op_j in enumerate(slot_ops):
                             if i == j: continue
-                            uid = "_".join(sorted([op_i.node_id, op_j.node_id]))
-                            SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.node_id] < t_start, t_vars[op_j.node_id] > t_end), f"slot_ival_{slot}_{uid}")
+                            uid = "_".join(sorted([op_i.trace_id, op_j.trace_id]))
+                            SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.trace_id] < t_start, t_vars[op_j.trace_id] > t_end), f"slot_ival_{slot}_{uid}")
 
     @staticmethod
     def add_iq_mutex_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], mode="stable"):
@@ -68,12 +62,11 @@ class SynthesisAxioms:
             iq_groups = {}
             for op in ops:
                 iq = op.metadata.get("iq_id")
-                if iq is not None: iq_groups.setdefault(iq, []).append(op.node_id)
+                if iq is not None: iq_groups.setdefault(iq, []).append(op.trace_id)
             for iq, op_ids in iq_groups.items():
                 if len(op_ids) > 1:
                     SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[oid] for oid in op_ids]), f"iq_mutex_{iq}")
         else:
-            # Extreme 模式使用 IQ 数据寄存器锁定
             load_ops = [o for o in ops if o.op_type == "UR_READ"]
             iq_groups = {}
             for op in load_ops:
@@ -81,69 +74,46 @@ class SynthesisAxioms:
                 if iq is not None: iq_groups.setdefault(iq, []).append(op)
             for iq, iq_ops in iq_groups.items():
                 for i, op_i in enumerate(iq_ops):
-                    consumers = [o for o in ops if op_i.node_id in o.metadata.get("depends_on", [])]
+                    consumers = [o for o in ops if op_i.trace_id in o.metadata.get("depends_on", [])]
                     for cons in consumers:
-                        t_start = t_vars[op_i.node_id]
-                        t_end = t_vars[cons.node_id] - 1
+                        t_start = t_vars[op_i.trace_id]
+                        t_end = t_vars[cons.trace_id] - 1
                         for j, op_j in enumerate(iq_ops):
                             if i == j: continue
-                            uid = "_".join(sorted([op_i.node_id, op_j.node_id]))
-                            SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.node_id] < t_start, t_vars[op_j.node_id] > t_end), f"iq_ival_{iq}_{uid}")
+                            uid = "_".join(sorted([op_i.trace_id, op_j.trace_id]))
+                            SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.trace_id] < t_start, t_vars[op_j.trace_id] > t_end), f"iq_ival_{iq}_{uid}")
 
     @staticmethod
     def add_liveness_flush_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], iq_vars: Dict[str, z3.ArithRef]):
         """
-        防冲刷公理 (Liveness Flush Axiom)
-        通过区间严格互斥，保证同一个读队列上的前序数据在被所有消费者使用完之前，不能被覆盖。
-        这赋予了 SMT 彻底抛弃硬编码 iq_id，自动进行队列(Register)分配的能力！
+        防冲刷公理：已切换至 trace_id。
         """
         read_ops = [o for o in ops if o.op_type.upper() == "UR_READ"]
-        
         for i in range(len(read_ops)):
             for j in range(i + 1, len(read_ops)):
-                op_A = read_ops[i]
-                op_B = read_ops[j]
+                op_A, op_B = read_ops[i], read_ops[j]
+                consumers_A = [o for o in ops if op_A.trace_id in o.metadata.get("depends_on", [])]
+                consumers_B = [o for o in ops if op_B.trace_id in o.metadata.get("depends_on", [])]
                 
-                consumers_A = [o for o in ops if op_A.node_id in o.metadata.get("depends_on", [])]
-                consumers_B = [o for o in ops if op_B.node_id in o.metadata.get("depends_on", [])]
+                cond_B_after_A = z3.And([t_vars[op_B.trace_id] > t_vars[c.trace_id] for c in consumers_A]) if consumers_A else t_vars[op_B.trace_id] > t_vars[op_A.trace_id]
+                cond_A_after_B = z3.And([t_vars[op_A.trace_id] > t_vars[c.trace_id] for c in consumers_B]) if consumers_B else t_vars[op_A.trace_id] > t_vars[op_B.trace_id]
                 
-                # B 的点火必须晚于 A 的全部消费者
-                if consumers_A:
-                    cond_B_after_A = z3.And([t_vars[op_B.node_id] > t_vars[c.node_id] for c in consumers_A])
-                else:
-                    cond_B_after_A = t_vars[op_B.node_id] > t_vars[op_A.node_id]
-                    
-                # A 的点火必须晚于 B 的全部消费者
-                if consumers_B:
-                    cond_A_after_B = z3.And([t_vars[op_A.node_id] > t_vars[c.node_id] for c in consumers_B])
-                else:
-                    cond_A_after_B = t_vars[op_A.node_id] > t_vars[op_B.node_id]
-                
-                # 如果 A 和 B 碰巧被分配到了同一个物理端口 (iq_A == iq_B)，则必须生命周期不交叉
-                solver.add(
-                    z3.Implies(
-                        iq_vars[op_A.node_id] == iq_vars[op_B.node_id],
-                        z3.Or(cond_B_after_A, cond_A_after_B)
-                    )
-                )
+                solver.add(z3.Implies(iq_vars[op_A.trace_id] == iq_vars[op_B.trace_id], z3.Or(cond_B_after_A, cond_A_after_B)))
 
     @staticmethod
     def add_bank_conflict_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef]):
         """
-        Bank 端口物理隔离公理。
-        同一个 Bank 在同一拍只能被一个 UR_READ 或 UR_WRITE 访问。
+        Bank 冲突公理：已切换至 trace_id。
         """
         bank_ops = [o for o in ops if "bank_id" in o.metadata]
         bank_groups = {}
         for op in bank_ops:
             bid = op.metadata["bank_id"]
-            bank_groups.setdefault(bid, []).append(op.node_id)
+            bank_groups.setdefault(bid, []).append(op.trace_id)
         
         for bid, op_ids in bank_groups.items():
             if len(op_ids) > 1:
-                SynthesisAxioms._add_constraint(
-                    solver, z3.Distinct([t_vars[oid] for oid in op_ids]), 
-                    f"bank_mutex_{bid}")
+                SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[oid] for oid in op_ids]), f"bank_mutex_{bid}")
 
     @staticmethod
     def add_objective(solver: z3.Optimize, t_vars: Dict[str, z3.ArithRef]):
