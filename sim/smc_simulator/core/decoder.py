@@ -86,7 +86,7 @@ class InstructionDecoder:
         if reg_width > 0:
             final_payload_width = reg_width
             
-        print(f"[DEC-AUDIT] Unit:{self.spec.unit_name} RegistryWidth:{reg_width} SpecSum:{spec_sum} -> P_Width:{final_payload_width}")
+        # print(f"[DEC-AUDIT] Unit:{self.spec.unit_name} RegistryWidth:{reg_width} SpecSum:{spec_sum} -> P_Width:{final_payload_width}")
             
         # 2. 映射 Payload 字段
         curr = 0

@@ -99,7 +99,6 @@ class ParallelKernel:
     def enable_trace(self):
         """Enable trace recording"""
         self.trace_recorder = TraceRecorder()
-        self.trace_recorder.enable()
 
     def dump_trace(self, json_path: str = None, chrome_path: str = None):
         """Save trace to file"""
@@ -210,13 +209,16 @@ class ParallelKernel:
                 if not decoder:
                     continue
                 decoded = decoder.decode(curr_raw)
-                if decoded.get('VALID') in [1, "1", "VALID", True]:
+                vld = decoded.get('VALID') if 'VALID' in decoded.to_dict() else decoded.get('we')
+                if vld in [1, "1", "VALID", True]:
                     # 关键修复：将解码后的 ADDR 传递给 UR 读请求。
                     # IQUnit 已经在脉冲期间根据 INC 属性动态修改了 instruction 中的地址位。
+                    bank_val = decoded.get('BANK') if 'BANK' in decoded.to_dict() else decoded.get('wbank', 0)
+                    addr_val = decoded.get('ADDR') if 'ADDR' in decoded.to_dict() else decoded.get('waddr', 0)
                     ur_requests[f'R{i}'] = {
                         'en': True, 
-                        'bank': int(decoded.get('BANK', 0)),
-                        'addr': int(decoded.get('ADDR', 0))
+                        'bank': int(bank_val),
+                        'addr': int(addr_val)
                     }
             
             # Write IQ
@@ -224,9 +226,12 @@ class ParallelKernel:
             inst_w = controls.get(name_w, 0)
             if inst_w and name_w in iq_states and iq_states[name_w]['is_valid'] and not iq_states[name_w].get('is_fetching_dly', False):
                 decoded = iq_states[name_w]['decoded']
-                if decoded.get('VALID') in [1, "1", "VALID", True]:
+                vld = decoded.get('VALID') if 'VALID' in decoded else decoded.get('we')
+                if vld in [1, "1", "VALID", True]:
                     wdata = self.rtovr.get_output(getattr(RtoVROutput, f'UVR_WDATA_{i}'))
-                    ur_requests[f'W{i}'] = {'en': True, 'bank': int(decoded.get('BANK', 0)), 'addr': int(decoded.get('ADDR', 0)), 'data': wdata}
+                    bank_val = decoded.get('BANK') if 'BANK' in decoded else decoded.get('wbank', 0)
+                    addr_val = decoded.get('ADDR') if 'ADDR' in decoded else decoded.get('waddr', 0)
+                    ur_requests[f'W{i}'] = {'en': True, 'bank': int(bank_val), 'addr': int(addr_val), 'data': wdata}
 
         # Filter iq_states for arbiter check_conflicts to only those actually executing commands
         executing_iqs = [n for n, s in iq_states.items() if s['is_valid'] and not s.get('is_fetching_dly', False)]
@@ -336,8 +341,7 @@ class ParallelKernel:
                 'reads': self.arbiter.current_reads.copy(),
                 'writes': self.arbiter.current_writes.copy()
             }
-            # 🛸 AIACC Legacy Standard: 传递原始对象以支持反射检测
-            self.trace_recorder.record(self.cycle_count, self.iqs, smc=self)
+            self.trace_recorder.record_cycle(self.cycle_count, trace_iq_states, unit_states, arb_snapshot, ur_requests)
 
         # --- [Phase 4: Commit] ---
         self._tick_all()
@@ -507,9 +511,10 @@ class ParallelKernel:
             if inst_r != 0:
                 decoder = self.decoders.get(f'ur-r{i}', self.decoders.get('ur_read'))
                 decoded = decoder.decode(inst_r)
-                if get_field(decoded, 'VALID') in ["VALID", 1, "1", True]: 
-                    bank = int(get_field(decoded, 'BANK'))
-                    addr = int(get_field(decoded, 'ADDR'))
+                vld = get_field(decoded, 'VALID') or get_field(decoded, 'we')
+                if vld in ["VALID", 1, "1", True]: 
+                    bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))
+                    addr = int(get_field(decoded, 'ADDR', get_field(decoded, 'waddr')))
                     data = self.ur_bank.storage[bank][addr]
                     print(f"[UR-DEBUG] T={self.cycle_count} UNIT:ur-r{i} READ BANK:{bank} ADDR:{addr} HEX:{data:032x}")
                     ur_inputs[f'R{i}'] = {'en': True, 'bank': bank, 'addr': addr}
@@ -521,16 +526,17 @@ class ParallelKernel:
             if inst_w != 0:
                 decoder = self.decoders.get(f'ur-w{i}', self.decoders.get('ur_write'))
                 decoded = decoder.decode(inst_w)
-                if get_field(decoded, 'VALID') in ["VALID", 1, "1", True]:
+                vld = get_field(decoded, 'VALID') or get_field(decoded, 'we')
+                if vld in ["VALID", 1, "1", True]:
                     # 恢复正式数据路径：从 RtoVR 收割
                     data_val = self.rtovr.get_output(getattr(RtoVROutput, f"UVR_WDATA_{i}"))
-                    if data_val != 0:
-                        addr = int(get_field(decoded, 'ADDR'))
+                    bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))
+                    addr = int(get_field(decoded, 'ADDR', get_field(decoded, 'waddr')))
                         
                     ur_inputs[f'W{i}'] = {
                         'en': True,
-                        'bank': int(get_field(decoded, 'BANK')),
-                        'addr': int(get_field(decoded, 'ADDR')),
+                        'bank': bank,
+                        'addr': addr,
                         'data': data_val
                     }
 

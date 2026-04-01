@@ -88,8 +88,24 @@ def run_physical_verification(case_dir: str):
     try:
         max_cycles = config.get("max_cycles", 1000)
         kernel.run(max_cycles=max_cycles)
-        # 🛸 对齐原厂 TraceRecorder 接口 (仅存 save_to_timeline_ascii)
-        kernel.trace_recorder.save_to_timeline_ascii(str(case_path / "timeline_ascii.txt"))
+        
+        # [Standard Alignment] Phase 2.1.2: Analysis and Traces
+        analysis_dir = case_path / "smc_0" / "analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Dump timeline and events
+        kernel.trace_recorder.save_to_timeline_ascii(str(analysis_dir / "timeline_ascii.txt"))
+        if hasattr(kernel.trace_recorder, 'save_to_chrome_tracing'):
+             kernel.trace_recorder.save_to_chrome_tracing(str(analysis_dir / "sim_events.json"))
+        
+        # Save main simulation trace
+        with open(case_path / "sim_trace.log", "w") as f_log:
+             f_log.write(f"Simulation completed at cycle {kernel.cycle_count}\n")
+             
+        # [Standard Alignment] Phase 2.1.3: Output Bank State
+        output_bank_dir = case_path / "smc_0" / "output_bank"
+        kernel.dump_banks(str(output_bank_dir))
+        
     except Exception as e:
         print(f"Simulation Halted: {e}")
         traceback.print_exc()

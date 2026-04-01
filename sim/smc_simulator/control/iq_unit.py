@@ -140,9 +140,7 @@ class IQUnit(Component):
             end_mask = (raw >> off_end) & 0x3F
             
             # 🚀 物理回跳审计：揭开 Row 1 失踪之谜
-            if end_mask > 0 or self.unit == "ur-r0":
-                print(f"[IQ-JUMP] {self.unit} PC:{self.pc} Off:{off_end} Mask:{end_mask} Raw:{hex(raw)}")
-            
+
             for i in range(1, 7):
                 if (end_mask >> (i-1)) & 0x1:
                     self.loop_states[i]["cnt"] += 1
@@ -162,7 +160,7 @@ class IQUnit(Component):
             
             # 无任何级可回跳
             self._next_pc = self.pc + 1
-            print(f"[IQ-LOOP-MISS] {self.unit} PC:{self.pc} -> Next:{self._next_pc} E_Mask:{end_mask}")
+            # print(f"[IQ-LOOP-MISS] {self.unit} PC:{self.pc} -> Next:{self._next_pc} E_Mask:{end_mask}")
             self.loop_states[0]["cnt"] = 0
 
             self.delay_active = False

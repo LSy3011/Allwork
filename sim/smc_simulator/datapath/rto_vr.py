@@ -56,8 +56,6 @@ class RtoVRUnit(Component):
 
     def is_valid(self, port_id: int) -> bool:
         v = port_id in self.valid_outputs
-        if port_id in [5, 6, 13]: # Debug specific ports for round op
-            print(f"[RTOVR-CHECK] Port:{port_id} Valid:{v} CurrentSet:{self.valid_outputs}")
         return v
 
     def get_regs(self) -> Dict[str, int]:
