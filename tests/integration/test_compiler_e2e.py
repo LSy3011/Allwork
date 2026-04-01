@@ -53,7 +53,7 @@ class TestCompilerE2E(unittest.TestCase):
         total_items = compiler.compile(op_blocks, output_dir)
         
         # 5. 物理审计
-        bin_path = os.path.join(output_dir, "iq_ur_read.bin")
+        bin_path = os.path.join(output_dir, "smc_0", "iq_ur_r0.hex")
         self.assertTrue(os.path.exists(bin_path))
         
         size = os.path.getsize(bin_path)

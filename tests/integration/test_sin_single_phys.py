@@ -71,12 +71,13 @@ class TestSinSingle(unittest.TestCase):
         # 4. 🛸 发射标准 ACB 目录结构 (Emitter 会自动打包 tensors 到 sim_config)
         from driver.emitter import LIRPacker
         packer = LIRPacker("hw_config")
+        print(f"\n[DEBUG] final_stream has {len(final_stream)} ops.")
         packer.emit_from_stream(final_stream, str(out), program=prog)
         
-        # 修正 sim_config.json 中的 max_cycles 为 50 (对齐标准时序)
+        # 修正 sim_config.json 中的 max_cycles 为 120 (对齐标准时序)
         conf_path = out / "sim_config.json"
         with open(conf_path, "r") as f: sim_conf = json.load(f)
-        sim_conf["max_cycles"] = 50
+        sim_conf["max_cycles"] = 120
         with open(conf_path, "w") as f: json.dump(sim_conf, f, indent=2)
         
         print(f"\n[DONE] Algorithm-Driven Sin Case emitted to: {out}")

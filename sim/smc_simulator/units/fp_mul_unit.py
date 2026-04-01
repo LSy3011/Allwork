@@ -64,6 +64,7 @@ class FPMulUnit(Component):
 
         if valid_trigger:
             self.logger.info(f"[MUL-EXEC] Cyc {cycle} S0: {self.regs_s0[:4] if isinstance(self.regs_s0, list) else self.regs_s0}, S1: {self.regs_s1[:4] if isinstance(self.regs_s1, list) else self.regs_s1}")
+            print(f">>> [MUL-EXEC] Cyc:{cycle} S0:{self.regs_s0:032x} S1:{self.regs_s1:032x}")
         
         res_val = 0
         

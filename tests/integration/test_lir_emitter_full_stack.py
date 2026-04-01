@@ -1,5 +1,6 @@
 import unittest
 import os
+from pathlib import Path
 from api.hw_spec import HardwareSpec
 from orchestrator.colorer import BalancedBankColorer
 from orchestrator.memory_allocator import MemoryAllocator
@@ -8,6 +9,7 @@ from driver.emitter import LIRPacker
 class MockURReadOp:
     def __init__(self, t, bank, addr):
         self.op_type = "UR_READ"
+        self.node_id = f"UR_READ_{t}"
         self.metadata = {"global_t": t}
         self.re = 1
         self.rbank = bank
@@ -17,10 +19,15 @@ class TestLIREmitterFullStack(unittest.TestCase):
     """
     AIACC V5.0 全链路物理审计基准测试 (Sprint 5 版: 正确回填物理属性)。
     """
+    def setUp(self):
+        workspace = Path(__file__).parent.parent.parent
+        self.spec = HardwareSpec.load(str(workspace / "hw_config"))
+        from aiacc_hardware.src.spec_loader import SpecLoader
+        self.sim_loader = SpecLoader()
+
     def test_full_stack_binary_emission(self):
         output_dir = "build/bin/sprint5_full"
         os.makedirs(output_dir, exist_ok=True)
-        spec = HardwareSpec.load("hw_config")
         
         class FakeTensor:
             def __init__(self, name, size, start_t, end_t):
@@ -46,7 +53,7 @@ class TestLIREmitterFullStack(unittest.TestCase):
         
         # 4. 物理布局层: 执行地址均衡分配
         print("[LAYOUT] Mapping 256-Word Memory Addresses...")
-        allocator = MemoryAllocator(spec.params)
+        allocator = MemoryAllocator(self.spec.params)
         addr_map = allocator.allocate(tensors)
         
         # 5. 二进制发射层: 模拟 7D 连续访存折叠指令流
@@ -59,7 +66,7 @@ class TestLIREmitterFullStack(unittest.TestCase):
         packer.emit_from_stream(test_stream, output_dir)
         
         # 6. 验证产出物
-        bin_path = os.path.join(output_dir, "iq_ur_read.bin")
+        bin_path = os.path.join(output_dir, "smc_0", "iq_ur_r0.hex")
         self.assertTrue(os.path.exists(bin_path))
         size = os.path.getsize(bin_path)
         print(f"[AUDIT] Binary emitted successfully. Size: {size} bytes.")

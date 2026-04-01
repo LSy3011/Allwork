@@ -16,7 +16,7 @@ from orchestrator.stitcher import HSTSStitcher
 from orchestrator.memory_allocator import MemoryAllocator
 from driver.field_mapper import FieldMapper
 from driver.compactor import Compactor
-from driver.packer import BitPacker
+from driver.emitter import LIRPacker
 
 from library.atomic.transcendentals.sin import get_sin_8order_dfg
 from library.atomic.trig_extra.precision_trig import get_atan2_industrial_dfg

@@ -21,14 +21,8 @@ micro_instructions:
   width: 8
   default: 0
 - field: wbe
-- field: SMC_ID
-  width: 5
-  default: 0
   width: 16
-- field: SMC_ID
-  width: 5
-  default: 0
-  default: 0
+  default: 0xffff
 - field: SMC_ID
   width: 5
   default: 0

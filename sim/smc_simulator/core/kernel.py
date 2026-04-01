@@ -209,8 +209,10 @@ class ParallelKernel:
                 if not decoder:
                     continue
                 decoded = decoder.decode(curr_raw)
-                vld = decoded.get('VALID') if 'VALID' in decoded.to_dict() else decoded.get('we')
-                if vld in [1, "1", "VALID", True]:
+                # 🛸 关键修复：兼容 VLD/VALID 以及 re/we 各种点火字段
+                d_dict = decoded.to_dict()
+                vld = d_dict.get('VLD') or d_dict.get('VALID') or d_dict.get('we') or d_dict.get('re')
+                if vld in [1, "1", "VALID", "VLD", True]:
                     # 关键修复：将解码后的 ADDR 传递给 UR 读请求。
                     # IQUnit 已经在脉冲期间根据 INC 属性动态修改了 instruction 中的地址位。
                     bank_val = decoded.get('BANK') if 'BANK' in decoded.to_dict() else decoded.get('wbank', 0)
@@ -226,8 +228,8 @@ class ParallelKernel:
             inst_w = controls.get(name_w, 0)
             if inst_w and name_w in iq_states and iq_states[name_w]['is_valid'] and not iq_states[name_w].get('is_fetching_dly', False):
                 decoded = iq_states[name_w]['decoded']
-                vld = decoded.get('VALID') if 'VALID' in decoded else decoded.get('we')
-                if vld in [1, "1", "VALID", True]:
+                vld = decoded.get('VLD') or decoded.get('VALID') or decoded.get('we') or decoded.get('re')
+                if vld in [1, "1", "VALID", "VLD", True]:
                     wdata = self.rtovr.get_output(getattr(RtoVROutput, f'UVR_WDATA_{i}'))
                     bank_val = decoded.get('BANK') if 'BANK' in decoded else decoded.get('wbank', 0)
                     addr_val = decoded.get('ADDR') if 'ADDR' in decoded else decoded.get('waddr', 0)
@@ -511,8 +513,9 @@ class ParallelKernel:
             if inst_r != 0:
                 decoder = self.decoders.get(f'ur-r{i}', self.decoders.get('ur_read'))
                 decoded = decoder.decode(inst_r)
-                vld = get_field(decoded, 'VALID') or get_field(decoded, 'we')
-                if vld in ["VALID", 1, "1", True]: 
+                d_dict = decoded.to_dict()
+                vld = d_dict.get('VLD') or d_dict.get('VALID') or d_dict.get('re') or d_dict.get('we')
+                if vld in ["VALID", "VLD", 1, "1", True]: 
                     bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))
                     addr = int(get_field(decoded, 'ADDR', get_field(decoded, 'waddr')))
                     data = self.ur_bank.storage[bank][addr]
@@ -526,8 +529,9 @@ class ParallelKernel:
             if inst_w != 0:
                 decoder = self.decoders.get(f'ur-w{i}', self.decoders.get('ur_write'))
                 decoded = decoder.decode(inst_w)
-                vld = get_field(decoded, 'VALID') or get_field(decoded, 'we')
-                if vld in ["VALID", 1, "1", True]:
+                d_dict = decoded.to_dict()
+                vld = d_dict.get('VLD') or d_dict.get('VALID') or d_dict.get('we') or d_dict.get('re')
+                if vld in ["VALID", "VLD", 1, "1", True]:
                     # 恢复正式数据路径：从 RtoVR 收割
                     data_val = self.rtovr.get_output(getattr(RtoVROutput, f"UVR_WDATA_{i}"))
                     bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))

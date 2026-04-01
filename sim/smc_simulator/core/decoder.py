@@ -31,8 +31,9 @@ class InstructionDecoder:
     # [0-5]: INC_EMBED, [6-9]: INC, [10-12]: DLY, [13-19]: COND, 
     # [20-29]: LOOPS, [30-35]: EMBED_END, [36-38]: EMBED_LOOPS, 
     # [39]: JUMP, [40]: VLD
-    def __init__(self, spec: UnitSpec, system_spec=None):
+    def __init__(self, spec, unit_name: str = None, system_spec=None):
         self.spec = spec
+        self.unit_name = unit_name or getattr(spec, "name", "UNKNOWN")
         # Load header layout dynamically
         if system_spec is None:
             from aiacc_hardware.src.spec_loader import SpecLoader
@@ -49,7 +50,8 @@ class InstructionDecoder:
     @property
     def payload_width(self) -> int:
         """该单元微指令的 payload 实际位宽（不含 header）。"""
-        return sum(f.width for f in self.spec.micro_instructions)
+        fields = getattr(self.spec, "code_fields", getattr(self.spec, "micro_instructions", []))
+        return sum(getattr(f, "bits", getattr(f, "width", 0)) for f in fields)
 
     @property
     def header_width(self) -> int:
@@ -67,7 +69,8 @@ class InstructionDecoder:
         curr_payload = 0
         
         # 1. 计算 Payload 注册位宽或求和位宽
-        spec_sum = sum(f.width for f in self.spec.micro_instructions)
+        fields = getattr(self.spec, "code_fields", getattr(self.spec, "micro_instructions", []))
+        spec_sum = sum(getattr(f, "bits", getattr(f, "width", 0)) for f in fields)
         reg_width = 0
         if hasattr(self.spec, "name"):
             # 搜索注册表数据 (通过 system_spec)
@@ -81,7 +84,7 @@ class InstructionDecoder:
         # 物理注入：直接从 loader 获取全局注册表 (最保险)
         from aiacc_hardware.src.spec_loader import SpecLoader
         iq_reg = SpecLoader().get_system_core().get("iq_registry", {})
-        reg_width = iq_reg.get(self.spec.unit_name, 0)
+        reg_width = iq_reg.get(self.unit_name, 0)
         
         if reg_width > 0:
             final_payload_width = reg_width
@@ -90,13 +93,15 @@ class InstructionDecoder:
             
         # 2. 映射 Payload 字段
         curr = 0
-        for field in self.spec.micro_instructions:
+        fields = getattr(self.spec, "code_fields", getattr(self.spec, "micro_instructions", []))
+        for field in fields:
+            f_bits = getattr(field, "bits", getattr(field, "width", 0))
             layout[field.name] = {
                 "offset": curr,
-                "mask": (1 << field.width) - 1,
+                "mask": (1 << f_bits) - 1,
                 "spec": field
             }
-            curr += field.width
+            curr += f_bits
             
         # 3. Header 紧跟在【物理决议】后的 Payload 之后
         curr = final_payload_width
@@ -123,10 +128,11 @@ class InstructionDecoder:
             if name == "INC" and (val & 0x8):
                 val -= 16
                 
-            # 语义映射
-            spec = info["spec"]
-            if spec and spec.encoding and val in spec.encoding:
-                fields[name] = spec.encoding[val]
+            # 语义映射 (安全访问)
+            spec_obj = info["spec"]
+            encoding = getattr(spec_obj, "encoding", None)
+            if spec_obj and encoding and val in encoding:
+                fields[name] = encoding[val]
             else:
                 fields[name] = val
         return DecodedInstruction(fields)

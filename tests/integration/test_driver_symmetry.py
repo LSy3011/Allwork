@@ -22,7 +22,7 @@ class TestDriverSymmetry(unittest.TestCase):
     def setUp(self):
         workspace = Path(__file__).parent.parent.parent
         self.spec = HardwareSpec.load(str(workspace / "hw_config"))
-        from smc_simulator.core.spec_loader_sim import SpecLoader
+        from aiacc_hardware.src.spec_loader import SpecLoader
         self.sim_loader = SpecLoader()
 
     def check_unit_symmetry(self, unit_name, test_meta):
