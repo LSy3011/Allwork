@@ -1,44 +1,76 @@
-from typing import Dict, List
+from typing import Dict, List, Any
 from ir.mir.mir_op import MIROp
+from driver.hw_constants import (
+    SEMANTIC_RE, SEMANTIC_WE, SEMANTIC_BANK, SEMANTIC_ADDR,
+    SEMANTIC_PREC, SEMANTIC_SRCID
+)
 
 class FieldMapper:
     """
-    AIACC 逻辑到物理字段映射器。
-    根据 modules.yaml 描述，将指令元数据转换为 Payload 整数。
+    AIACC 物理字段映射器 (V9: SDD 规格驱动版)。
+    遵循 ADR-006: 物理语义下沉原则。
+    驱动层是无偏见的 (Unbiased)，完全根据 YAML 规格和元数据进行打包。
     """
     @staticmethod
     def map_op_to_payload(op: MIROp, module_spec) -> int:
         payload = 0
         current_pos = 0 
-        
-        # Pydantic 对象访问属性
-        fields = module_spec.code_fields
         meta = op.metadata
         
-        for field in fields:
-            # field 也是 Pydantic 对象 (ModuleField)
+        # 将 encoding 反向映射，以便将 "SUB" 转换为 1
+        def resolve_fval(field, user_val) -> int:
+            # 1. 尝试从 encoding 表中进行反向语义查找 (如 "SUB" -> 1)
+            if isinstance(user_val, str) and field.encoding:
+                for k, v in field.encoding.items():
+                    if str(v).upper() == user_val.upper():
+                        return int(k)
+            # 2. 尝试解析为整数
+            try:
+                return int(user_val)
+            except (ValueError, TypeError):
+                return field.default
+
+        for field in module_spec.code_fields:
             fname = field.name
             fbits = field.bits
-            fval = 0
+            fval = field.default # 初期预置为规格默认值
             
-            # --- 映射逻辑 ---
-            if fname in ["re", "we", "vld"]: fval = 1
-            elif fname in ["rbank", "wbank", "bank_id", "bank", "p_bank_id"]: 
-                fval = int(meta.get("bank_id", meta.get("bank", meta.get("p_bank_id", 0))))
-            elif fname in ["raddr", "waddr", "p_addr", "address"]: 
-                fval = int(meta.get("p_addr", meta.get("address", 0)))
-            elif fname == "src_prec" or fname == "dst_prec": 
-                prec = meta.get("precision", meta.get("src_prec", meta.get("dst_prec", "f32")))
+            # --- 优先级瀑布决议 (Waterfall Priority) ---
+            
+            # 1. 指令级显式覆盖 (Highest): 匹配 YAML 中的物理字段名 (如 SUB, UPDATE_ST)
+            if fname in meta:
+                fval = resolve_fval(field, meta[fname])
+                
+            # 2. 通用语义宏匹配 (Medium): 处理 RE/WE/BANK/ADDR/PREC/SRCID
+            elif fname in SEMANTIC_RE or fname in SEMANTIC_WE:
+                fval = 1 # 只要硬件定义了这些使能位，当前指令即视作激活
+            
+            elif fname in SEMANTIC_BANK:
+                v = meta.get("bank_id", meta.get("bank", None))
+                if v is not None: fval = int(v)
+            
+            elif fname in SEMANTIC_ADDR:
+                v = meta.get("p_addr", meta.get("address", None))
+                if v is not None: fval = int(v)
+                
+            elif fname in SEMANTIC_PREC:
+                prec = meta.get("precision", meta.get("src_prec", "f32"))
+                # PREC_32 映射到 1 (来自 YAML encoding 的常规共识，若 YAML 覆盖则以 YAML 优先)
                 fval = 1 if "f32" in str(prec).lower() else 0
-            elif fname == "add_or_sub": 
-                fval = 1 if "SUB" in op.op_type.upper() else 0
-            elif fname == "dr_index" or fname == "src_id":
-                fval = int(meta.get("p_src_id", meta.get("slot_id", 0)))
-            elif fname == "up_stat_en": fval = 1
-            elif fname == "smc_id_en": fval = int(meta.get("smc_id_en", 0))
-            elif fname == "wbe": fval = int(meta.get("wbe", 0xFFFF))
+                
+            elif fname in SEMANTIC_SRCID:
+                v = meta.get("p_src_id", meta.get("slot_id", None))
+                if v is not None: fval = int(v)
             
-            payload |= ((fval & ((1 << fbits) - 1)) << current_pos)
+            # 3. 特殊固定字段处理 (Legacy Support)
+            elif fname == "wbe":
+                fval = int(meta.get("wbe", 0xFFFF))
+            elif "smc_id" in fname:
+                fval = int(meta.get("smc_id_en", 0))
+
+            # --- 物理级联与掩码保护 (Physical Marshalling) ---
+            fmask = (1 << fbits) - 1
+            payload |= ((fval & fmask) << current_pos)
             current_pos += fbits
             
         return payload

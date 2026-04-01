@@ -6,12 +6,12 @@ modules:
     outputs: [DR-FPADD-D, DR-FPADD-ST]
     code_bits: 10
     code_fields:
-      - {name: vld, bits: 1}
-      - {name: src_prec, bits: 1}
-      - {name: dst_prec, bits: 1}
-      - {name: up_stat_en, bits: 1}
-      - {name: add_or_sub, bits: 1}
-      - {name: smc_id_en, bits: 5}
+      - {name: VALID, bits: 1}
+      - {name: SRC_PREC, bits: 1}
+      - {name: DST_PREC, bits: 1}
+      - {name: UPDATE_ST, bits: 1}
+      - {name: SUB, bits: 1}
+      - {name: SMC_ID, bits: 5}
     parallelism:
       prec_16bit:
         lanes: 8
@@ -27,10 +27,10 @@ modules:
     outputs: [DR-FPMUL-D]
     code_bits: 8
     code_fields:
-      - {name: vld, bits: 1}
-      - {name: src_prec, bits: 1}
-      - {name: dst_prec, bits: 1}
-      - {name: smc_id_en, bits: 5}
+      - {name: VALID, bits: 1}
+      - {name: SRC_PREC, bits: 1}
+      - {name: DST_PREC, bits: 1}
+      - {name: SMC_ID, bits: 5}
     # 核心拆分对齐逻辑
     parallelism:
       prec_16bit:
@@ -45,29 +45,29 @@ modules:
     latency: 1
     code_bits: 7
     code_fields:
-      - {name: vld, bits: 1}
-      - {name: dr_index, bits: 6} # 对应端子编号 0~33
+      - {name: VALID, bits: 1}
+      - {name: SEL, bits: 6}
 
   UR_READ:
     type: memory_access
     latency: 1
     code_bits: 17
     code_fields:
-      - {name: re, bits: 1}
-      - {name: rbank, bits: 3}
-      - {name: raddr, bits: 8}
-      - {name: smc_id_en, bits: 5}
+      - {name: VALID, bits: 1}
+      - {name: BANK, bits: 3}
+      - {name: ADDR, bits: 8}
+      - {name: SMC_ID, bits: 5}
 
   UR_WRITE:
     type: memory_access
     latency: 1
     code_bits: 33
     code_fields:
-      - {name: we, bits: 1}
-      - {name: wbank, bits: 3}
-      - {name: waddr, bits: 8}
+      - {name: VALID, bits: 1}
+      - {name: BANK, bits: 3}
+      - {name: ADDR, bits: 8}
       - {name: wbe, bits: 16}
-      - {name: smc_id_en, bits: 5}
+      - {name: SMC_ID, bits: 5}
 
   STB:
     type: transfer

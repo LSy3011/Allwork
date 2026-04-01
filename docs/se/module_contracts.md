@@ -54,6 +54,25 @@ class EmissionResult:
 - **自诊断**：错误时返回 diagnostics
 
 ## 6. 验证工具链 [ADR-002]
+## 驱动层 (Driver) 与 库 (Library) 交互契约
+
+### 契约 020: 物理属性点火协议 (ADR-006)
+
+1. **库 (Library) 义务**：
+   - 必须通过 `MIROp.metadata` 提供硬件 Spec (YAML) 中定义的物理控制属性。
+   - 属性名必须与 YAML 中的 `field` 名（如 `SUB`, `SRC_PREC`, `UPDATE_ST`）严格一致，禁止使用自定义缩写。
+   - 对于 `FPADD`/`FPMUL` 等算子，不仅要指定操作数，还需显式配置其计算模式比特。
+
+2. **驱动 (Driver) 义务**：
+   - **禁止猜测驱动**：后端驱动不得根据算子字符串名（如 `FPSUB`）进行隐式属性补偿。
+   - **自动化映射**：驱动层必须支持 `Metadata-to-Bit` 的自动查找映射协议。
+   - **物理完备性检查**：如果 `metadata` 中存在硬件 Spec 中未定义的字段，驱动应在 `lint` 阶段报错或通过审计日志预警。
+
+3. **数据流归属权**：
+   - 指令的“灵魂”由库定义（属性值）。
+   - 指令的“肉体”由驱动拼装（比特偏移、掩码、补零）。
+
+## 目录分工速查 (ADM 视角)
 | 阶段 | 验证器 | 验证什么 |
 |:--- |:--- |:--- |
 | Post-SMT | SMTOutputVerifier | timing + exclusions 逻辑合法 |
