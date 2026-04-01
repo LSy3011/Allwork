@@ -121,6 +121,9 @@ class OperatorPhysicalTester:
             else:
                 y_vec = np.array([float(y_arr[0])] * 4)
             np.savez(acb_path / "golden_data.npz", y=y_vec.reshape(1, 4))
+            
+            # 🛸 同步输入数据，方便用户调参和离线分析
+            np.savez(acb_path / "input_data.npz", **input_data)
 
             # 🛠️ 覆盖 max_cycles 以应对高冲突配置
             config_file = acb_path / "sim_config.json"
