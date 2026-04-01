@@ -86,7 +86,7 @@ class Compactor:
                     
                     if match:
                         # 命中了！将此维度记录
-                        chain.append((factor - 1, stride, depth))
+                        if factor > 1: chain.append((factor - 1, stride, depth))
                         curr_seq = pattern # 缩减到上一层继续识别
                         depth += 1
                         found_dim = True

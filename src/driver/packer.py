@@ -14,11 +14,11 @@ class BitPacker:
                     embed_end: int = 0, inc_embed: int = 0) -> int:
         
         # 1. 封装 41-bit 头部 (Header)
-        # 按照 system_core.yaml 物理顺序 (从低到高): 
+        # 按照 isa_v5.yaml 物理顺序 (从低到高): 
         # INC_EMBED(6), INC(4), DLY(3), COND(7), LOOPS(10), EMBED_END(6), EMBED_LOOPS(3), JUMP(1), VLD(1)
         header = 0
         header |= (inc_embed & 0x3F)            # [0:5]
-        header |= ((inc & 0xF) << 6)            # [6:9]
+        header |= ((inc & 0xF) << 6)             # [6:9]
         header |= ((dly & 0x7) << 10)           # [10:12]
         header |= ((cond & 0x7F) << 13)         # [13:19]
         header |= ((loops & 0x3FF) << 20)       # [20:29]
