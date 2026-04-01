@@ -99,6 +99,7 @@ class ParallelKernel:
     def enable_trace(self):
         """Enable trace recording"""
         self.trace_recorder = TraceRecorder()
+        self.trace_recorder.enable()
 
     def dump_trace(self, json_path: str = None, chrome_path: str = None):
         """Save trace to file"""
@@ -160,37 +161,19 @@ class ParallelKernel:
         
         controls = {}
         iq_states = {}
-        trace_iq_states = {}
         for name, iq in self.iqs.items():
-            # [物理/轨迹采样] Evaluate 之前，确保捕获到将要被消费的 Header
-            inst_pre = 0
-            if 0 <= iq.pc < len(iq.memory):
-                inst_pre = iq.memory[iq.pc]
-            if iq.decoder:
-                try: d_pre = iq.decoder.decode(inst_pre).to_dict()
-                except: d_pre = {}
-                trace_iq_states[name] = {
-                    'raw_hex': inst_pre, 'decoded': d_pre,
-                    'is_valid': not iq.terminated, 'pc': iq.pc,
-                    'loop_cnts': {i: v['cnt'] for i, v in enumerate(iq.loop_states)} # 修正：列表应用 enumerate
-
-                }
-
-
             # 执行 IQ 评估 (物理消费指令/状态变迁)
             iq.evaluate({"INST_JUMP_IN": jump_signal}, cycle=self.cycle_count)
 
-            # [逻辑/执行采样] Evaluate 之后，确保 UR/Arbiter 逻辑看到的是指令后的稳定态
+            # [逻辑/执行采样] 统一在 Evaluate 之后捕获状态，确保 is_valid 对齐实际执行
             inst_now = iq.get_current_instruction()
-            if inst_now != 0 and iq.decoder and iq.is_valid():
-                try: d_now = iq.decoder.decode(inst_now).to_dict()
-                except: d_now = {}
-                iq_states[name] = {
-                    'raw_hex': inst_now, 'decoded': d_now,
-                    'is_valid': iq.is_valid(), 'pc': iq.pc,
-                    'is_fetching_dly': getattr(iq, '_just_fetched_dly', False)
-                }
-            
+            iq_states[name] = {
+                'raw_hex': inst_now, 
+                'decoded': iq.decoder.decode(inst_now).to_dict() if (inst_now and iq.decoder) else {},
+                'is_valid': iq.is_valid(), 
+                'pc': iq.pc,
+                'is_fetching_dly': getattr(iq, 'delay_active', False)
+            }
             controls[name] = inst_now if iq.is_valid() else 0
 
 
@@ -343,7 +326,7 @@ class ParallelKernel:
                 'reads': self.arbiter.current_reads.copy(),
                 'writes': self.arbiter.current_writes.copy()
             }
-            self.trace_recorder.record_cycle(self.cycle_count, trace_iq_states, unit_states, arb_snapshot, ur_requests)
+            self.trace_recorder.record_cycle(self.cycle_count, iq_states, unit_states, arb_snapshot, ur_requests)
 
         # --- [Phase 4: Commit] ---
         self._tick_all()

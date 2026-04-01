@@ -5,7 +5,7 @@ from typing import Dict, List, Any
 class TraceRecorder:
     """
     AIACC V5.13 经典语义渲染版 TraceRecorder (100% 样式兼容)。
-    对齐旧版符号：a/+/m/*/L/S/r/~，支持物理时延铺展。
+    支持同时接收原始 IQ 对象或已经过预处理的 trace 字典。
     """
     def __init__(self):
         self.history = {} # unit_name -> [ {cycle_data} ]
@@ -15,24 +15,35 @@ class TraceRecorder:
     def enable(self): self.is_enabled = True
 
     def record_cycle(self, cycle: int, iqs: Dict[str, Any], *args, **kwargs):
-        """[Legacy Kernel Interface] 映射至标准的 record 方法。"""
+        """[Standard Kernel Interface]"""
         self.record(cycle, iqs)
 
-    def record(self, cycle: int, iqs: Dict[str, Any], regs=None, smc=None):
+    def record(self, cycle: int, iqs_or_dicts: Dict[str, Any], regs=None, smc=None):
         if not self.is_enabled: return
         self.max_cycle = max(self.max_cycle, cycle)
         
-        for name, iq in iqs.items():
+        for name, iq in iqs_or_dicts.items():
             if name not in self.history: self.history[name] = []
             
-            # 捕获物理执行状态与单元时延
-            state = {
-                'cycle': cycle,
-                'is_valid': getattr(iq, 'is_valid', lambda: False)(),
-                'is_fetching_dly': getattr(iq, 'delay_active', False),
-                'latency': getattr(iq, 'latency', 1),
-                'raw_hex': iq.memory[iq.pc] if iq.pc < len(iq.memory) else 0
-            }
+            # --- 兼容性决议逻辑 ---
+            if isinstance(iq, dict):
+                # 如果传入的是 Kernel 已经预处理好的 trace 字典
+                state = {
+                    'cycle': cycle,
+                    'is_valid': iq.get('is_valid', False),
+                    'is_fetching_dly': iq.get('is_fetching_dly', False),
+                    'latency': iq.get('latency', 1),
+                    'raw_hex': iq.get('raw_hex', 0)
+                }
+            else:
+                # 兼容旧版本：直接处理 IQ 对象
+                state = {
+                    'cycle': cycle,
+                    'is_valid': getattr(iq, 'is_valid', lambda: False)(),
+                    'is_fetching_dly': getattr(iq, 'delay_active', False),
+                    'latency': getattr(iq, 'latency', 1),
+                    'raw_hex': iq.memory[iq.pc] if iq.pc < len(iq.memory) else 0
+                }
             self.history[name].append(state)
 
     def save_to_timeline_ascii(self, file_path: str):
@@ -48,6 +59,17 @@ class TraceRecorder:
             if "UR-W" in u:  return 'S', '~'
             return 'X', '='
 
+        # 1. 生存性审计：过滤掉全程没有有效指令执行的闲置单元 (Idle Units)
+        active_units = []
+        for unit, states in self.history.items():
+            if any(s.get('is_valid', False) for s in states):
+                active_units.append(unit)
+        
+        sorted_units = sorted(active_units)
+        if not sorted_units:
+            print("⚠️ [TRACE-WARNING] No active units found during simulation. Skipping timeline.")
+            return
+
         # 2. 构造缓冲区
         lines = []
         header = f"{'iq_name':<15} |"
@@ -56,7 +78,6 @@ class TraceRecorder:
             else: header += " . "
         lines.append(header)
         
-        sorted_units = sorted(self.history.keys())
         # 创建时序矩阵
         matrix = {u: ["."] * (self.max_cycle + 1) for u in sorted_units}
         active_counts = [0] * (self.max_cycle + 1)
@@ -68,9 +89,9 @@ class TraceRecorder:
                 cyc = state['cycle']
                 if cyc > self.max_cycle: continue
                 
-                # 物理点火触发完整覆盖
-                if state['is_valid'] or state['is_fetching_dly']:
-                    lat = state['latency']
+                # 🛸 关键过滤：仅当 is_valid 为真(Payload 指令正在执行)时绘制符号
+                if state.get('is_valid', False):
+                    lat = int(state['latency'])
                     # 绘制首拍
                     if matrix[unit][cyc] == ".":
                         matrix[unit][cyc] = head_char
@@ -100,15 +121,10 @@ class TraceRecorder:
             else: occ_line += f"{occ:>2} "
         lines.append(occ_line)
 
+        # 确保目录存在
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
         with open(file_path, "w") as f:
             f.write("\n".join(lines) + "\n")
         
-        # 🛸 物理硬探针 (Physical Probe)
-        try:
-            with open("/tmp/aiacc_final_trace.txt", "w") as f:
-                f.write("\n".join(lines) + "\n")
-            print(f"📊 [PROBE-SUCCESS] Evidence written to /tmp/aiacc_final_trace.txt")
-        except:
-            print(f"❌ [PROBE-FAIL] Cannot write probe.")
-            
         print(f"📊 [TRACE-SAVE] Standard Legacy Style saved to: {os.path.abspath(file_path)}")
