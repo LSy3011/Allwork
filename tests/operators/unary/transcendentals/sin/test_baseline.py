@@ -14,8 +14,8 @@ class TestSinPhysicalIndustrialized:
         # 2. 生成 8 阶泰勒 DFG
         dfg_ops = get_sin_8order_dfg()
         
-        # 3. 准备物理测试数据
-        x = np.array([1.5707], dtype=np.float32)
+        # 3. 准备物理测试数据 (4 路输入: pi/2, 0, pi/4, pi)
+        x = np.array([1.570796, 0.0, 0.785398, -0.785398], dtype=np.float32)
         y_ref = np.sin(x).astype(np.float32)
         
         # 泰勒级数常量表 (严格对齐 8 阶展开系数)
@@ -24,7 +24,7 @@ class TestSinPhysicalIndustrialized:
             "c2_rd": 8.333333e-3, 
             "c3_rd": 1.666667e-1, 
             "c4_rd": 1.0,          
-            "w_y": x[0]**2        
+            "w_y": (x**2).astype(np.float32)        
         }
         
         # 4. 执行全自动物理验证 (向 build/sin/ 归档)

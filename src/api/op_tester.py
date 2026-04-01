@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import shutil
 import subprocess
 import numpy as np
@@ -13,8 +14,8 @@ from driver.emitter import LIRPacker
 
 class OperatorPhysicalTester:
     """
-    AIACC 纯净版五阶段自动化验证测站 (The Production Base v6.7)
-    目标: 极致稳定，仅关注 smc_simulator 最终对比结果。
+    AIACC 工业化 128-bit 物理验证基座 (v7.2-Final)
+    严格遵循硬件 128-bit 对位：强制镜像广播 + 信号地址归一化。
     """
     def __init__(self, hw_config_path: str = "hw_config", build_root: str = "build"):
         self.ws = Path.cwd()
@@ -27,16 +28,9 @@ class OperatorPhysicalTester:
         base_dir = op_root
         if strategy != "default":
             base_dir = op_root / f"perf_contest/{strategy}"
-        
         base_dir.mkdir(parents=True, exist_ok=True)
-        stages = {
-            "p1": base_dir / "phase1_synthesis",
-            "p2": base_dir / "phase2_emission",
-            "p3": base_dir / "phase3_simulation",
-            "p4": base_dir / "phase4_verification"
-        }
-        for p in stages.values():
-            p.mkdir(parents=True, exist_ok=True)
+        stages = {"p1": base_dir / "phase1_synthesis", "p2": base_dir / "phase2_emission"}
+        for p in stages.values(): p.mkdir(parents=True, exist_ok=True)
         return stages, op_root
 
     def run_full_stack_verification(self, 
@@ -49,32 +43,69 @@ class OperatorPhysicalTester:
                                    strategies: List[str] = ["balanced"],
                                    atol: float = 5e-3,
                                    max_cycles: int = 200):
-        """
-        [工业化标准流] 仅关注仿真正确性对比。
-        """
         for strategy in strategies:
-            print(f"\n🚀 [INDUSTRIAL-SIM] Testing {op_name} via SMC_Simulator...")
+            print(f"\n🚀 [INDUSTRIAL-SIM] Testing {op_name} (128-bit Mode) ...")
             stages, op_root = self._prepare_stages(op_name, strategy)
             
-            # --- 1. Synthesis & Stitching ---
+            # 1. 物理约束注入 (Bank-ID)
+            for op in dfg_ops:
+                if op.node_id in static_banks:
+                    op.metadata["bank_id"] = static_banks[op.node_id]
+
+            # 2. SMT 合成
             res = SMTSynthesizer(self.spec).solve(dfg_ops, strategy=strategy)
+            
+            # 3. 物理数据排布 (128-bit SIMD Row Mirroring)
+            banks = {i: [] for i in range(8)}
+            bank_cursors = {i: 0 for i in range(8)}
+            tensors_meta = []
+            
+            # 关键：手动处理信号别名，确保 x_rd 和 x_f_rd 共享物理地址
+            # 也确保 w_y 和 y_reX 共享物理地址
+            phys_mapping = {} # 信号核心名 -> (bank, addr)
+
+            def get_phys_key(nid):
+                if nid.startswith("x"): return "x"
+                if nid == "w_y" or nid.startswith("y_re"): return "w_y"
+                return nid.replace("_rd", "")
+
+            for op in dfg_ops:
+                if "bank_id" in op.metadata:
+                    b = op.metadata["bank_id"]
+                    pkey = get_phys_key(op.node_id)
+                    
+                    if pkey not in phys_mapping:
+                        addr = bank_cursors[b]
+                        phys_mapping[pkey] = (b, addr)
+                        
+                        # 🛸 填充 128-bit 矢量数据 (SMD: 4 x float32)
+                        val = input_data.get(op.node_id, constants.get(pkey, constants.get(op.node_id)))
+                        if val is not None:
+                            val_arr = np.array(val).flatten()
+                            if val_arr.size == 4:
+                                vec_val = val_arr.tolist()
+                            else:
+                                vec_val = [float(val_arr[0])] * 4
+                        else:
+                            vec_val = [0.0] * 4
+                        
+                        banks[b].append(vec_val)
+                        bank_cursors[b] += 1
+                    
+                    target_b, target_addr = phys_mapping[pkey]
+                    op.metadata["addr"] = target_addr
+                    # ⚠️ 强制纠正别名算子的物理 Bank (如果它之前写死的是其它值，如 x_f_rd 写成了 0)
+                    op.metadata["bank_id"] = target_b
+                    
+                    name = "y" if op.node_id == "w_fin" else pkey
+                    role = "output" if op.node_id == "w_fin" else "input"
+                    if not any(tm["name"] == name for tm in tensors_meta):
+                        tensors_meta.append({"name": name, "bank": target_b, "offset": target_addr, "shape": [1, 4], "role": role})
+
+            # 4. 指令打包
             stitcher = HSTSStitcher()
             stitcher.add_operator(op_name, dfg_ops, res)
             final_stream = stitcher.get_final_stream()
-            
-            # --- 2. Emission & Data Sync ---
-            banks = {i: [0.0]*4 for i in range(8)}
-            tensors_meta = []
-            for op in dfg_ops:
-                if "bank_id" in op.metadata:
-                    b = static_banks.get(op.node_id, op.metadata["bank_id"])
-                    op.metadata["bank_id"] = b 
-                    if op.node_id in input_data: banks[b] = [float(input_data[op.node_id].flatten()[0]), 0, 0, 0]
-                    elif op.node_id in constants: banks[b] = [float(constants[op.node_id]), 0, 0, 0]
-                    
-                    role = "output" if op.node_id == "w_fin" else "input"
-                    name = "y" if op.node_id == "w_fin" else op.node_id.replace("_rd", "").replace("_f", "")
-                    tensors_meta.append({"name": name, "bank": b, "offset": 0, "shape": [1], "role": role})
 
             class ProgramProxy:
                 def __init__(self, b, t):
@@ -84,27 +115,31 @@ class OperatorPhysicalTester:
             acb_path = stages["p2"] / "acb_bundle"
             LIRPacker(self.hw_config).emit_from_stream(final_stream, str(acb_path), program=ProgramProxy(banks, tensors_meta))
 
-            # 🛸 重要：在 acb_bundle 中备好比对数据，供模拟器运行后直接校验
-            np.savez(acb_path / "input_data.npz", **input_data)
-            np.savez(acb_path / "golden_data.npz", y=golden_y)
+            y_arr = np.array(golden_y).flatten()
+            if y_arr.size == 4:
+                y_vec = y_arr
+            else:
+                y_vec = np.array([float(y_arr[0])] * 4)
+            np.savez(acb_path / "golden_data.npz", y=y_vec.reshape(1, 4))
 
-            # --- 3. Simulation (Real Hardware Runner) ---
+            # 🛠️ 覆盖 max_cycles 以应对高冲突配置
+            config_file = acb_path / "sim_config.json"
+            if config_file.exists():
+                with open(config_file, "r") as f:
+                    cdata = json.load(f)
+                cdata["max_cycles"] = max_cycles
+                with open(config_file, "w") as f:
+                    json.dump(cdata, f, indent=2)
+
+            # 5. 仿真验证
             env = os.environ.copy()
             env["PYTHONPATH"] = f"{self.ws}:{self.ws}/src:{self.ws}/sim:" + env.get("PYTHONPATH", "")
             runner = self.ws / "sim" / "smc_simulator" / "tools" / "physical_runner.py"
-            
-            # 使用更大的 max_cycles 确保比对流程能走完
             res_sim = subprocess.run(["python3", str(runner), str(acb_path)], env=env, capture_output=True, text=True)
             
-            # --- 4. Final Verdict ---
-            # 捕获模拟器输出的校验通过标志
-            passed = "PASSED" in res_sim.stdout.upper() or "Verified successfully" in res_sim.stdout
-            
-            if passed:
+            if "PASSED" in res_sim.stdout.upper() or "Verified successfully" in res_sim.stdout:
                 print(f"✅ {op_name} (SMC v2.4): BIT-PERFECT PARITY ACHIEVED")
             else:
-                print(f"🚨 {op_name} (SMC v2.4): VERIFICATION FAILED")
-                print(f"[ERROR-LOG]:\n{res_sim.stdout[-1000:]}")
-                return False, "Simulation Parity Failed"
-
-        return True, "Success"
+                print(f"🚨 {op_name} (SMC v2.4): VERIFICATION FAILED\n[LOG]:\n{res_sim.stdout[-800:]}")
+                return False, "Sim Fail"
+        return True, "Done"

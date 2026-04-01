@@ -25,12 +25,13 @@ class TestSinBankRobustness:
         
         fuzz_results = []
         
-        # 准备物理测试数据
-        x = np.array([1.5707], dtype=np.float32)
+        # 准备物理测试数据 (4 路输入)
+        x = np.array([1.570796, 0.0, 0.785398, -0.785398], dtype=np.float32)
         y_ref = np.sin(x).astype(np.float32)
         sin_constants = {
             "c1_rd": 1.984127e-4, "c2_rd": 8.333333e-3, 
-            "c3_rd": 1.666667e-1, "c4_rd": 1.0, "w_y": x[0]**2
+            "c3_rd": 1.666667e-1, "c4_rd": 1.0, 
+            "w_y": (x**2).astype(np.float32)
         }
 
         # 3. 循环扫射执行 (32 Cases)

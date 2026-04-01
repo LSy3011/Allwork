@@ -39,11 +39,24 @@ class SMTSynthesizer:
             elif op.op_type.upper() == "UR_WRITE":
                 iv = z3.Int(f"iq_{op.node_id}")
                 iq_vars[op.node_id] = iv
-                # 默认 UR_WRITE 端口为 204~207
+                # UR_WRITE physical port must match its RtoVR pipeline slot:
+                # SLOT_WDATA_0=35 -> ur-w0 (204)
+                # SLOT_WDATA_1=36 -> ur-w1 (205)
+                # ...
                 if op.metadata.get("iq_id") is not None:
                     solver.add(iv == op.metadata["iq_id"])
                 else:
-                    solver.add(iv >= 204, iv <= 207)
+                    dep_slot = None
+                    for dep_id in op.metadata.get("depends_on", []):
+                        dep_op = next((o for o in ops if o.node_id == dep_id), None)
+                        if dep_op and dep_op.op_type.upper() == "RTOVR" and "slot_id" in dep_op.metadata:
+                            dep_slot = dep_op.metadata["slot_id"]
+                            break
+                    
+                    if dep_slot is not None and 35 <= dep_slot <= 38:
+                        solver.add(iv == 204 + (dep_slot - 35))
+                    else:
+                        solver.add(iv >= 204, iv <= 207)
 
         # 2. 数据依赖约束 (RAW) — 128-bit 归一化 Latency
         # Latency 包含点火那一拍，故流水等待为 (L-1)。

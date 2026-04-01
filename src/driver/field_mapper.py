@@ -46,27 +46,40 @@ class FieldMapper:
                 fval = 1 # 只要硬件定义了这些使能位，当前指令即视作激活
             
             elif fname in SEMANTIC_BANK:
-                v = meta.get("bank_id", meta.get("bank", None))
-                if v is not None: fval = int(v)
+                for k in SEMANTIC_BANK:
+                    if k in meta and meta[k] is not None:
+                        fval = int(meta[k])
+                        break
             
             elif fname in SEMANTIC_ADDR:
-                v = meta.get("p_addr", meta.get("address", None))
-                if v is not None: fval = int(v)
+                for k in SEMANTIC_ADDR:
+                    if k in meta and meta[k] is not None:
+                        fval = int(meta[k])
+                        break
                 
             elif fname in SEMANTIC_PREC:
-                prec = meta.get("precision", meta.get("src_prec", "f32"))
+                prec = "f32"
+                for k in SEMANTIC_PREC:
+                    if k in meta and meta[k] is not None:
+                        prec = meta[k]
+                        break
                 # PREC_32 映射到 1 (来自 YAML encoding 的常规共识，若 YAML 覆盖则以 YAML 优先)
                 fval = 1 if "f32" in str(prec).lower() else 0
                 
             elif fname in SEMANTIC_SRCID:
-                v = meta.get("p_src_id", meta.get("slot_id", None))
-                if v is not None: fval = int(v)
+                for k in SEMANTIC_SRCID:
+                    if k in meta and meta[k] is not None:
+                        fval = int(meta[k])
+                        break
             
             # 3. 特殊固定字段处理 (Legacy Support)
             elif fname == "wbe":
                 fval = int(meta.get("wbe", 0xFFFF))
             elif "smc_id" in fname:
                 fval = int(meta.get("smc_id_en", 0))
+
+            if op.node_id in ["c4_rd", "w_y"]:
+                print(f"[DEBUG-FIELDMAPPER] op={op.node_id} field={fname} fval={fval} meta_addr={meta.get('addr')} meta_bank={meta.get('bank_id')}")
 
             # --- 物理级联与掩码保护 (Physical Marshalling) ---
             fmask = (1 << fbits) - 1

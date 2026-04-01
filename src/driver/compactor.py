@@ -9,14 +9,7 @@ class Compactor:
     def compress_iq_stream(stream: List[Tuple[int, int, bool]], iq_conf) -> List[Dict]:
         # Step 1: 1D 基础折叠 (最内层)
         packets = Compactor._pass1_linear_folding(stream, iq_conf)
-        if len(packets) < 2: return packets
-        
-        # Step 2: 7D 步进探测 (寻找递归 Stride)
-        # 我们寻找整齐划一的嵌套结构
-        dim_chain = Compactor._detect_strides(packets)
-        
-        if not dim_chain:
-            return packets
+        return packets
             
         # Step 3: 根据探测到的 Chain 发射 Header 序列
         # dim_chain 格式: [(loops, stride, depth), ...]
@@ -119,16 +112,19 @@ class Compactor:
             
             # --- 🛸 核心修复：物理气泡注入 (Gap Filling) ---
             # 如果 SMT 算出的点火时间 t_curr 超过了预期时间，说明中间有气泡。
-            # 补齐有效位 VALID=0 的物理指令。
+            # 💡 优化：采用 NOP + LOOPS 字段进行极致压缩。
             while next_expected_t < t_curr:
+                gap = t_curr - next_expected_t
+                # loops = count - 1
+                curr_loops = min(gap, max_loops + 1) - 1
                 res.append({
                     "t": next_expected_t, 
                     "payload": 0, 
-                    "loops": 0, "dly": 0, "inc": 0, 
+                    "loops": curr_loops, "dly": 0, "inc": 0, 
                     "embed": 0, "embed_end": 0,
                     "valid": 0  # 明确标记为 NOP
                 })
-                next_expected_t += 1
+                next_expected_t += (curr_loops + 1)
             
             loops, stride = 0, 0
             if iq_conf.EN_INC and i + 1 < len(stream):
@@ -162,4 +158,5 @@ class Compactor:
             next_expected_t = t_curr + (loops + 1)
             res.append(cmd)
             
+        print(f"[COMPA-DEBUG] Stream len={len(stream)} -> Pass1 folded len={len(res)}")
         return res

@@ -111,6 +111,9 @@ class IQUnit(Component):
                 self._instruction_valid = False
                 self.exec_active = False
                 hjump = 0; hembed = 0; current_inc = 0
+                # 🚀 物理增强：支持 NOP 指令的 LOOPS 扩展，维持气泡占位
+                self.loop_states[0]["max"] = loops_val
+                self.loop_states[0]["inc"] = 0 # NOP 无增量
         else:
             hvld = 0; dly = 0; loops_val = 0; hjump = 0; hembed = 0
             self._instruction_valid = False

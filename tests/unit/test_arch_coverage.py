@@ -68,35 +68,35 @@ class TestSoftwareArchitectureCoverage(unittest.TestCase):
         self._verify_algo_to_definition(
             op_type="FPMUL",
             metadata={"src_prec": "f32", "dst_prec": "f32"},
-            expected_fields={"vld": 1, "src_prec": 1, "dst_prec": 1}
+            expected_fields={"VALID": 1, "SRC_PREC": 1, "DST_PREC": 1}
         )
 
     def test_algo_to_def_fpadd(self):
         self._verify_algo_to_definition(
             op_type="FPADD",
             metadata={"src_prec": "f32", "dst_prec": "f32"},
-            expected_fields={"vld": 1, "src_prec": 1, "dst_prec": 1, "add_or_sub": 0}
+            expected_fields={"VALID": 1, "SRC_PREC": 1, "DST_PREC": 1, "SUB": 0}
         )
 
     def test_algo_to_def_urr(self):
         self._verify_algo_to_definition(
             op_type="UR_READ",
             metadata={"bank_id": 4, "p_addr": 128},
-            expected_fields={"re": 1, "rbank": 4, "raddr": 128}
+            expected_fields={"VALID": 1, "BANK": 4, "ADDR": 128}
         )
 
     def test_algo_to_def_urw(self):
         self._verify_algo_to_definition(
             op_type="UR_WRITE",
             metadata={"bank_id": 7, "p_addr": 255},
-            expected_fields={"we": 1, "wbank": 7, "waddr": 255} 
+            expected_fields={"VALID": 1, "BANK": 7, "ADDR": 255} 
         )
 
     def test_algo_to_def_rtovr(self):
         self._verify_algo_to_definition(
             op_type="RTOVR-3", 
             metadata={"slot_id": 3},
-            expected_fields={"vld": 1, "dr_index": 3}
+            expected_fields={"VALID": 1, "SEL": 3}
         )
 
     # =========================================================================

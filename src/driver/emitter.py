@@ -73,6 +73,9 @@ class LIRPacker:
             if "RTOVR" in m_name: lookup = "IQ_RTOVR"
             if lookup not in self.hw_spec.iqs: continue
             
+            # DEBUG PRINT
+            print(f"[EMIT-LOG] Op:{op.node_id} Type:{m_name} IQ:{name} T:{op.metadata['global_t']}")
+
             mod_spec = self.hw_spec.modules.get(m_name)
             if not mod_spec: continue
             
@@ -88,6 +91,10 @@ class LIRPacker:
         iq_reg = self.hw_spec.system_core.get("iq_registry", {})
         
         for name, stream in module_streams.items():
+            if name == "ur-r1":
+                times = [s["t"] for s in stream]
+                print(f"[EMIT-TRACE] IQ: ur-r1 | Op T-seq: {times}")
+
             # 推导逻辑基类以检索精确位宽
             base_type = "UR_READ" if "ur-r" in name else "UR_WRITE" if "ur-w" in name else "RTOVR" if "rtovr" in name else name.upper()
             bits_code = iq_reg.get(base_type, DEFAULT_BITS_CODE)
@@ -103,7 +110,11 @@ class LIRPacker:
             for cmd in compressed:
                 val = BitPacker.pack_capsule(
                     iq_name=name, iq_conf=local_iq_conf, payload=cmd["payload"],
-                    loops=cmd["loops"], dly=cmd["dly"]
+                    loops=cmd["loops"], dly=cmd["dly"],
+                    inc=cmd.get("inc", 0), 
+                    embed=cmd.get("embed", 0), 
+                    jump=cmd.get("jump", 0),
+                    embed_end=cmd.get("embed_end", 0)
                 )
                 
                 # 🛸 物理点火：基于 OFFSET_VLD 宏进行状态位注入
@@ -118,6 +129,8 @@ class LIRPacker:
             hex_file_name = f"iq_{name.replace('-', '_')}.hex"
             with open(smc0 / hex_file_name, "w") as f:
                 f.write("\n".join(hex_lines) + "\n")
+            
+            print(f"[EMITTER-DEBUG] IQ: {name} | Compressed: {len(compressed)} items | Hex Lines: {len(hex_lines)}")
             
             iq_init[name] = f"smc_0/{hex_file_name}"
 
@@ -143,10 +156,12 @@ class LIRPacker:
         for b_id, storage in program.memory_allocator.banks.items():
             with open(ur_dir / f"bank{b_id}.hex", "w") as f:
                 for entry in storage:
-                    if isinstance(entry, (list, np.ndarray)):
-                        packed = sum((int(struct.unpack("<I", struct.pack("<f", x))[0]) & 0xFFFFFFFF) << (32*i) for i, x in enumerate(entry[:4]))
-                    else:
-                        packed = int(struct.unpack("<I", struct.pack("<f", entry))[0]) & 0xFFFFFFFF
+                    if not isinstance(entry, (list, np.ndarray, tuple)):
+                        # 🛸 标量广播扩展: 如果原始数据是标量，其物理行填满 4 份一样的数
+                        entry = [entry] * 4
+                    
+                    # 🛰️ 128-bit 矢量物理通道对位 (修正为 Little Endian Lane: Lane 0 at bits 31:0)
+                    packed = sum((int(struct.unpack("<I", struct.pack("<f", x))[0]) & 0xFFFFFFFF) << (32 * i) for i, x in enumerate(entry[:4]))
                     f.write(f"{packed:032x}\n")
         
         for t_name, t_obj in program.tensors.items():
