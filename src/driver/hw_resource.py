@@ -26,24 +26,14 @@ class ResourceType(Enum):
 class PortSlot(IntEnum):
     """
     RtoVR 网格物理插槽占位符。
-    映射到 rtovr_config.yaml 中的物理编号。
-    """
-    # 消费者 (Output Side / Consumers)
-    INTADD_D0 = 0
-    INTADD_D1 = 1
-    INTADD_ST = 2
-    FPMUL_D   = 3
-    FPADD_D   = 4
-    FPADD_ST  = 5
-    LOGIC_D   = 10
-    UR_R0_D   = 30
-    UR_R1_D   = 31
-    UR_R2_D   = 32
-    UR_R3_D   = 33
+    映射到 constants.py 中的物理编号。
     
-    # 生产者 (Input Side / Producers)
+    🛸 [V4.0 更新]：对齐 INT8TOFP16 和多字并行接口。
+    """
+    # --- 消费者 (Input Side / RtoVR Destinations) ---
     INTADD_S0 = 0
     INTADD_S1 = 1
+    INTADD_S2 = 2
     FPMUL_S0  = 3
     FPMUL_S1  = 4
     FPADD_S0  = 5
@@ -51,7 +41,26 @@ class PortSlot(IntEnum):
     LOGIC_S0  = 11
     LOGIC_S1  = 12
     LOGIC_ST  = 13
+    INT8TOFP16_S0 = 17
+    INT8TOFP16_S1 = 18
     UR_W0_S   = 35
     UR_W1_S   = 36
     UR_W2_S   = 37
     UR_W3_S   = 38
+    
+    # --- 生产者 (Output Side / RtoVR Sources) ---
+    INTADD_D0 = 0
+    INTADD_D1 = 1
+    INTADD_ST = 2
+    FPMUL_D   = 3
+    FPADD_D   = 4
+    FPADD_ST  = 5
+    LOGIC_D   = 10
+    INT8TOFP16_D0 = 14
+    INT8TOFP16_D1 = 15
+    INT8TOFP16_D2 = 16
+    INT8TOFP16_D3 = 17
+    UR_R0_D   = 30
+    UR_R1_D   = 31
+    UR_R2_D   = 32
+    UR_R3_D   = 33

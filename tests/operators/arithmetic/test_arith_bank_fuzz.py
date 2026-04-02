@@ -14,7 +14,7 @@ class TestArithmeticBankRobustness:
     [V3.2 更新]: 纳入 Sin 8阶泰勒展开验证。
     """
 
-    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not", "sqrt", "rsqrt", "select_gt", "select_eq", "select_ls"])
+    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not", "sqrt", "rsqrt", "select_gt", "select_eq", "select_ls", "int8tofp16"])
     @pytest.mark.parametrize("data_mode", ["fuzz", "boundary"])
     def test_arithmetic_ccug_fuzzing(self, op_type, data_mode):
         """对基础算子执行 CCUG 角色自适应压力测试"""
@@ -31,6 +31,7 @@ class TestArithmeticBankRobustness:
         from library.atomic.powers.sqrt import get_sqrt_v4_dfg
         from library.atomic.powers.rsqrt import get_rsqrt_v4_dfg
         from library.atomic.logical.logical_ops import get_select_gt_dfg, get_select_eq_dfg, get_select_ls_dfg
+        from library.atomic.conversions.quant_ops import get_int8_to_fp16_dfg
 
         if op_type == "add":
             dfg_ops = get_add_dfg()
@@ -111,6 +112,28 @@ class TestArithmeticBankRobustness:
             role_to_input = {"operand_a": "x_val", "operand_b": "y_val", "condition": "st_val"}
             # Ref: out = a if (st & check_bit) else b
             ref_fn = lambda d: np.where(d["condition"].view(np.uint32) & check_bit, d["operand_a"], d["operand_b"])
+        elif op_type == "int8tofp16":
+            dfg_ops = get_int8_to_fp16_dfg()
+            role_to_input = {"operand_a": "i8_lo", "operand_b": "i8_hi"}
+            def int8_to_fp16_ref(d):
+                import struct
+                s0_raw = d["operand_a"].view(np.uint32)
+                s1_raw = d["operand_b"].view(np.uint32)
+                n_rows = s0_raw.shape[0]
+                res = {f"f16_res_{k}": [] for k in range(4)}
+                for r in range(n_rows):
+                    s0_word = sum(int(s0_raw[r, k]) << (32 * k) for k in range(4))
+                    s1_word = sum(int(s1_raw[r, k]) << (32 * k) for k in range(4))
+                    d_words = [0]*4
+                    for i in range(32):
+                        val_i8 = ((s1_word >> (i*4)) & 0xF) << 4 | (s0_word >> (i*4)) & 0xF
+                        if val_i8 >= 128: val_i8 -= 256
+                        f16_bits = struct.unpack('<H', struct.pack('<e', float(val_i8)))[0]
+                        for k in range(4): d_words[k] |= ((f16_bits >> (k*4)) & 0xF) << (i*4)
+                    for k in range(4):
+                        res[f"f16_res_{k}"].append(np.array([(d_words[k] >> (j*32)) & 0xFFFFFFFF for j in range(4)], dtype=np.uint32).view(np.float32))
+                return {k: np.array(v) for k, v in res.items()}
+            ref_fn = int8_to_fp16_ref
         else:
             raise ValueError(f"Unknown op_type: {op_type}")
 

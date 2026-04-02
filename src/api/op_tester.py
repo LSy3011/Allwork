@@ -130,11 +130,11 @@ class OperatorPhysicalTester:
                     
                     target_b, target_addr = phys_mapping[pkey]
                     op.metadata["addr"] = target_addr
-                    # ⚠️ 强制纠正别名算子的物理 Bank (如果它之前写死的是其它值，如 x_f_rd 写成了 0)
-                    op.metadata["bank_id"] = target_b
+                    # 🛸 关键：识别多输出锚点
+                    is_node_output = op.metadata.get("is_output", op.trace_id == "w_fin")
+                    name = op.metadata.get("meta_name", "y" if is_node_output else pkey)
+                    role = "output" if is_node_output else "input"
                     
-                    name = "y" if op.trace_id == "w_fin" else pkey
-                    role = "output" if op.trace_id == "w_fin" else "input"
                     if not any(tm["name"] == name and tm["role"] == role for tm in tensors_meta):
                         tensors_meta.append({"name": name, "bank": target_b, "addr": target_addr, "offset": target_addr, "shape": [1, 4], "role": role})
 
@@ -151,12 +151,18 @@ class OperatorPhysicalTester:
             acb_path = stages["p2"] / "acb_bundle"
             LIRPacker(self.hw_config).emit_from_stream(final_stream, str(acb_path), program=ProgramProxy(banks, tensors_meta))
 
-            y_arr = np.array(golden_y).flatten()
-            if y_arr.size == 4:
-                y_vec = y_arr
+            # --- 🛸 处理 Golden Data (支持多输出字典或单数组) ---
+            golden_save_dict = {}
+            if isinstance(golden_y, dict):
+                for k, v in golden_y.items():
+                    val_arr = np.array(v).flatten()
+                    golden_save_dict[k] = val_arr.reshape(1, 4) if val_arr.size == 4 else np.array([float(val_arr[0])]*4).reshape(1, 4)
             else:
-                y_vec = np.array([float(y_arr[0])] * 4)
-            np.savez(acb_path / "golden_data.npz", y=y_vec.reshape(1, 4))
+                y_arr = np.array(golden_y).flatten()
+                y_vec = y_arr.reshape(1, 4) if y_arr.size == 4 else np.array([float(y_arr[0])] * 4).reshape(1, 4)
+                golden_save_dict["y"] = y_vec
+                
+            np.savez(acb_path / "golden_data.npz", **golden_save_dict)
             
             # 🛸 同步输入数据，方便用户调参和离线分析
             np.savez(acb_path / "input_data.npz", **input_data)

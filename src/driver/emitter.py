@@ -39,12 +39,18 @@ class LIRPacker:
                     idx = int(iq_name.replace("ur-r", ""))
                     node_to_src_id[(op.trace_id, "D")] = PORT_OFFSET_UR_RDATA + idx
                 else:
-                    # ALU 路由直连 (同步 D 和 ST 两个端子)
+                    # ALU 路由直连 (同步 D/ST/D0-Dn 等端子)
                     d_id, st_id = -1, -1
                     if op.op_type.upper() == "FPMUL": d_id = PORT_ID_FPMUL_D
                     elif op.op_type.upper() == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 # 🛰️ 关键：FPADD_ST = 5
                     elif op.op_type.upper() == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2 # 🛰️ 关键：INTADD_ST = 2
                     elif op.op_type.upper() == "LOGIC": d_id = 10 # DR_LOGIC_D
+                    elif op.op_type.upper() == "INT8TOFP16":
+                        # 🛸 多输出对位：D0(14), D1(15), D2(16), D3(17)
+                        for i in range(4): node_to_src_id[(op.trace_id, f"D{i}")] = 14 + i
+                    elif op.op_type.upper() == "FP16MUL":
+                        # 🛸 多输出对位：D0(18) ... D7(25)
+                        for i in range(8): node_to_src_id[(op.trace_id, f"D{i}")] = 18 + i
                     
                     if d_id != -1: node_to_src_id[(op.trace_id, "D")] = d_id
                     if st_id != -1: node_to_src_id[(op.trace_id, "ST")] = st_id

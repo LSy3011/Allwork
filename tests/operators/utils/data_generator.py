@@ -92,6 +92,10 @@ OP_DATA_SPECS = {
         "range": (-50.0, 50.0),
         "seeds": [0.0, 1.0, -1.0, np.nan, 1234.5],
         "st_bits": [1, 0, 1, 0]
+    },
+    "int8tofp16": {
+        "range": (-128.0, 127.0),
+        "seeds": [0, 127, -128, 1, -1]
     }
 }
 
@@ -137,6 +141,21 @@ class ArithTestDataGenerator:
             # 🛸 关键：ST 必须以 bit 形式存在于 UR 内存低位，不能是 float 含义
             st_choices = [0x0, 0x1, 0x2, 0x4, 0x7]
             data["ch_2"] = np.random.choice(st_choices, size).astype(np.uint32).view(np.float32)
+        elif op_type == "int8tofp16":
+            # 🛸 特殊：INT8TOFP16 物理映射为 2x128-bit -> 4x128-bit
+            # S0: 32x Lo-Nibble, S1: 32x Hi-Nibble
+            i8_total = np.random.randint(-128, 127, size=(size, 32)).astype(np.int8)
+            s0_rows, s1_rows = [], []
+            for r in range(size):
+                s0_word, s1_word = 0, 0
+                for i in range(32):
+                    v = int(i8_total[r, i]) & 0xFF
+                    s0_word |= (v & 0xF) << (i * 4)
+                    s1_word |= ((v >> 4) & 0xF) << (i * 4)
+                s0_rows.append(np.array([(s0_word >> (k*32)) & 0xFFFFFFFF for k in range(4)], dtype=np.uint32).view(np.float32))
+                s1_rows.append(np.array([(s1_word >> (k*32)) & 0xFFFFFFFF for k in range(4)], dtype=np.uint32).view(np.float32))
+            data["ch_0"] = np.array(s0_rows)
+            data["ch_1"] = np.array(s1_rows)
         
         return data
 
@@ -176,5 +195,20 @@ class ArithTestDataGenerator:
             def fill_st(v_list, target_size):
                  return np.array((v_list * (target_size // len(v_list) + 1))[:target_size]).astype(np.uint32).view(np.float32)
             data["ch_2"] = fill_st(bits, size)
+        elif op_type == "int8tofp16":
+            # 🛸 特殊：边界值扫描 (0, 127, -128)
+            seeds_i8 = spec["seeds"]
+            i8_total = np.array((seeds_i8 * (size * 32 // len(seeds_i8) + 1))[:size * 32]).reshape(size, 32)
+            s0_rows, s1_rows = [], []
+            for r in range(size):
+                s0_word, s1_word = 0, 0
+                for i in range(32):
+                    v = int(i8_total[r, i]) & 0xFF
+                    s0_word |= (v & 0xF) << (i * 4)
+                    s1_word |= ((v >> 4) & 0xF) << (i * 4)
+                s0_rows.append(np.array([(s0_word >> (k*32)) & 0xFFFFFFFF for k in range(4)], dtype=np.uint32).view(np.float32))
+                s1_rows.append(np.array([(s1_word >> (k*32)) & 0xFFFFFFFF for k in range(4)], dtype=np.uint32).view(np.float32))
+            data["ch_0"] = np.array(s0_rows)
+            data["ch_1"] = np.array(s1_rows)
 
         return data
