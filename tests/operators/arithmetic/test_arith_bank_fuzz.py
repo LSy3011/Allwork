@@ -14,7 +14,7 @@ class TestArithmeticBankRobustness:
     [V3.2 更新]: 纳入 Sin 8阶泰勒展开验证。
     """
 
-    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not", "sqrt", "rsqrt"])
+    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not", "sqrt", "rsqrt", "select_gt", "select_eq", "select_ls"])
     @pytest.mark.parametrize("data_mode", ["fuzz", "boundary"])
     def test_arithmetic_ccug_fuzzing(self, op_type, data_mode):
         """对基础算子执行 CCUG 角色自适应压力测试"""
@@ -30,6 +30,7 @@ class TestArithmeticBankRobustness:
         from library.atomic.logical.logical_ops import get_and_dfg, get_or_dfg, get_xor_dfg, get_not_dfg
         from library.atomic.powers.sqrt import get_sqrt_v4_dfg
         from library.atomic.powers.rsqrt import get_rsqrt_v4_dfg
+        from library.atomic.logical.logical_ops import get_select_gt_dfg, get_select_eq_dfg, get_select_ls_dfg
 
         if op_type == "add":
             dfg_ops = get_add_dfg()
@@ -97,6 +98,19 @@ class TestArithmeticBankRobustness:
             role_to_input = {"operand_a": "x_val", "initial_guess": "y0_val"}
             # Rsqrt(x) 1-iteration Newton reference: 0.5 * y0 * (3.0 - x * y0^2)
             ref_fn = lambda d: 0.5 * d["initial_guess"] * (3.0 - d["operand_a"] * d["initial_guess"]**2)
+        elif op_type.startswith("select"):
+            if "gt" in op_type:
+                dfg_ops = get_select_gt_dfg()
+                check_bit = 4
+            elif "eq" in op_type:
+                dfg_ops = get_select_eq_dfg()
+                check_bit = 2
+            else: # ls
+                dfg_ops = get_select_ls_dfg()
+                check_bit = 1
+            role_to_input = {"operand_a": "x_val", "operand_b": "y_val", "condition": "st_val"}
+            # Ref: out = a if (st & check_bit) else b
+            ref_fn = lambda d: np.where(d["condition"].view(np.uint32) & check_bit, d["operand_a"], d["operand_b"])
         else:
             raise ValueError(f"Unknown op_type: {op_type}")
 
@@ -126,7 +140,8 @@ class TestArithmeticBankRobustness:
         role_data_channel_map = {
             "operand_a": "ch_0",
             "operand_b": "ch_1",
-            "initial_guess": "ch_1" # 默认 rec 映射 (1/X)
+            "initial_guess": "ch_1", # 默认 rec 映射 (1/X)
+            "condition": "ch_2"
         }
         
         if op_type == "div":

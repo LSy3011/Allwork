@@ -78,6 +78,21 @@ OP_DATA_SPECS = {
         "range": (0.1, 10.0),
         "seeds": [1.0, 0.1, 2.0, 0.5, 10.0, 1e-3, 0.0]
     },
+    "select_gt": {
+        "range": (-50.0, 50.0),
+        "seeds": [0.0, 1.0, -1.0, np.nan, 1234.5],
+        "st_bits": [4, 0, 4, 0]
+    },
+    "select_eq": {
+        "range": (-50.0, 50.0),
+        "seeds": [0.0, 1.0, -1.0, np.nan, 1234.5],
+        "st_bits": [2, 0, 2, 0]
+    },
+    "select_ls": {
+        "range": (-50.0, 50.0),
+        "seeds": [0.0, 1.0, -1.0, np.nan, 1234.5],
+        "st_bits": [1, 0, 1, 0]
+    }
 }
 
 class ArithTestDataGenerator:
@@ -117,6 +132,11 @@ class ArithTestDataGenerator:
             # Sqrt/Rsqrt: ch_0=x, ch_1=y0_guess (1/sqrt(x))
             with np.errstate(divide='ignore', invalid='ignore'):
                 data["ch_1"] = (1.0 / np.sqrt(data["ch_0"]) + np.random.uniform(-0.01, 0.01, size)).astype(np.float32)
+        elif op_type.startswith("select"):
+            # Select: ch_0=A, ch_1=B, ch_2=Cond_ST
+            # 🛸 关键：ST 必须以 bit 形式存在于 UR 内存低位，不能是 float 含义
+            st_choices = [0x0, 0x1, 0x2, 0x4, 0x7]
+            data["ch_2"] = np.random.choice(st_choices, size).astype(np.uint32).view(np.float32)
         
         return data
 
@@ -151,5 +171,10 @@ class ArithTestDataGenerator:
                 data["ch_1"] = (1.0 / np.sqrt(x_data)).astype(np.float32)
                 mask = np.isnan(data["ch_1"]) | np.isinf(data["ch_1"])
                 data["ch_1"][mask] = 0.5
+        elif op_type.startswith("select"):
+            bits = spec.get("st_bits", [0])
+            def fill_st(v_list, target_size):
+                 return np.array((v_list * (target_size // len(v_list) + 1))[:target_size]).astype(np.uint32).view(np.float32)
+            data["ch_2"] = fill_st(bits, size)
 
         return data
