@@ -1,51 +1,54 @@
 from typing import List
 from ir.mir.mir_op import MIROp
+from ir.mir.builder import MIROpBuilder
+from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
-def get_rsqrt_newton_dfg() -> List[MIROp]:
+def get_rsqrt_v4_dfg() -> List[MIROp]:
     """
     Rsqrt(x) Newton-Raphson 1-iteration.
     y = 0.5 * y0 * (3.0 - x * y0^2)
+    遵循 V4.0 ADPC 规范：角色化输入、原位常量、自动锚定输出。
     """
-    IQ_MUL, IQ_ADD = 100, 101
-    S_FPMUL0, S_FPMUL1 = 3, 4
-    S_FPADD0, S_FPADD1 = 5, 6
-    S_WDATA = 38
-    ops = []
+    b = MIROpBuilder()
 
-    def make_op(op_type, nid, port, deps, bank=None, math=""):
-        meta = {"depends_on": deps, "math": math}
-        if op_type == "RTOVR": meta["slot_id"] = port
-        else: meta["iq_id"] = port
-        if bank is not None: meta.setdefault("bank_id", bank)
-        op = MIROp(op_type, 0, nid, metadata=meta)
-        ops.append(op)
-        return nid
+    # 1. 输入 (角色化)
+    x = b.make_op("UR_READ", "x_in", RT.UR_READ, [], role="operand_a")
+    y0 = b.make_op("UR_READ", "y0_seed", RT.UR_READ, [], role="initial_guess")
 
-    make_op("UR_READ",  "x_rd",     200, [], bank=0)
-    make_op("UR_READ",  "y0_rd",    201, [], bank=1, math="Init guess")
+    # 2. 定量 (原位化)
+    c3 = b.make_op("UR_READ", "c3", RT.UR_READ, [], is_const=True, value=3.0)
+    c05 = b.make_op("UR_READ", "c05", RT.UR_READ, [], is_const=True, value=0.5)
+
+    # 3. 运算逻辑 (物理保真)
     
-    make_op("RTOVR",    "r_y0_0",   S_FPMUL0, ["y0_rd"])
-    make_op("RTOVR",    "r_y0_1",   S_FPMUL1, ["y0_rd"])
-    make_op("FPMUL",    "y0_sq",    IQ_MUL, ["r_y0_0", "r_y0_1"])
-    
-    make_op("RTOVR",    "r_x",      S_FPMUL0, ["x_rd"])
-    make_op("RTOVR",    "r_y0sq",   S_FPMUL1, ["y0_sq"])
-    make_op("FPMUL",    "x_y0sq",   IQ_MUL, ["r_x", "r_y0sq"])
-    
-    make_op("UR_READ",  "c3_rd",    202, [], bank=2, math="Const 3.0")
-    make_op("RTOVR",    "r_c3",     S_FPADD0, ["c3_rd"])
-    make_op("RTOVR",    "r_xy0sq",  S_FPADD1, ["x_y0sq"])
-    make_op("FPADD",    "diff",     IQ_ADD, ["r_c3", "r_xy0sq"])
-    
-    make_op("UR_READ",  "c05_rd",   203, [], bank=3, math="Const 0.5")
-    make_op("RTOVR",    "r_y0f",    S_FPMUL0, ["y0_rd"])
-    make_op("RTOVR",    "r_diff",   S_FPMUL1, ["diff"])
-    make_op("FPMUL",    "temp",     IQ_MUL, ["r_y0f", "r_diff"])
-    
-    make_op("RTOVR",    "r_temp",   S_FPMUL0, ["temp"])
-    make_op("RTOVR",    "r_c05",    S_FPMUL1, ["c05_rd"])
-    make_op("FPMUL",    "final_y",  IQ_MUL, ["r_temp", "r_c05"])
-    
-    make_op("RTOVR",    "r_f",      S_WDATA, ["final_y"])
-    make_op("UR_WRITE", "out",      204, ["r_f"], bank=7)
-    return ops
+    # [Step 1] y0sq = y0 * y0
+    r_y0_a = b.make_op("RTOVR", "r_y0_a", PS.FPMUL_S0, [y0])
+    r_y0_b = b.make_op("RTOVR", "r_y0_b", PS.FPMUL_S1, [y0])
+    y0sq = b.make_op("FPMUL", "y0sq", RT.FPMUL, [r_y0_a, r_y0_b])
+
+    # [Step 2] xy0sq = x * y0sq
+    r_x = b.make_op("RTOVR", "r_x", PS.FPMUL_S0, [x])
+    r_y0sq = b.make_op("RTOVR", "r_y0sq", PS.FPMUL_S1, [y0sq])
+    xy0sq = b.make_op("FPMUL", "xy0sq", RT.FPMUL, [r_x, r_y0sq])
+
+    # [Step 3] diff = 3.0 - xy0sq
+    r_c3 = b.make_op("RTOVR", "r_c3", PS.FPADD_S0, [c3])
+    r_xy0sq = b.make_op("RTOVR", "r_xy0_sq", PS.FPADD_S1, [xy0sq])
+    diff = b.make_op("FPADD", "diff", RT.FPADD, [r_c3, r_xy0sq], SUB=1)
+
+    # [Step 4] y0_diff = y0 * diff
+    r_y0_c = b.make_op("RTOVR", "r_y0_c", PS.FPMUL_S0, [y0])
+    r_diff = b.make_op("RTOVR", "r_diff", PS.FPMUL_S1, [diff])
+    y0_diff = b.make_op("FPMUL", "y0_diff", RT.FPMUL, [r_y0_c, r_diff])
+
+    # [Step 5] rsqrt_res = 0.5 * y0_diff
+    r_y0_diff = b.make_op("RTOVR", "r_y0_diff", PS.FPMUL_S0, [y0_diff])
+    r_c05 = b.make_op("RTOVR", "r_c05", PS.FPMUL_S1, [c05])
+    rsqrt_res = b.make_op("FPMUL", "rsqrt_res", RT.FPMUL, [r_y0_diff, r_c05])
+
+    # 4. 输出 (锚定化)
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [rsqrt_res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], 
+              bank=7, is_output=True, meta_name="rsqrt_result")
+
+    return b.get_dfg()

@@ -74,6 +74,10 @@ OP_DATA_SPECS = {
         "range": (0.1, 10.0),
         "seeds": [1.0, 0.1, 2.0, 0.5, 10.0, 1e-3, 0.0]
     },
+    "rsqrt": {
+        "range": (0.1, 10.0),
+        "seeds": [1.0, 0.1, 2.0, 0.5, 10.0, 1e-3, 0.0]
+    },
 }
 
 class ArithTestDataGenerator:
@@ -109,8 +113,8 @@ class ArithTestDataGenerator:
             # Div: ch_0=x, ch_1=y, ch_2=y0_guess(1/y)
             with np.errstate(divide='ignore', invalid='ignore'):
                 data["ch_2"] = (1.0 / data["ch_1"] + np.random.uniform(-0.01, 0.01, size)).astype(np.float32)
-        elif op_type == "sqrt":
-            # Sqrt: ch_0=x, ch_1=y0_guess (1/sqrt(x))
+        elif op_type in ["sqrt", "rsqrt"]:
+            # Sqrt/Rsqrt: ch_0=x, ch_1=y0_guess (1/sqrt(x))
             with np.errstate(divide='ignore', invalid='ignore'):
                 data["ch_1"] = (1.0 / np.sqrt(data["ch_0"]) + np.random.uniform(-0.01, 0.01, size)).astype(np.float32)
         
@@ -140,7 +144,7 @@ class ArithTestDataGenerator:
                 data["ch_2"] = (1.0 / data["ch_1"]).astype(np.float32)
                 mask = np.isnan(data["ch_2"]) | np.isinf(data["ch_2"])
                 data["ch_2"][mask] = 0.5
-        elif op_type == "sqrt":
+        elif op_type in ["sqrt", "rsqrt"]:
             with np.errstate(divide='ignore', invalid='ignore'):
                 x_data = data["ch_0"].copy()
                 x_data[x_data < 0] = 0.0
