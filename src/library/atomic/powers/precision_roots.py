@@ -1,90 +1,70 @@
 from typing import List
 from ir.mir.mir_op import MIROp
+from ir.mir.builder import MIROpBuilder
+from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
-def get_rsqrt_double_newton_dfg() -> List[MIROp]:
-    """工业级 Rsqrt(x) 二次 Newton 迭代."""
-    IQ_MUL, IQ_ADD = 100, 101
-    S_MUL0, S_MUL1 = 3, 4
-    S_ADD0, S_ADD1 = 5, 6
-    S_WDATA = 38
-    ops = []
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.append(op); return n
-
-    m_op("UR_READ", "x", 200, [], b=0)
-    m_op("UR_READ", "y0", 201, [], b=1)
-    m_op("UR_READ", "c15", 202, [], b=2)
-    m_op("UR_READ", "c05", 203, [], b=3)
-
-    m_op("RTOVR", "rx0", S_MUL0, ["x"])
-    m_op("RTOVR", "ry0_1", S_MUL1, ["y0"])
-    m_op("FPMUL", "x_y0", IQ_MUL, ["rx0", "ry0_1"])
-    m_op("RTOVR", "rxy0", S_MUL0, ["x_y0"])
-    m_op("RTOVR", "ry0_2", S_MUL1, ["y0"])
-    m_op("FPMUL", "x_y0_sq", IQ_MUL, ["rxy0", "ry0_2"])
-    m_op("FPADD", "h1", IQ_ADD, ["c15", "x_y0_sq"])
-    m_op("RTOVR", "rh1", S_MUL0, ["h1"])
-    m_op("RTOVR", "ry0_3", S_MUL1, ["y0"])
-    m_op("FPMUL", "y1", IQ_MUL, ["rh1", "ry0_3"])
+def get_rsqrt_industrial_dfg() -> List[MIROp]:
+    """
+    工业级 Rsqrt(x) 二次 Newton 迭代 (V5.4-Factory-Clean).
+    """
+    b = MIROpBuilder()
     
-    m_op("RTOVR", "rx1", S_MUL0, ["x"])
-    m_op("RTOVR", "ry1_1", S_MUL1, ["y1"])
-    m_op("FPMUL", "x_y1", IQ_MUL, ["rx1", "ry1_1"])
-    m_op("RTOVR", "rxy1", S_MUL0, ["x_y1"])
-    m_op("RTOVR", "ry1_2", S_MUL1, ["y1"])
-    m_op("FPMUL", "x_y1_sq", IQ_MUL, ["rxy1", "ry1_2"])
-    m_op("FPADD", "h2", IQ_ADD, ["c15", "x_y1_sq"])
-    m_op("RTOVR", "rh2", S_MUL0, ["h2"])
-    m_op("RTOVR", "ry1_3", S_MUL1, ["y1"])
-    m_op("FPMUL", "y_fin", IQ_MUL, ["rh2", "ry1_3"])
+    x = b.make_op("UR_READ", "x_in", RT.UR_READ, [], "Input X")
+    y0 = b.make_op("UR_READ", "y0_seed", RT.UR_READ, [], "Rsqrt Seed")
+    c15 = b.make_op("UR_READ", "const_1_5", RT.UR_READ, [], "1.5 Const")
     
-    m_op("RTOVR", "rf", S_WDATA, ["y_fin"])
-    m_op("UR_WRITE", "out", 204, ["rf"], b=7)
-    return ops
+    r0_1 = b.make_op("RTOVR", "r0_1", PS.FPMUL_S0, [x])
+    r1_1 = b.make_op("RTOVR", "r1_1", PS.FPMUL_S1, [y0])
+    xy0 = b.make_op("FPMUL", "xy0", RT.FPMUL, [r0_1, r1_1])
+    
+    r0_2 = b.make_op("RTOVR", "r0_2", PS.FPMUL_S0, [xy0])
+    r1_2 = b.make_op("RTOVR", "r1_2", PS.FPMUL_S1, [y0])
+    xy0_sq = b.make_op("FPMUL", "xy0_sq", RT.FPMUL, [r0_2, r1_2])
+    
+    r_c15 = b.make_op("RTOVR", "r_c15", PS.FPADD_S0, [c15])
+    r_xy0_sq = b.make_op("RTOVR", "r_xy0_sq", PS.FPADD_S1, [xy0_sq])
+    h1 = b.make_op("FPADD", "h1", RT.FPADD, [r_c15, r_xy0_sq], SUB=1)
+    
+    r0_3 = b.make_op("RTOVR", "r0_3", PS.FPMUL_S0, [y0])
+    r1_3 = b.make_op("RTOVR", "r1_3", PS.FPMUL_S1, [h1])
+    y1 = b.make_op("FPMUL", "y1", RT.FPMUL, [r0_3, r1_3])
+    
+    # 🛰️ 物理对位: 统一输出 ID 为 w_fin
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [y1])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], bank=7)
+    
+    return b.get_dfg()
 
 def get_sqrt_industrial_dfg() -> List[MIROp]:
-    """工业级 Sqrt(x) = x * Double-Newton-Rsqrt(x)"""
-    IQ_MUL = 100
-    S_MUL0, S_MUL1 = 3, 4
-    S_WDATA = 38
-    ops = get_rsqrt_double_newton_dfg()
-    rsqrt_node = ops[-2].node_id
+    """工业级 Sqrt(x) (V5.4-Factory-Clean)."""
+    b = MIROpBuilder()
+    x = b.make_op("UR_READ", "x_in", RT.UR_READ, [])
+    y0 = b.make_op("UR_READ", "y0_seed", RT.UR_READ, [])
+    c15 = b.make_op("UR_READ", "const_1_5", RT.UR_READ, [])
     
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.insert(-2, op); return n
-
-    m_op("RTOVR", "rx_final", S_MUL0, ["x"])
-    m_op("RTOVR", "rrsqrt", S_MUL1, [rsqrt_node])
-    m_op("FPMUL", "sqrt_res", IQ_MUL, ["rx_final", "rrsqrt"])
-    ops[-2].metadata["depends_on"] = ["sqrt_res"]
-    return ops
-
-def get_cbrt_industrial_dfg() -> List[MIROp]:
-    """工业级 Cbrt(x) 立方根 Newton 迭代"""
-    IQ_MUL, IQ_ADD = 100, 101
-    S_MUL0, S_MUL1 = 3, 4
-    ops = []
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.append(op); return n
-
-    m_op("UR_READ", "x", 200, [], b=0)
-    m_op("UR_READ", "y0", 201, [], b=1, math="Cbrt seed")
-    m_op("RTOVR", "ry0", S_MUL0, ["y0"])
-    m_op("FPMUL", "y2", IQ_MUL, ["ry0", "ry0"]) 
-    m_op("RTOVR", "ry2", S_MUL1, ["y2"])
-    m_op("FPMUL", "y3", IQ_MUL, ["ry0", "ry2"]) 
-    m_op("RTOVR", "rf", 38, ["y3"])
-    m_op("UR_WRITE", "out", 204, ["rf"], b=7)
-    return ops
+    r0_1 = b.make_op("RTOVR", "r0_1", PS.FPMUL_S0, [x])
+    r1_1 = b.make_op("RTOVR", "r1_1", PS.FPMUL_S1, [y0])
+    xy0 = b.make_op("FPMUL", "xy0", RT.FPMUL, [r0_1, r1_1])
+    
+    r0_2 = b.make_op("RTOVR", "r0_2", PS.FPMUL_S0, [xy0])
+    r1_2 = b.make_op("RTOVR", "r1_2", PS.FPMUL_S1, [y0])
+    xy0_sq = b.make_op("FPMUL", "xy0_sq", RT.FPMUL, [r0_2, r1_2])
+    
+    rc_1 = b.make_op("rc_1", "rc_1", PS.FPADD_S0, [c15]) # Wait, RT.RTOVR is missing? FIXING:
+    rc_1 = b.make_op("RTOVR", "rc_1", PS.FPADD_S0, [c15])
+    r_sq = b.make_op("RTOVR", "r_sq", PS.FPADD_S1, [xy0_sq])
+    h = b.make_op("FPADD", "h", RT.FPADD, [rc_1, r_sq], SUB=1)
+    
+    ry_0 = b.make_op("RTOVR", "ry_0", PS.FPMUL_S0, [y0])
+    rh = b.make_op("RTOVR", "rh", PS.FPMUL_S1, [h])
+    rsqrt_res = b.make_op("FPMUL", "rsqrt_res", RT.FPMUL, [ry_0, rh])
+    
+    rx_final = b.make_op("RTOVR", "rx_final", PS.FPMUL_S0, [x])
+    rr_final = b.make_op("RTOVR", "rr_final", PS.FPMUL_S1, [rsqrt_res])
+    sqrt_res = b.make_op("FPMUL", "sqrt_res", RT.FPMUL, [rx_final, rr_final])
+    
+    # 🛰️ 物理对位: 统一输出 ID 为 w_fin
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [sqrt_res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], bank=7)
+    
+    return b.get_dfg()

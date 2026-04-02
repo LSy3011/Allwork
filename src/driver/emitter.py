@@ -112,8 +112,10 @@ class LIRPacker:
                     inc=cmd.get("inc", 0), 
                     embed=cmd.get("embed", 0), 
                     jump=cmd.get("jump", 0),
-                    embed_end=cmd.get("embed_end", 0)
+                    embed_end=cmd.get("embed_end", 0),
+                    hw_spec=self.hw_spec
                 )
+
                 
                 # 🛸 标准化物理点火 (VLD/VALID)
                 # 遵循 V5.0 物理规范：VLD 在 Header 的第 40 位，Header 在 Payload 的高侧。

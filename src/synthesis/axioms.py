@@ -34,7 +34,10 @@ class SynthesisAxioms:
                     SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label)
 
     @staticmethod
-    def add_rtovr_crossbar_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], spec: HardwareSpec, mode="stable"):
+    def add_rtovr_crossbar_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], spec: HardwareSpec):
+        """
+        槽位存活公理：在 [Pulse, Fire] 区间内，物理槽位不可被冲刷。
+        """
         rt_ops = [o for o in ops if o.op_type == "RTOVR"]
         slot_groups = {}
         for op in rt_ops:
@@ -42,46 +45,47 @@ class SynthesisAxioms:
             if slot is not None: slot_groups.setdefault(slot, []).append(op)
 
         for slot, slot_ops in slot_groups.items():
-            if mode == "stable":
-                if len(slot_ops) > 1:
-                    SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[o.trace_id] for o in slot_ops]), f"slot_dist_{slot}")
-            else:
-                for i, op_i in enumerate(slot_ops):
-                    consumers = [o for o in ops if op_i.trace_id in o.metadata.get("depends_on", [])]
-                    for cons in consumers:
-                        t_start = t_vars[op_i.trace_id]
-                        t_end = t_vars[cons.trace_id]
-                        for j, op_j in enumerate(slot_ops):
-                            if i == j: continue
-                            uid = "_".join(sorted([op_i.trace_id, op_j.trace_id]))
-                            SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.trace_id] < t_start, t_vars[op_j.trace_id] > t_end), f"slot_ival_{slot}_{uid}")
+            if len(slot_ops) <= 1: continue
+            
+            for i, op_i in enumerate(slot_ops):
+                # 找到使用这个搬运结果的计算节点 (消费者)
+                consumers = [o for o in ops if op_i.trace_id in o.metadata.get("depends_on", [])]
+                for cons in consumers:
+                    t_pulse_i = t_vars[op_i.trace_id]
+                    t_fire_i = t_vars[cons.trace_id]
+                    
+                    for j, op_j in enumerate(slot_ops):
+                        if i == j: continue
+                        t_pulse_j = t_vars[op_j.trace_id]
+                        # 约束：j 的搬运必须在 i 的区间之外
+                        # 要么 j 先搬，要么 j 在 i 开火后（严格大于）搬
+                        uid = "_".join(sorted([op_i.trace_id, op_j.trace_id]))
+                        SynthesisAxioms._add_constraint(solver, z3.Or(t_pulse_j < t_pulse_i, t_pulse_j > t_fire_i), f"slot_ival_{slot}_{uid}")
 
     @staticmethod
-    def add_iq_mutex_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], mode="stable"):
-        if mode == "stable":
-            iq_groups = {}
-            for op in ops:
-                iq = op.metadata.get("iq_id")
-                if iq is not None: iq_groups.setdefault(iq, []).append(op.trace_id)
-            for iq, op_ids in iq_groups.items():
-                if len(op_ids) > 1:
-                    SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[oid] for oid in op_ids]), f"iq_mutex_{iq}")
-        else:
-            load_ops = [o for o in ops if o.op_type == "UR_READ"]
-            iq_groups = {}
-            for op in load_ops:
-                iq = op.metadata.get("iq_id")
-                if iq is not None: iq_groups.setdefault(iq, []).append(op)
-            for iq, iq_ops in iq_groups.items():
-                for i, op_i in enumerate(iq_ops):
-                    consumers = [o for o in ops if op_i.trace_id in o.metadata.get("depends_on", [])]
-                    for cons in consumers:
-                        t_start = t_vars[op_i.trace_id]
-                        t_end = t_vars[cons.trace_id] - 1
-                        for j, op_j in enumerate(iq_ops):
-                            if i == j: continue
-                            uid = "_".join(sorted([op_i.trace_id, op_j.trace_id]))
-                            SynthesisAxioms._add_constraint(solver, z3.Or(t_vars[op_j.trace_id] < t_start, t_vars[op_j.trace_id] > t_end), f"iq_ival_{iq}_{uid}")
+    def add_iq_mutex_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef]):
+        """
+        指令队列排他公理：IQ 作为一个物理寄存器，其结果在被 RTOVR 搬走前不可被冲刷（针对 UR_READ）。
+        """
+        load_ops = [o for o in ops if o.op_type == "UR_READ"]
+        iq_groups = {}
+        for op in load_ops:
+            iq = op.metadata.get("iq_id")
+            if iq is not None: iq_groups.setdefault(iq, []).append(op)
+            
+        for iq, iq_ops in iq_groups.items():
+            if len(iq_ops) <= 1: continue
+            for i, op_i in enumerate(iq_ops):
+                consumers = [o for o in ops if op_i.trace_id in o.metadata.get("depends_on", [])]
+                for cons in consumers:
+                    t_read_i = t_vars[op_i.trace_id]
+                    t_move_i = t_vars[cons.trace_id]
+                    
+                    for j, op_j in enumerate(iq_ops):
+                        if i == j: continue
+                        t_read_j = t_vars[op_j.trace_id]
+                        uid = "_".join(sorted([op_i.trace_id, op_j.trace_id]))
+                        SynthesisAxioms._add_constraint(solver, z3.Or(t_read_j < t_read_i, t_read_j >= t_move_i), f"iq_ival_{iq}_{uid}")
 
     @staticmethod
     def add_liveness_flush_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], iq_vars: Dict[str, z3.ArithRef]):

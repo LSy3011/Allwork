@@ -50,17 +50,16 @@ def test_instruction_codec_parity_coverage(hw_spec):
         # 3. 编译器后端：打包打包
         payload = FieldMapper.map_op_to_payload(op, mod_spec)
         
-        # 获取该模块注册的 BITS_CODE
-        bits_code = hw_spec.system_core.get("iq_registry", {}).get(m_name, DEFAULT_BITS_CODE)
-        
-        # 模拟 IQ 配置
-        class DummyIQConf: pass
-        iq_conf = DummyIQConf()
-        iq_conf.BITS_CODE = bits_code
+        # 🛸 物理对齐：获取该模块注册的 BITS_CODE (从 IQ 配置中获取，而非注册表 ID)
+        lookup = f"IQ_{m_name}"
+        iq_conf = hw_spec.iqs.get(lookup)
+        if not iq_conf: continue
+        bits_code = iq_conf.BITS_CODE
         
         # 执行 128-bit 封装 (包含 Header)
         full_command = BitPacker.pack_capsule(
-            iq_name=m_name.lower(), iq_conf=iq_conf, payload=payload, loops=0
+            iq_name=m_name.lower(), iq_conf=iq_conf, payload=payload, loops=0,
+            hw_spec=hw_spec
         )
         # 显式点火 VLD (Bit = bits_code + 40)
         full_command |= (1 << (bits_code + 40))

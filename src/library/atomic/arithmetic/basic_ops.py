@@ -1,53 +1,59 @@
 from typing import List
 from ir.mir.mir_op import MIROp
+from ir.mir.builder import MIROpBuilder
+from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
 def get_add_dfg() -> List[MIROp]:
-    IQ_ADD = 101; S_ADD0, S_ADD1 = 5, 6; ops = []
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.append(op); return n
-    m_op("UR_READ", "x", 200, [], b=0); m_op("UR_READ", "z", 201, [], b=1)
-    m_op("RTOVR", "rx", S_ADD0, ["x"]); m_op("RTOVR", "rz", S_ADD1, ["z"])
-    m_op("FPADD", "sum", 101, ["rx", "rz"]); m_op("UR_WRITE", "out", 204, ["sum"], b=7)
-    return ops
+    """基础加法 (V5.4-Factory): 移除硬编码 Bank，完全信赖 SMT。"""
+    b = MIROpBuilder()
+    # 🛸 统一 ID 为 x_rd, y_rd
+    x = b.make_op("UR_READ", "x_rd", RT.UR_READ, [], "LOAD X")
+    y = b.make_op("UR_READ", "y_rd", RT.UR_READ, [], "LOAD Y")
+    
+    r0 = b.make_op("RTOVR", "r0_add", PS.FPADD_S0, [x])
+    r1 = b.make_op("RTOVR", "r1_add", PS.FPADD_S1, [y])
+    
+    res = b.make_op("FPADD", "res_add", RT.FPADD, [r0, r1])
+    
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], bank=7)
+    return b.get_dfg()
 
 def get_mul_dfg() -> List[MIROp]:
-    IQ_MUL = 100; S_MUL0, S_MUL1 = 3, 4; ops = []
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.append(op); return n
-    m_op("UR_READ", "x", 200, [], b=0); m_op("UR_READ", "z", 201, [], b=1)
-    m_op("RTOVR", "rx", S_MUL0, ["x"]); m_op("RTOVR", "rz", S_MUL1, ["z"])
-    m_op("FPMUL", "prod", 100, ["rx", "rz"]); m_op("UR_WRITE", "out", 204, ["prod"], b=7)
-    return ops
+    """基础乘法 (V5.4-Factory)。"""
+    b = MIROpBuilder()
+    x = b.make_op("UR_READ", "x_rd", RT.UR_READ, [], "LOAD X")
+    y = b.make_op("UR_READ", "y_rd", RT.UR_READ, [], "LOAD Y")
+    
+    r0 = b.make_op("RTOVR", "r0_mul", PS.FPMUL_S0, [x])
+    r1 = b.make_op("RTOVR", "r1_mul", PS.FPMUL_S1, [y])
+    
+    res = b.make_op("FPMUL", "res_mul", RT.FPMUL, [r0, r1])
+    
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], bank=7)
+    return b.get_dfg()
 
-def get_reciprocal_industrial_dfg() -> List[MIROp]:
-    IQ_MUL, IQ_ADD = 100, 101; ops = []
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.append(op); return n
-    m_op("UR_READ", "x", 200, [], b=0); m_op("UR_READ", "ry0", 201, [], b=1); m_op("UR_READ", "rc2", 202, [], b=2)
-    m_op("FPMUL", "x_y0", IQ_MUL, ["x", "ry0"]); m_op("FPADD", "h", IQ_ADD, ["rc2", "x_y0"])
-    m_op("FPMUL", "y_fin", IQ_MUL, ["ry0", "h"]); m_op("UR_WRITE", "out", 204, ["y_fin"], b=7)
-    return ops
-
-def get_div_industrial_dfg() -> List[MIROp]:
-    ops = get_reciprocal_industrial_dfg(); rec_out = ops[-2].node_id
-    def m_op(t, n, p, d, b=None, math=""):
-        meta = {"depends_on": d, "math": math}
-        if t == "RTOVR": meta["slot_id"] = p
-        else: meta["iq_id"] = p
-        if b is not None: meta["bank_id"] = b
-        op = MIROp(t, 0, n, metadata=meta); ops.insert(-2, op); return n
-    m_op("UR_READ", "ina", 200, [], b=3); m_op("FPMUL", "div_res", 100, ["ina", rec_out])
-    ops[-2].metadata["depends_on"] = ["div_res"]
-    return ops
+def get_reciprocal_dfg() -> List[MIROp]:
+    """倒数迭代 (V5.4-Factory): 对齐测试脚本 ID。"""
+    b = MIROpBuilder()
+    # 🛸 统一 ID 对齐 test_arith_bank_fuzz.py
+    x = b.make_op("UR_READ", "x_rd", RT.UR_READ, [])
+    y0 = b.make_op("UR_READ", "y0_rd", RT.UR_READ, [])
+    c2 = b.make_op("UR_READ", "c2_rd", RT.UR_READ, [])
+    
+    r_x = b.make_op("RTOVR", "r_x", PS.FPMUL_S0, [x])
+    r_y0_1 = b.make_op("RTOVR", "r_y0_1", PS.FPMUL_S1, [y0])
+    xy0 = b.make_op("FPMUL", "xy0", RT.FPMUL, [r_x, r_y0_1])
+    
+    r_c2 = b.make_op("RTOVR", "r_c2", PS.FPADD_S0, [c2])
+    r_xy0 = b.make_op("RTOVR", "r_xy0", PS.FPADD_S1, [xy0])
+    h = b.make_op("FPADD", "h_step", RT.FPADD, [r_c2, r_xy0], SUB=1)
+    
+    r_y0_2 = b.make_op("RTOVR", "r_y0_2", PS.FPMUL_S0, [y0])
+    r_h = b.make_op("RTOVR", "r_h", PS.FPMUL_S1, [h])
+    res = b.make_op("FPMUL", "res_y", RT.FPMUL, [r_y0_2, r_h])
+    
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], bank=7)
+    return b.get_dfg()

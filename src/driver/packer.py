@@ -1,45 +1,55 @@
 import struct
 from typing import Dict
+from typing import Dict, Any
+
+DEFAULT_BITS_CODE = 16
 
 class BitPacker:
     """
-    AIACC V7.0 位封装器 (动态字节对齐版)。
-    硬件架构：[Header(41)] [CODE(N)]
-    对齐策略：指令按字节对齐，不补齐到 128-bit，高位补零至字节边界。
+    AIACC V9.1 位封装器 (鲁棒规格驱动版)。
     """
     @staticmethod
-    def pack_capsule(iq_name: str, iq_conf, payload: int, 
-                    loops: int = 0, dly: int = 0, inc: int = 0, 
-                    cond: int = 0, embed: int = 0, jump: int = 0,
-                    embed_end: int = 0, inc_embed: int = 0) -> int:
-        
-        # 1. 封装 41-bit 头部 (Header)
-        # 按照 isa_v5.yaml 物理顺序 (从低到高): 
-        # INC_EMBED(6), INC(4), DLY(3), COND(7), LOOPS(10), EMBED_END(6), EMBED_LOOPS(3), JUMP(1), VLD(1)
+    def pack_capsule(iq_name: str, iq_conf: Any, payload: int, loops: int = 0, dly: int = 0, 
+                     inc: int = 0, embed: int = 0, jump: int = 0, embed_end: int = 0, 
+                     hw_spec: Any = None) -> int:
         header = 0
-        header |= (inc_embed & 0x3F)            # [0:5]
-        header |= ((inc & 0xF) << 6)             # [6:9]
-        header |= ((dly & 0x7) << 10)           # [10:12]
-        header |= ((cond & 0x7F) << 13)         # [13:19]
-        header |= ((loops & 0x3FF) << 20)       # [20:29]
-        header |= ((embed_end & 0x3F) << 30)    # [30:35]
-        header |= ((embed & 0x7) << 36)         # [36:38]
-        header |= ((jump & 1) << 39)            # [39]
-        header |= (1 << 40)                     # [40] VLD
-
-        # 2. 纵向级联 (Header 是 MSB, CODE 是 LSB)
-        # 🛸 物理对齐：保持 Header 在高位，Payload 在低位。
-        bits_code = iq_conf.BITS_CODE
-        full_instr = (header << bits_code) | (payload & ((1 << bits_code) - 1))
         
-        return full_instr
+        # 🛸 物理对齐：位宽决议中心
+        # 优先级：1. 明确传入的 iq_conf.BITS_CODE (最权威) > 2. 默认 16
+        bits_code = getattr(iq_conf, "BITS_CODE", DEFAULT_BITS_CODE)
+        
+        # 🛸 动态 Header 映射 (基于硬件规格书)
+        if hw_spec and hasattr(hw_spec, "system_core") and hw_spec.system_core:
+            iq_header = hw_spec.system_core.get("iq_header", [])
+            curr = 0
+            # 这里的输入变量需要映射到 Header 字段
+            val_map = {
+                "INC_EMBED": embed, "INC": inc, "DLY": dly, 
+                "COND": 0, "LOOPS": loops, "EMBED_END": embed_end, 
+                "EMBED_LOOPS": 0, "JUMP": jump, "VLD": 1
+            }
+            for item in iq_header:
+                f_name = item.get("field")
+                f_width = item.get("width")
+                f_val = val_map.get(f_name, 0)
+                header |= ((f_val & ((1 << f_width) - 1)) << curr)
+                curr += f_width
+        else:
+            # 🛸 安全回退基准 (isa_v5 对齐)
+            header |= (embed & 0x3F)               # [0:5]
+            header |= ((inc & 0xF) << 6)           # [6:9]
+            header |= ((dly & 0x7) << 10)          # [10:12]
+            # COND Placeholder [13:19]
+            header |= ((loops & 0x3FF) << 20)      # [20:29]
+            header |= ((embed_end & 0x3F) << 30)   # [30:35]
+            # EMBED_LOOPS Placeholder [36:38]
+            header |= ((jump & 1) << 39)           # [39]
+            header |= (1 << 40)                    # [40] VLD
+
+        # 🛰️ 物理封裝：Header 在 Payload 的高位 (LSB-First Logic)
+        return (header << bits_code) | (payload & ((1 << bits_code) - 1))
 
     @staticmethod
     def pack_to_bytes(val: int, total_bits: int) -> bytes:
-        """
-        核心物理逻辑：
-        根据总位长计算字节数，并以 Little-endian 方式导出。
-        如果总长不是 8 的倍数，int.to_bytes 会在最高位字节的高侧自动补零。
-        """
         byte_len = (total_bits + 7) // 8
         return val.to_bytes(byte_len, byteorder='little')

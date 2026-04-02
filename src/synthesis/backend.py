@@ -66,9 +66,9 @@ class SMTSynthesizer:
             res_key = None
             if "iq_type" in op.metadata:
                 res_meta = op.metadata["iq_type"]
-                res_key = res_meta.value if hasattr(res_meta, 'value') else str(res_meta)
+                res_key = res_meta.name if hasattr(res_meta, 'name') else str(res_meta)
             else:
-                res_key = op.op_type.upper()
+                res_key = str(op.op_type).upper()
             
             # 从硬件规格中获取其对应的合法物理 IQ ID 池
             valid_iqs = self.hw_spec.get_iq_ids(res_key)
@@ -102,20 +102,8 @@ class SMTSynthesizer:
                     solver.add(t[op.trace_id] >= t[dep_id] + (delay - 1) + transit)
 
         # 4. 物理资源互斥与公理注入 (去硬编码版)
-        for i in range(len(ops)):
-            for j in range(i + 1, len(ops)):
-                op_i, op_j = ops[i], ops[j]
-                iq_i, iq_j = iq_vars.get(op_i.trace_id), iq_vars.get(op_j.trace_id)
-                
-                if iq_i is not None and iq_j is not None:
-                    # 💥 同物理资源，同拍互斥
-                    solver.add(z3.Implies(iq_i == iq_j, t[op_i.trace_id] != t[op_j.trace_id]))
-                
-                # Slot 占用互斥
-                if ("slot_id" in op_i.metadata and "slot_id" in op_j.metadata and 
-                    op_i.metadata["slot_id"] == op_j.metadata["slot_id"]):
-                    solver.add(t[op_i.trace_id] != t[op_j.trace_id])
-
+        SynthesisAxioms.add_iq_mutex_axiom(solver, ops, t)
+        SynthesisAxioms.add_rtovr_crossbar_axiom(solver, ops, t, self.hw_spec)
         SynthesisAxioms.add_bank_conflict_axiom(solver, ops, t)
         SynthesisAxioms.add_liveness_flush_axiom(solver, ops, t, iq_vars)
 
@@ -126,8 +114,8 @@ class SMTSynthesizer:
             
             if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
                 for rd in rtovr_deps:
-                    # 时序同步：计算单元点火 = RtoVR 点火 + 1
-                    solver.add(t[op.trace_id] == t[rd] + 1)
+                    # 时序同步：计算单元点火 >= RtoVR 点火 + 1 (支持异步锁存)
+                    solver.add(t[op.trace_id] >= t[rd] + 1)
                     
                     # 🛸 物理插槽对齐 (Crucial for UR_WRITE)
                     # 如果是 UR_WRITE，必须强制将其前驱 RTOVR 的 Slot 设为与其物理 IQ 对应的位置
@@ -140,9 +128,8 @@ class SMTSynthesizer:
                             # 注意：由于 slot_id 是 metadata 里的常量，我们需要在解算后回填
                             pass 
 
-                if len(rtovr_deps) >= 2:
-                    for k in range(len(rtovr_deps) - 1):
-                        solver.add(t[rtovr_deps[k]] == t[rtovr_deps[k+1]])
+                # 🛰️ 物理松绑：不再强制所有操作数同步到达，硬件锁存器会处理异步。
+                pass
 
         SynthesisAxioms.add_objective(solver, t)
 

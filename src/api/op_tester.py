@@ -76,6 +76,21 @@ class OperatorPhysicalTester:
             with open(stages["p1"] / "dfg_final.json", "w") as f:
                 json.dump(dfg_dump, f, indent=2)
             
+            # 🛸 [ADPC-ALIGN] 生成算法时序图 (timeline.txt)
+            timeline_lines = ["# AIACC Algorithm Timeline (Synthesis Phase)", f"# Operator: {op_name}", f"# Strategy: {strategy}", "-"*60]
+            timeline_lines.append(f"{'Time':<8} | {'NID':<25} | {'OpType':<10} | {'Res_ID':<8}")
+            
+            # 按时间排序打印
+            sorted_ops = sorted(dfg_ops, key=lambda x: res.get(x.trace_id, 999))
+            for op in sorted_ops:
+                t_val = res.get(op.trace_id, "?")
+                iq_val = op.metadata.get("iq_id", "-")
+                timeline_lines.append(f"{t_val:<8} | {op.trace_id:<25} | {op.op_type:<10} | {iq_val:<8}")
+            
+            with open(stages["p1"] / "timeline.txt", "w") as f:
+                f.write("\n".join(timeline_lines) + "\n")
+            print(f"📊 [ADPC] Algorithm Timeline saved to: {stages['p1'] / 'timeline.txt'}")
+            
             # 3. 物理数据排布 (128-bit SIMD Row Mirroring)
             banks = {i: [] for i in range(8)}
             bank_cursors = {i: 0 for i in range(8)}
@@ -120,8 +135,8 @@ class OperatorPhysicalTester:
                     
                     name = "y" if op.trace_id == "w_fin" else pkey
                     role = "output" if op.trace_id == "w_fin" else "input"
-                    if not any(tm["name"] == name for tm in tensors_meta):
-                        tensors_meta.append({"name": name, "bank": target_b, "offset": target_addr, "shape": [1, 4], "role": role})
+                    if not any(tm["name"] == name and tm["role"] == role for tm in tensors_meta):
+                        tensors_meta.append({"name": name, "bank": target_b, "addr": target_addr, "offset": target_addr, "shape": [1, 4], "role": role})
 
             # 4. 指令打包
             stitcher = HSTSStitcher()
