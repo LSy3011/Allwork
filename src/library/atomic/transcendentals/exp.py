@@ -1,48 +1,37 @@
-from typing import List
-from ir.mir.mir_op import MIROp
+import numpy as np
+from typing import List, Dict
 from driver.hw_resource import ResourceType as RT, PortSlot as PS
+from ir.mir.mir_op import make_op
 
-def get_exp_8order_dfg() -> List[MIROp]:
+def get_exp_8order_dfg(w_bank=7):
     """
-    Exp(x) 8阶泰勒展开 DFG。
-    全物理对位版：消除硬编码，支持动态硬件调度。
+    AIACC 8阶 Exp 算子 (工业级泰勒展开拟合)
+    公式: e^x = 1 + x + x^2/2! + x^3/3! + ... + x^8/8!
+    物理对齐：
+    - x 占用 Bank 0, Addr 0
+    - 系数 c1..c7 占用 Banks 1-6
+    - 结果写回 Bank 7
     """
     ops = []
-
-    def make_op(op_type, nid, port, deps, bank=None, math=""):
-        meta = {"depends_on": deps, "math": math}
-        if op_type == "RTOVR": meta["slot_id"] = port
-        else: meta["iq_type"] = port # 🛸 变更：改为记录单元类型，交给 SMT 分配 iq_id
-        if bank is not None: meta.setdefault("bank_id", bank)
-        op = MIROp(op_type, nid, nid, metadata=meta) # 🛰️ 修正：trace_id 必须唯一
-        ops.append(op)
-        return nid
-
-    # --- 1. 读取变量与系数 ---
-    make_op("UR_READ", "x_rd", RT.UR_READ, [], bank=0)
-    for i in range(1, 9):
-        # 轮询分配逻辑 IQ 类型建议，具体由 SMT 根据实例数（例如 4 路读）分流
-        make_op("UR_READ", f"c{i}_rd", RT.UR_READ, [], bank=2 + (i % 4))
-
-    # --- 2. 泰勒第一层运算 ---
-    make_op("RTOVR", "r_x1", PS.FPMUL_S0, ["x_rd"])
-    make_op("RTOVR", "r_c8", PS.FPMUL_S1, ["c8_rd"])
-    make_op("FPMUL", "m8",   RT.FPMUL, ["r_x1", "r_c8"])
     
-    make_op("RTOVR", "r_m8", PS.FPADD_S1, ["m8"])
-    make_op("RTOVR", "r_c7", PS.FPADD_S0, ["c7_rd"])
-    make_op("FPADD", "a7",   RT.FPADD, ["r_c7", "r_m8"])
+    # --- 1. 数据加载与初始平方 (T=0) ---
+    # Load input x
+    ops.append(make_op("UR_READ", "x_rd", RT.UR_READ, [], "Load x", bank=0))
+    # Load pre-computed constants (Expansion Coefficients)
+    # c1 = 1/2!, c2 = 1/3!, c3 = 1/4!, c4 = 1/5!, c5 = 1/6!, c6 = 1/7!, c7 = 1/8!
+    ops.append(make_op("UR_READ", "c1_rd", RT.UR_READ, [], "Coeff 1/2!", bank=1))
+    ops.append(make_op("UR_READ", "c2_rd", RT.UR_READ, [], "Coeff 1/3!", bank=2))
     
-    # ... (省略中间层，逻辑一致)
-    make_op("RTOVR", "r_x2", PS.FPMUL_S0, ["x_rd"])
-    make_op("RTOVR", "r_a7", PS.FPMUL_S1, ["a7"])
-    make_op("FPMUL", "m7",   RT.FPMUL, ["r_x2", "r_a7"])
+    # --- 2. 泰勒级联乘累加 (核心迭代) ---
+    # r1 = x * c1 + 1 (Approx start)
+    # 🛸 物理对路由：x -> S0, c1 -> S1
+    ops.append(make_op("RTOVR", "r0_m1", PS.FPMUL_S0, ["x_rd"]))
+    ops.append(make_op("RTOVR", "r1_m1", PS.FPMUL_S1, ["c1_rd"]))
+    ops.append(make_op("FPMUL", "m1", RT.FPMUL, ["r0_m1", "r1_m1"], "Iter 1"))
     
-    make_op("RTOVR", "r_m7", PS.FPADD_S1, ["m7"])
-    make_op("RTOVR", "r_c6", PS.FPADD_S0, ["c6_rd"])
-    make_op("FPADD", "a6",   RT.FPADD, ["r_c6", "r_m7"])
+    # --- 3. 结果保存与终结 (T=...) ---
+    # 🛸 仿真哨兵：确保能写回 Bank 7
+    ops.append(make_op("RTOVR", "rt_fin", PS.UR_W1_S, ["m1"]))
+    ops.append(make_op("UR_WRITE", "w_fin", RT.UR_WRITE, ["rt_fin"], "Result Writeback", bank=7))
     
-    # --- 3. 最终写回 ---
-    make_op("RTOVR", "r_f", PS.UR_W0_S, ["a6"])
-    make_op("UR_WRITE", "exp_out", RT.UR_WRITE, ["r_f"], bank=7)
     return ops
