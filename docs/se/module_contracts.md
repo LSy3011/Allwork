@@ -9,12 +9,17 @@ ops: List[MIROp]
 
 # APB 输出：时序 + 约束（不含具体 Bank ID）[ADR-002]
 class APB:
-    timing: Dict[int, int]           # op_id → cycle
-    exclusions: List[Tuple[str,str]] # 不能同 Bank 的张量对
+    timing: Dict[str, int]           # trace_id → cycle
+    iq_map: Dict[str, int]           # trace_id -> 物理 IQ ID (由 SMT 动态分配)
+    exclusions: List[Tuple[str,str]] # 不能同 Bank 的张量对 (TensorID)
     windows: Dict[str, Tuple[int,int]] # tensor_id → (start_cycle, end_cycle)
     total_cycles: int
-    footprint: FootprintMask         # 时序足迹
+    footprint: FootprintMask         # 物理时序足迹
     status: str                      # "sat" | "unsat"
+
+### 契约 011: 时序稳定性协议 (Regression Guard)
+1. **合成器义务**: 在输出 APB 前，必须通过 `RegressionManager` 进行黄金时序核验。
+2. **约束**: 若当前解的 Total Cycles 超过 Golden 快照，必须标记为性能退化（REGRESSION）。
 ```
 
 ## 2. synthesis → orchestrator 接口
@@ -39,7 +44,16 @@ class AllocationResult:
     # 断言: bank_map 必须满足所有 exclusions
 ```
 
-## 4. layout → driver 接口 (LIR Packer v5)
+## 4. 编排层 (Orchestrator) 契约 [NEW]
+### 契约 030: 零间隙物理审计协议 (ADR-005)
+
+1. **编排器义务**: 
+   - 必须通过 `SpecRenderer` 输出 SECTION 0-3 的全量机器状态。
+   - 对每个物理拍 (Cycle) 必须提供原子脉冲日志 (Atomic Pulse Log)。
+2. **输出要求**:
+   - 支持 Gapless Audit Mode，IDLE 拍也必须显式占位以防对齐偏移。
+
+## 5. layout → driver 接口 (LIR Packer v5)
 ```python
 class EmissionResult:
     lir_stream: List[LIROp]
@@ -47,26 +61,25 @@ class EmissionResult:
     compression_ratio: float
 ```
 
-## 5. 接口原则
+## 6. 接口原则
 - **单向数据流**：上游→下游，不回流
 - **不可变输入**：不得修改上游对象
 - **约束传递**：SMT 的 exclusions 必须透传到 Layout [ADR-002]
 - **自诊断**：错误时返回 diagnostics
 
-## 6. 验证工具链 [ADR-002]
+## 7. 验证工具链 [ADR-002]
 ## 驱动层 (Driver) 与 库 (Library) 交互契约
 
 ### 契约 020: 物理属性点火协议 (ADR-006)
 
 1. **库 (Library) 义务**：
-   - 必须通过 `MIROp.metadata` 提供硬件 Spec (YAML) 中定义的物理控制属性。
-   - 属性名必须与 YAML 中的 `field` 名（如 `SUB`, `SRC_PREC`, `UPDATE_ST`）严格一致，禁止使用自定义缩写。
-   - 对于 `FPADD`/`FPMUL` 等算子，不仅要指定操作数，还需显式配置其计算模式比特。
+   - **显式属性映射**: 必须在 `MIROp.metadata` 中显式提供硬件 Spec (YAML) 对应的物理控制字段。
+   - **语义对齐**: 属性名必须与 `unit.yaml` 的 `code_fields.name`（如 `SUB`, `SRC_PREC`）严格一致，禁止缩写。
 
 2. **驱动 (Driver) 义务**：
-   - **禁止猜测驱动**：后端驱动不得根据算子字符串名（如 `FPSUB`）进行隐式属性补偿。
-   - **自动化映射**：驱动层必须支持 `Metadata-to-Bit` 的自动查找映射协议。
-   - **物理完备性检查**：如果 `metadata` 中存在硬件 Spec 中未定义的字段，驱动应在 `lint` 阶段报错或通过审计日志预警。
+   - **无偏见打包原理**: 驱动程序回归为 Mechanical Bit-Packer，严禁包含基于算子名的推断。
+   - **Waterfall Priority**: 位填充优先级遵循：显式覆盖 (Explicit) > 通用语义 (Semantic) > 规格默认 (Default)。
+   - **物理完整性**: 必须验证 metadata 注入的字段是否在硬件 Spec 闭包内，非法字段需报错。
 
 3. **数据流归属权**：
    - 指令的“灵魂”由库定义（属性值）。

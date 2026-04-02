@@ -18,7 +18,11 @@ docs/
 │   ├── detail_hsts_hazard.md      HSTS 缝合 + UR冲突消解
 │   ├── detail_topology.md         算子分类 + 模块依赖
 │   └── adr/
-│       └── ADR-001_rtovr.md       Rtovr 架构决策
+│       ├── ADR-001_rtovr.md       Rtovr 架构决策
+│       ├── ADR-002_bank_allocation.md Bank 分配决策
+│       ├── ADR-003_lowering.md    算子拆分与 MIR 降级
+│       ├── ADR-005.md             物理仿真闭环路径
+│       └── ADR-006_semantic_lowering.md 物理语义下沉与规格驱动协议
 │
 ├── se/                            ← SE 软件工程师 [NEW]
 │   ├── source_structure.md        源码全景文件树 + 目录规范

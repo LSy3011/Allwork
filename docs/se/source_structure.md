@@ -10,37 +10,37 @@ src/
 │   └── registry.py              # OperatorRegistry (算子注册表) [GAP-2]
 │
 ├── ir/
-│   ├── base.py                   # IRNode(node_id, trace_id)
+│   ├── base.py                   # IRNode(trace_id, op_type)
 │   ├── hir.py                    # HIRProgram, HIRNode
 │   ├── mir/
-│   │   ├── op.py                 # MIROp(logic_phase, iq_type, is_rigid)
-│   │   └── footprint.py          # FootprintMask(bank, port, unit)
+│   │   ├── mir_op.py             # MIROp(trace_id, metadata, op_type)
+│   │   └── builder.py            # MIROpBuilder (统一构建与 Metadata 注入)
 │   └── lir/
-│       ├── instr.py              # LIROp(abs_cycle, vld, loops, dly)
-│       └── encoding.py           # 41-bit 编解码
+│       └── lir_op.py             # LIROp (41-bit 对齐物理指令)
 │
 ├── synthesis/
-│   ├── axioms.py                 # 六大物理公理
-│   ├── backend.py                # Z3 Solver 驱动
-│   ├── constraints.py            # MIR→Z3 翻译
-│   ├── registry.py               # APB 缓存
-│   └── stress.py                 # 压力测试接口
+│   ├── axioms.py                 # 硬件对齐公理库 (含 Stable/Aggressive 模式)
+│   ├── backend.py                # SMTSynthesizer (动态 IQ 分配引擎)
+│   └── regression_manager.py     # 时序黄金快照回归管理器
 │
 ├── orchestrator/
-│   ├── footprint.py              # APB 足迹掩码
-│   ├── resource.py               # AdvancedResTable
-│   ├── stitcher.py               # 相位缝合 + DLY 注入
-│   └── scheduler.py              # 全局调度
+│   ├── footprint.py              # APB 时序/Bank 足迹掩码
+│   ├── factory.py                # Footprint 生产工厂 (SMT→APB)
+│   ├── stitcher.py               # HSTS 相位缝合 + 全局 DLY 对齐
+│   ├── colorer.py                # Balanced Bank Colorer (基于冲突图)
+│   ├── memory_allocator.py       # 生命周期物理地址分配器 (UR Reuse)
+│   ├── spec_renderer.py          # HSTS 物理审计规格书渲染器 [CORE]
+│   └── verifier.py               # 编排期物理冲突验证器
 │
-├── layout/
-│   ├── liveness.py               # 生命周期分析
-│   └── allocator.py              # 8-Bank 着色 (受 SMT exclusions 约束)
+├── layout/                       # [DEPRECATED] 逻辑已并入 Orchestrator
 │
 ├── driver/
-│   ├── emitter.py                # LIRPacker (总调度与位预算审计)
+│   ├── emitter.py                # LIRPacker (带物理位审计的发射器)
 │   ├── compactor.py              # Compactor (RLE 压缩与 NOP-Loop 处理)
-│   ├── packer.py                 # BitPacker (ISA 统合位封装)
-│   └── field_mapper.py           # FieldMapper (逻辑到物理字段映射)
+│   ├── packer.py                 # BitPacker (ISA 物理位封装)
+│   ├── field_mapper.py           # FieldMapper (无偏见规格驱动打包机) [ADR-006]
+│   ├── hw_resource.py            # ResourceType/PortSlot 物理真相源
+│   └── hw_constants.py           # ISA 位宽/偏移语义常量
 │
 ├── core/
 │   ├── pipeline.py               # PassManager (11-Pass 级联)
