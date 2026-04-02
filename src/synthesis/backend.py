@@ -26,17 +26,23 @@ class SMTSynthesizer:
         registry = hw_spec.config.get("iq_registry", {})
         instances = hw_spec.config.get("resource_constraints", {}).get("unit_instances", {})
         
-        # 处理基础 UR 端口 (通过 global 常量偏移对齐)
-        r_count = hw_spec.config["resource_constraints"].get("total_read_ports", 1)
-        res_map["UR_READ"] = [200 + i for i in range(r_count)]
+        # 获取默认读写端口数
+        default_r = hw_spec.config["resource_constraints"].get("total_read_ports", 1)
+        default_w = hw_spec.config["resource_constraints"].get("total_write_ports", 1)
         
-        w_count = hw_spec.config["resource_constraints"].get("total_write_ports", 1)
-        res_map["UR_WRITE"] = [204 + i for i in range(w_count)]
+        # 处理基础 UR 端口 (通过 registry 注册表对齐)
+        r_count = instances.get("UR_READ", default_r)
+        base_r = registry.get("UR_READ", 30)
+        res_map["UR_READ"] = [base_r + i for i in range(r_count)]
         
-        # 处理 ALU 通用单元 (基于 iq_registry 的 Type ID 分发)
+        w_count = instances.get("UR_WRITE", default_w)
+        base_w = registry.get("UR_WRITE", 35)
+        res_map["UR_WRITE"] = [base_w + i for i in range(w_count)]
+        
+        # 处理 ALU 系列单元 (RTOVR 已在 registry)
         for unit_type, count in instances.items():
+            if unit_type in ["UR_READ", "UR_WRITE"]: continue # 已处理
             base_id = registry.get(unit_type, 0)
-            # 如果 count > 1, 则物理 ID 进行偏移 (例如 FPMUL-0: 8, FPMUL-1: 9)
             res_map[unit_type] = [base_id + i for i in range(count)]
             
         return res_map
@@ -45,6 +51,11 @@ class SMTSynthesizer:
         solver = z3.Optimize()
         nodes_by_id = {op.trace_id: op for op in ops}
         t = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in ops}
+        
+        # 🛸 获取硬件全局注册表
+        registry = self.hw_spec.config.get("iq_registry", {})
+        instances = self.hw_spec.config.get("resource_constraints", {}).get("unit_instances", {})
+        
         for op_id in t:
             solver.add(t[op_id] >= 0)
 
@@ -71,14 +82,15 @@ class SMTSynthesizer:
                 if op.metadata.get("iq_id") is not None:
                     solver.add(iv == op.metadata["iq_id"])
                     
-            # 兼容性特殊逻辑：UR_WRITE 会自动根据 RtoVR 物理插槽进行反向推导对齐
+            # 🛰️ 物理对齐：UR_WRITE 会根据其前驱 RTOVR 的 Slot 进行反向约束
+            base_w = registry.get("UR_WRITE", 35)
             if res_key == "UR_WRITE" and op.metadata.get("iq_id") is None:
                 for dep_id in op.metadata.get("depends_on", []):
                     dep_node = nodes_by_id.get(dep_id)
                     if dep_node and dep_node.op_type.upper() == "RTOVR" and "slot_id" in dep_node.metadata:
-                        slot = dep_node.metadata["slot_id"]
-                        if 35 <= slot <= 38: # UVR_WDATA_0=35 -> ur-w0 (204)
-                            solver.add(iq_vars[op.trace_id] == 204 + (slot - 35))
+                        slot = int(dep_node.metadata["slot_id"])
+                        if base_w <= slot <= base_w + 3: 
+                            solver.add(iq_vars[op.trace_id] == slot)
 
         # 3. 数据依赖约束 (RAW) — (L-1 + transit)
         for op in ops:
@@ -112,7 +124,7 @@ class SMTSynthesizer:
             rtovr_deps = [d for d in op.metadata.get("depends_on", []) 
                          if d in nodes_by_id and nodes_by_id[d].op_type == "RTOVR"]
             
-            if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE"]:
+            if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
                 for rd in rtovr_deps:
                     # 时序同步：计算单元点火 = RtoVR 点火 + 1
                     solver.add(t[op.trace_id] == t[rd] + 1)
@@ -143,13 +155,13 @@ class SMTSynthesizer:
                     op.metadata["iq_id"] = assigned_iq
                     
                     # 🛰️ 物理自动对位：如果当前是 UR_WRITE，强制纠正其消费的 RTOVR Slot
+                    base_w = registry.get("UR_WRITE", 35)
                     if op.op_type.upper() == "UR_WRITE":
                         for dep_id in op.metadata.get("depends_on", []):
                             dep_node = nodes_by_id.get(dep_id)
                             if dep_node and dep_node.op_type.upper() == "RTOVR":
-                                # UR_W0(204) -> Slot 35, UR_W1(205) -> Slot 36 ...
-                                new_slot = assigned_iq - 204 + 35
-                                dep_node.metadata["slot_id"] = new_slot
+                                # 强制对齐 (UR_W1 (ID 36) -> Slot 36)
+                                dep_node.metadata["slot_id"] = assigned_iq
 
             return {op_id: m[t[op_id]].as_long() for op_id in t}
         

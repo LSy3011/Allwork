@@ -37,12 +37,17 @@ class LIRPacker:
                 # 🛸 动态映射 RtoVR 的 Source ID：UR_READ 映射到 30-33 端口
                 if "ur-r" in iq_name:
                     idx = int(iq_name.replace("ur-r", ""))
-                    node_to_src_id[op.trace_id] = PORT_OFFSET_UR_RDATA + idx
+                    node_to_src_id[(op.trace_id, "D")] = PORT_OFFSET_UR_RDATA + idx
                 else:
-                    # ALU 路由直连 (待后续 RtoVR YAML 统一)
-                    if op.op_type.upper() == "FPMUL": node_to_src_id[op.trace_id] = PORT_ID_FPMUL_D
-                    elif op.op_type.upper() == "FPADD": node_to_src_id[op.trace_id] = PORT_ID_FPADD_D
-                    elif op.op_type.upper() == "INTADD": node_to_src_id[op.trace_id] = PORT_ID_INTADD_D0
+                    # ALU 路由直连 (同步 D 和 ST 两个端子)
+                    d_id, st_id = -1, -1
+                    if op.op_type.upper() == "FPMUL": d_id = PORT_ID_FPMUL_D
+                    elif op.op_type.upper() == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 # 🛰️ 关键：FPADD_ST = 5
+                    elif op.op_type.upper() == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2 # 🛰️ 关键：INTADD_ST = 2
+                    elif op.op_type.upper() == "LOGIC": d_id = 10 # DR_LOGIC_D
+                    
+                    if d_id != -1: node_to_src_id[(op.trace_id, "D")] = d_id
+                    if st_id != -1: node_to_src_id[(op.trace_id, "ST")] = st_id
 
         # 2. 分桶聚合所有物理 IQ 流
         module_streams = {}
@@ -57,14 +62,18 @@ class LIRPacker:
                 name = f"rtovr-{op.metadata.get('slot_id', 0)}"
                 # 注入 p_src_id 以便 FieldMapper 能识别
                 deps = op.metadata.get("depends_on", [])
-                if deps and deps[0] in node_to_src_id:
-                    op.metadata["p_src_id"] = node_to_src_id[deps[0]]
+                port = op.metadata.get("dep_port", "D")
+                if deps and (deps[0], port) in node_to_src_id:
+                    op.metadata["p_src_id"] = node_to_src_id[(deps[0], port)]
             else:
                 name = m_type.lower()
 
+            # 🛸 物理審計：確認 IQ 是否在白名單中
             lookup = f"IQ_{m_type}"
             if "RTOVR" in m_type: lookup = "IQ_RTOVR"
-            if lookup not in self.hw_spec.iqs: continue
+            if lookup not in self.hw_spec.iqs:
+                print(f"[EMIT-DENIED] Op:{op.trace_id} Type:{m_type} Lookup:{lookup} not in {list(self.hw_spec.iqs.keys())}")
+                continue
             
             # DEBUG PRINT
             print(f"[EMIT-LOG] Op:{op.trace_id} Type:{m_type} IQ:{name} T:{op.metadata['global_t']}")
@@ -79,6 +88,7 @@ class LIRPacker:
                 "iq_conf": self.hw_spec.iqs[lookup]
             })
 
+        print(f"[EMIT-SUMMARY] Collected Streams: {list(module_streams.keys())}")
         # 3. 二进制打包与 IQ 初始化记录
         iq_init = {}
         iq_reg = self.hw_spec.system_core.get("iq_registry", {})
@@ -105,20 +115,24 @@ class LIRPacker:
                     embed_end=cmd.get("embed_end", 0)
                 )
                 
-                # 🛸 物理点火：基于 OFFSET_VLD 宏进行状态位注入
+                # 🛸 标准化物理点火 (VLD/VALID)
+                # 遵循 V5.0 物理规范：VLD 在 Header 的第 40 位，Header 在 Payload 的高侧。
                 vld_bit = local_iq_conf.BITS_CODE + OFFSET_VLD
-                if cmd.get("valid", 1) == 0:
-                    val &= ~(1 << vld_bit)
-                else:
+                if cmd.get("valid", 1) != 0:
                     val |= (1 << vld_bit)
+                else:
+                    val &= ~(1 << vld_bit)
                 
+                # 🛰️ 物理封裝：強制輸出 32 字符 Hex (對應 128-bit VLIW)
+                if "rtovr-13" in name:
+                    print(f">>> [EMIT-VAL-DEBUG] Unit:{name} Val:{hex(val)} VLD_Bit:{vld_bit}", flush=True)
                 hex_lines.append(f"{val:032x}")
             
             hex_file_name = f"iq_{name.replace('-', '_')}.hex"
             with open(smc0 / hex_file_name, "w") as f:
                 f.write("\n".join(hex_lines) + "\n")
             
-            print(f"[EMITTER-DEBUG] IQ: {name} | Compressed: {len(compressed)} items | Hex Lines: {len(hex_lines)}")
+            print(f"[EMITTER-DEBUG] IQ: {name} | Compressed: {len(compressed)} items | Hex Lines: {len(hex_lines)}", flush=True)
             
             iq_init[name] = f"smc_0/{hex_file_name}"
 
@@ -148,8 +162,8 @@ class LIRPacker:
                         # 🛸 标量广播扩展: 如果原始数据是标量，其物理行填满 4 份一样的数
                         entry = [entry] * 4
                     
-                    # 🛰️ 128-bit 矢量物理通道对位 (修正为 Little Endian Lane: Lane 0 at bits 31:0)
-                    packed = sum((int(struct.unpack("<I", struct.pack("<f", x))[0]) & 0xFFFFFFFF) << (32 * i) for i, x in enumerate(entry[:4]))
+                    # 🛰️ 128-bit 矢量物理通道对位 (修正为 LSB-First: Index i -> Lane i)
+                    packed = sum((int(struct.unpack(">I", struct.pack(">f", x))[0]) & 0xFFFFFFFF) << (32 * i) for i, x in enumerate(entry[:4]))
                     f.write(f"{packed:032x}\n")
         
         for t_name, t_obj in program.tensors.items():

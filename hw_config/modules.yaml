@@ -40,6 +40,17 @@ modules:
         lanes: 4
         formula: "DR_D[x] = S0[x] * S1[x] (x=0..3)"
 
+  LOGIC:
+    type: compute
+    latency: 1
+    inputs: [DVR-LOGIC-S0, DVR-LOGIC-S1, DVR-LOGIC-ST]
+    outputs: [DR-LOGIC-D]
+    code_bits: 6
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: OP_TYPE, bits: 4}
+      - {name: PRECISION, bits: 1}
+
   RTOVR:
     type: router
     latency: 1

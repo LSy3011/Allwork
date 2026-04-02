@@ -29,7 +29,12 @@ class OperatorPhysicalTester:
         if strategy != "default":
             base_dir = op_root / f"perf_contest/{strategy}"
         base_dir.mkdir(parents=True, exist_ok=True)
-        stages = {"p1": base_dir / "phase1_synthesis", "p2": base_dir / "phase2_emission"}
+        stages = {
+            "p1": base_dir / "phase1_synthesis", 
+            "p2": base_dir / "phase2_emission",
+            "p3": base_dir / "phase3_simulation",
+            "p4": base_dir / "phase4_summary"
+        }
         for p in stages.values(): p.mkdir(parents=True, exist_ok=True)
         return stages, op_root
 
@@ -54,6 +59,22 @@ class OperatorPhysicalTester:
 
             # 2. SMT 合成
             res = SMTSynthesizer(self.spec).solve(dfg_ops, strategy=strategy)
+            
+            # [PHASE-1] 导出合成后的 DFG 状态
+            dfg_dump = []
+            for node in dfg_ops:
+                # 🛸 深度脱敏: 将所有 Enum 转换为 String 以便持久化
+                node_data = {
+                    "trace_id": node.trace_id,
+                    "op_type": str(node.op_type),
+                    "metadata": {}
+                }
+                for k, v in node.metadata.items():
+                    node_data["metadata"][k] = str(v) if hasattr(v, 'name') else v
+                dfg_dump.append(node_data)
+                
+            with open(stages["p1"] / "dfg_final.json", "w") as f:
+                json.dump(dfg_dump, f, indent=2)
             
             # 3. 物理数据排布 (128-bit SIMD Row Mirroring)
             banks = {i: [] for i in range(8)}
@@ -140,9 +161,27 @@ class OperatorPhysicalTester:
             runner = self.ws / "sim" / "smc_simulator" / "tools" / "physical_runner.py"
             res_sim = subprocess.run(["python3", str(runner), str(acb_path)], env=env, capture_output=True, text=True)
             
-            if "PASSED" in res_sim.stdout.upper() or "Verified successfully" in res_sim.stdout:
+            # [PHASE-3] 持久化仿真日志
+            with open(stages["p3"] / "sim.log", "w") as f:
+                f.write(res_sim.stdout)
+                if res_sim.stderr: f.write("\n--- STDERR ---\n" + res_sim.stderr)
+
+            is_success = "PASSED" in res_sim.stdout.upper() or "Verified successfully" in res_sim.stdout
+            
+            # [PHASE-4] 生成最终对齐报告
+            report = {
+                "op_name": op_name,
+                "strategy": strategy,
+                "status": "SUCCESS" if is_success else "FAILED",
+                "max_diff": 0.0 if is_success else "Check sim.log",
+                "physical_resources": list(set(op.metadata.get("iq_id", "N/A") for op in dfg_ops))
+            }
+            with open(stages["p4"] / "alignment_report.json", "w") as f:
+                json.dump(report, f, indent=2)
+
+            if is_success:
                 print(f"✅ {op_name} (SMC v2.4): BIT-PERFECT PARITY ACHIEVED")
             else:
-                print(f"🚨 {op_name} (SMC v2.4): VERIFICATION FAILED\n[LOG]:\n{res_sim.stdout[-800:]}")
+                print(f"🚨 {op_name} (SMC v2.4): VERIFICATION FAILED\n[LOG]:\n{res_sim.stdout[:500]}...")
                 return False, "Sim Fail"
         return True, "Done"
