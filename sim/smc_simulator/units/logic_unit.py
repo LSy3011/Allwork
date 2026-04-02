@@ -66,9 +66,9 @@ class LogicUnit(Component):
         if s1_v: self.regs_s1 = s1_in
         if st_v: self.regs_st = st_in
         
-        # 🚀 状态位物理拓针：追踪比较标志位的跨单元迁徙
-        if is_vld and str(getattr(instr, 'OP_TYPE', '')).startswith('SELECT'):
-            print(f"[LOGIC-ST-TRACE] Cycle {cycle} ST_RAW:{st_in:08x} REGS_ST:{self.regs_st:08x}", flush=True)
+        # 🛰️ 物理对位：由于 Kernel 时序原因，我们在此显式追踪 Valid 状态
+        if is_vld:
+            print(f">>> [LOGIC-VLD] Cycle:{cycle} Op:{instr.OP_TYPE} S0_V:{s0_v} S1_V:{s1_v} ST_V:{st_v} REGS_ST:{self.regs_st:032x}")
         
         res_val = 0
         if is_vld:

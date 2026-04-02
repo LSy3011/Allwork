@@ -2,60 +2,56 @@ iq_config:
   IQ_FPADD:
     module: FPADD
     EN_LOOPS: true
-    BITS_LOOPS: 8
-    EN_COND: true
-    BITS_COND: 8
+    BITS_LOOPS: 10
     EN_DLY: true
-    BITS_DLY: 4
-    EN_INC: true
-    BITS_INC: 4
-    BITS_EMBED: 3
-    BITS_EMBED_END: 6
-    BITS_CODE: 10
-    INC_HIGH: 7
-    INC_LOW: 3
+    BITS_DLY: 3
+    BITS_CODE: 10 # VALID(1) + SUB(1) + SRC0_PREC(1) + DST_PREC(1) + UPDATE_ST(1) + ...
 
   IQ_FPMUL:
     module: FPMUL
     EN_LOOPS: true
-    BITS_LOOPS: 8
+    BITS_LOOPS: 10
     EN_DLY: true
-    BITS_DLY: 4
+    BITS_DLY: 3
     BITS_CODE: 8
 
-  IQ_STB:
-    module: STB
+  IQ_LOGIC:
+    module: LOGIC
     EN_LOOPS: true
-    BITS_LOOPS: 8
-    EN_INC: true
-    BITS_INC: 13    # STB/LDB的INC位宽较大
-    BITS_CODE: 7
-
-  IQ_RTOVR:
-    module: RTOVR
-    count: 39 # 对应 39 个生产者 (DVR)
-    EN_LOOPS: true
-    BITS_LOOPS: 8
+    BITS_LOOPS: 10
     EN_DLY: true
-    BITS_DLY: 4
-    BITS_CODE: 7
+    BITS_DLY: 3
+    BITS_CODE: 6 # VALID(1) + OP_TYPE(4) + PRECISION(1)
 
   IQ_UR_READ:
     module: UR_READ
     count: 4
     EN_LOOPS: true
-    BITS_LOOPS: 8
+    BITS_LOOPS: 10
     BITS_CODE: 17
 
   IQ_UR_WRITE:
     module: UR_WRITE
     count: 4
     EN_LOOPS: true
-    BITS_LOOPS: 8
+    BITS_LOOPS: 10
     BITS_CODE: 33
+
+  IQ_RTOVR:
+    module: RTOVR
+    count: 64
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 7
 
   IQ_INTADD:
     module: INTADD
     EN_LOOPS: true
-    BITS_LOOPS: 8
+    BITS_LOOPS: 10
     BITS_CODE: 18
+
+  IQ_FPTOFP:
+    module: FPTOFP
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 5
