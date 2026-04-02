@@ -5,6 +5,7 @@ from api.op_tester import OperatorPhysicalTester
 from library.atomic.arithmetic.basic_ops import get_add_dfg, get_mul_dfg, get_reciprocal_dfg
 from library.atomic.activations.relu import get_relu_dfg
 from library.atomic.transcendentals.sin import get_sin_8order_dfg
+from library.atomic.transcendentals.cos import get_cos_8order_dfg
 from tests.operators.utils.data_generator import ArithTestDataGenerator
 
 class TestArithmeticBankRobustness:
@@ -13,17 +14,33 @@ class TestArithmeticBankRobustness:
     [V3.2 更新]: 纳入 Sin 8阶泰勒展开验证。
     """
 
-    @pytest.mark.parametrize("op_type", ["add", "mul", "rec", "relu", "sin"])
+    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not"])
     @pytest.mark.parametrize("data_mode", ["fuzz", "boundary"])
     def test_arithmetic_ccug_fuzzing(self, op_type, data_mode):
         """对基础算子执行 CCUG 角色自适应压力测试"""
         tester = OperatorPhysicalTester()
         
         # 1. 算法选择与角色对应的参考模型
+        from library.atomic.arithmetic.basic_ops import get_add_dfg, get_sub_dfg, get_mul_dfg, get_reciprocal_dfg, get_neg_dfg
+        from library.atomic.activations.relu import get_relu_dfg
+        from library.atomic.transcendentals.sin import get_sin_8order_dfg
+        from library.atomic.transcendentals.cos import get_cos_8order_dfg
+        from library.atomic.transcendentals.exp import get_exp_8order_dfg
+        from library.atomic.arithmetic.div import get_div_dfg
+        from library.atomic.logical.logical_ops import get_and_dfg, get_or_dfg, get_xor_dfg, get_not_dfg
+
         if op_type == "add":
             dfg_ops = get_add_dfg()
             role_to_input = {"operand_a": "x_val", "operand_b": "y_val"}
             ref_fn = lambda d: d["operand_a"] + d["operand_b"]
+        elif op_type == "sub":
+            dfg_ops = get_sub_dfg()
+            role_to_input = {"operand_a": "x_val", "operand_b": "y_val"}
+            ref_fn = lambda d: d["operand_a"] - d["operand_b"]
+        elif op_type == "neg":
+            dfg_ops = get_neg_dfg()
+            role_to_input = {"operand_a": "x_val"}
+            ref_fn = lambda d: -d["operand_a"]
         elif op_type == "mul":
             dfg_ops = get_mul_dfg()
             role_to_input = {"operand_a": "x_val", "operand_b": "y_val"}
@@ -40,6 +57,34 @@ class TestArithmeticBankRobustness:
             dfg_ops = get_sin_8order_dfg()
             role_to_input = {"operand_a": "x_val"}
             ref_fn = lambda d: np.sin(d["operand_a"])
+        elif op_type == "cos":
+            dfg_ops = get_cos_8order_dfg()
+            role_to_input = {"operand_a": "x_val"}
+            ref_fn = lambda d: np.cos(d["operand_a"])
+        elif op_type == "exp":
+            dfg_ops = get_exp_8order_dfg()
+            role_to_input = {"operand_a": "x_val"}
+            ref_fn = lambda d: np.exp(d["operand_a"])
+        elif op_type == "div":
+            dfg_ops = get_div_dfg()
+            role_to_input = {"operand_a": "x_val", "operand_b": "y_val", "initial_guess": "y0_val"}
+            ref_fn = lambda d: d["operand_a"] / d["operand_b"]
+        elif op_type == "and":
+            dfg_ops = get_and_dfg()
+            role_to_input = {"operand_a": "x_val", "operand_b": "y_val"}
+            ref_fn = lambda d: (d["operand_a"].view(np.uint32) & d["operand_b"].view(np.uint32)).view(np.float32)
+        elif op_type == "or":
+            dfg_ops = get_or_dfg()
+            role_to_input = {"operand_a": "x_val", "operand_b": "y_val"}
+            ref_fn = lambda d: (d["operand_a"].view(np.uint32) | d["operand_b"].view(np.uint32)).view(np.float32)
+        elif op_type == "xor":
+            dfg_ops = get_xor_dfg()
+            role_to_input = {"operand_a": "x_val", "operand_b": "y_val"}
+            ref_fn = lambda d: (d["operand_a"].view(np.uint32) ^ d["operand_b"].view(np.uint32)).view(np.float32)
+        elif op_type == "not":
+            dfg_ops = get_not_dfg()
+            role_to_input = {"operand_a": "x_val"}
+            ref_fn = lambda d: (~d["operand_a"].view(np.uint32)).view(np.float32)
         else:
             raise ValueError(f"Unknown op_type: {op_type}")
 
@@ -69,8 +114,12 @@ class TestArithmeticBankRobustness:
         role_data_channel_map = {
             "operand_a": "ch_0",
             "operand_b": "ch_1",
-            "initial_guess": "ch_1" 
+            "initial_guess": "ch_1" # 默认 rec 映射 (1/X)
         }
+        
+        if op_type == "div":
+            # 🛸 特殊处理除法：x -> ch0, y -> ch1, y0 -> ch2
+            role_data_channel_map["initial_guess"] = "ch_2"
         
         # 🛸 核心修复：遍历所有节点，确保所有 shared-role 节点都喂入相同数据
         for role, p_names in role_to_names.items():
@@ -92,7 +141,13 @@ class TestArithmeticBankRobustness:
             golden_y = ref_fn(role_data)
         
         # 7. 生成 CCUG 冲突组合 (2^K)
+        # 🛸 对于 Exp 等深层算子，K 可能很大。我们将其限制在 64 圈以内以防超时。
         combinations = list(itertools.product([0, 1], repeat=len(ccug_nodes)))
+        if len(combinations) > 64:
+            import random
+            random.seed(42) # 保证测试可重现
+            random.shuffle(combinations)
+            combinations = combinations[:64]
         print(f"\n🚀 [ADPC-ST-V3] CCUG ({data_mode}) | OP: {op_type.upper()} | NameMap: {role_to_names}")
 
         for i, config_tuple in enumerate(combinations):

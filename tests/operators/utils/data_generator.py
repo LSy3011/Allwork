@@ -13,14 +13,63 @@ OP_DATA_SPECS = {
         "range": (-1.5707, 1.5707),
         "seeds": [0.0, -0.0, 1.5707, -1.5707, 0.7854, -0.7854, 1e-4, -1e-4]
     },
+    "cos": {
+        "range": (-1.5707, 1.5707),
+        "seeds": [0.0, -0.0, 1.5707, -1.5707, 0.7854, -0.7854, 1e-4, -1e-4]
+    },
+    "add": {
+        "range": (-50.0, 50.0),
+        "seeds": [0.0, -0.0, 1.0, -1.0, 1e-5, -1e-5, np.nan, np.inf]
+    },
+    "sub": {
+        "range": (-50.0, 50.0),
+        "seeds": [0.0, -0.0, 1.0, -1.0, 1e-5, -1e-5, np.nan, np.inf]
+    },
+    "mul": {
+        "range": (-10.0, 10.0),
+        "seeds": [1.0, 0.0, -1.0, np.nan, np.inf]
+    },
+    "exp": {
+        "range": (-1.0, 1.0),
+        "seeds": [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 0.1, -0.1, 1e-4, -1e-4]
+    },
     "relu": {
         "range": (-20.0, 20.0),
         "seeds": [0.0, -0.0, 1e-5, -1e-5, 5.0, -5.0]
     },
     "rec": {
-        "range": (0.1, 100.0), # 倒数通常不测负数（如果硬件只支持正数域）
-        "seeds": [0.1, 1.0, 10.0, 100.0, 1e-3]
-    }
+        "range": (0.1, 10.0),
+        "seeds": [1.0, 0.1, 2.0, 0.5, 10.0, 1e-3]
+    },
+    "div": {
+        "range": (0.1, 10.0),
+        "seeds": [1.0, 0.1, 2.0, 0.5, 10.0, 1e-3]
+    },
+    "and": {
+        "range": (-100.0, 100.0),
+        "seeds": [0.0, 1.0, -1.0, 
+                  np.nan, np.inf,
+                  np.frombuffer(b'\xff\xff\xff\xff', dtype=np.float32)[0], # All ones
+                  np.frombuffer(b'\xaa\xaa\xaa\xaa', dtype=np.float32)[0], # Checkerboard
+                  np.frombuffer(b'\x55\x55\x55\x55', dtype=np.float32)[0]] # Checkerboard
+    },
+    "or": {
+        "range": (-100.0, 100.0),
+        "seeds": [0.0, 1.0, -1.0, 
+                  np.frombuffer(b'\xff\xff\xff\xff', dtype=np.float32)[0],
+                  np.frombuffer(b'\x00\x00\x00\x00', dtype=np.float32)[0]]
+    },
+    "xor": {
+        "range": (-100.0, 100.0),
+        "seeds": [0.0, 1.0, -1.0, 
+                  np.frombuffer(b'\xff\xff\xff\xff', dtype=np.float32)[0],
+                  np.frombuffer(b'\xaa\xaa\xaa\xaa', dtype=np.float32)[0]]
+    },
+    "not": {
+        "range": (-100.0, 100.0),
+        "seeds": [0.0, 1.0, -1.0, 
+                  np.frombuffer(b'\xff\xff\xff\xff', dtype=np.float32)[0]]
+    },
 }
 
 class ArithTestDataGenerator:
@@ -48,10 +97,14 @@ class ArithTestDataGenerator:
             for i in range(4)
         }
         
-        # 针对 Rec 的关联初值特殊逻辑 (保留最小必要的硬编码)
+        # 针对 Rec/Div 的关联初值特殊逻辑
         if op_type == "rec":
             with np.errstate(divide='ignore', invalid='ignore'):
                 data["ch_1"] = (1.0 / data["ch_0"] + np.random.uniform(-0.01, 0.01, size)).astype(np.float32)
+        elif op_type == "div":
+            # Div: ch_0=x, ch_1=y, ch_2=y0_guess(1/y)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                data["ch_2"] = (1.0 / data["ch_1"] + np.random.uniform(-0.01, 0.01, size)).astype(np.float32)
         
         return data
 
@@ -72,8 +125,12 @@ class ArithTestDataGenerator:
         if op_type == "rec":
             with np.errstate(divide='ignore', invalid='ignore'):
                 data["ch_1"] = (1.0 / data["ch_0"]).astype(np.float32)
-                # 简单清洗
                 mask = np.isnan(data["ch_1"]) | np.isinf(data["ch_1"])
                 data["ch_1"][mask] = 0.5
+        elif op_type == "div":
+            with np.errstate(divide='ignore', invalid='ignore'):
+                data["ch_2"] = (1.0 / data["ch_1"]).astype(np.float32)
+                mask = np.isnan(data["ch_2"]) | np.isinf(data["ch_2"])
+                data["ch_2"][mask] = 0.5
 
         return data

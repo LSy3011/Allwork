@@ -21,6 +21,40 @@ def get_add_dfg() -> List[MIROp]:
               bank=7, is_output=True, meta_name="add_result")
     return b.get_dfg()
 
+def get_sub_dfg() -> List[MIROp]:
+    """基础减法 (V5.4-Factory): SUB=1 模式。"""
+    b = MIROpBuilder()
+    x = b.make_op("UR_READ", "x_rd", RT.UR_READ, [], "LOAD X", role="operand_a")
+    y = b.make_op("UR_READ", "y_rd", RT.UR_READ, [], "LOAD Y", role="operand_b")
+    
+    r0 = b.make_op("RTOVR", "r0_sub", PS.FPADD_S0, [x])
+    r1 = b.make_op("RTOVR", "r1_sub", PS.FPADD_S1, [y])
+    
+    # 🛸 规格对齐：SUB=1 触发减法
+    res = b.make_op("FPADD", "res_sub", RT.FPADD, [r0, r1], SUB=1)
+    
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], 
+              bank=7, is_output=True, meta_name="sub_result")
+    return b.get_dfg()
+
+def get_neg_dfg() -> List[MIROp]:
+    """基础取负 (V5.4-Factory): 0.0 - x 模拟。"""
+    b = MIROpBuilder()
+    x = b.make_op("UR_READ", "x_rd", RT.UR_READ, [], "LOAD X", role="operand_a")
+    zero = b.make_op("UR_READ", "zero", RT.UR_READ, [], "CONST 0.0", is_const=True, value=0.0)
+    
+    r_zero = b.make_op("RTOVR", "r_zero", PS.FPADD_S0, [zero])
+    r_x = b.make_op("RTOVR", "r_x", PS.FPADD_S1, [x])
+    
+    # 🛸 模拟 NEG：0.0 - x
+    res = b.make_op("FPADD", "res_neg", RT.FPADD, [r_zero, r_x], SUB=1)
+    
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
+    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], 
+              bank=7, is_output=True, meta_name="neg_result")
+    return b.get_dfg()
+
 def get_mul_dfg() -> List[MIROp]:
     """基础乘法 (V5.4-Factory): 引入角色与输出锚点。"""
     b = MIROpBuilder()
