@@ -79,15 +79,9 @@ class InstructionDecoder:
         # 通过 spec 内部注册名检索
         # 由于 spec_loader 加载的 UnitSpec 可能不直接带注册表，我们在此使用回退与强制校准
         # 注意：这里的 self.spec.unit_name 必须与其注册名一致
+        # 🛸 物理纠偏：Payload 位宽应始终由字段定义求和得出 (spec_sum)
+        # 绝不能使用 iq_reg (那是硬件 ID)，否则会导致 Header 偏移错位。
         final_payload_width = spec_sum
-        
-        # 物理注入：直接从 loader 获取全局注册表 (最保险)
-        from aiacc_hardware.src.spec_loader import SpecLoader
-        iq_reg = SpecLoader().get_system_core().get("iq_registry", {})
-        reg_width = iq_reg.get(self.unit_name, 0)
-        
-        if reg_width > 0:
-            final_payload_width = reg_width
             
         # print(f"[DEC-AUDIT] Unit:{self.spec.unit_name} RegistryWidth:{reg_width} SpecSum:{spec_sum} -> P_Width:{final_payload_width}")
             
