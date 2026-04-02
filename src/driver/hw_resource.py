@@ -35,6 +35,7 @@ class PortSlot(IntEnum):
     FPMUL_D   = 3
     FPADD_D   = 4
     FPADD_ST  = 5
+    LOGIC_D   = 10
     UR_R0_D   = 30
     UR_R1_D   = 31
     UR_R2_D   = 32
@@ -47,6 +48,9 @@ class PortSlot(IntEnum):
     FPMUL_S1  = 4
     FPADD_S0  = 5
     FPADD_S1  = 6
+    LOGIC_S0  = 11
+    LOGIC_S1  = 12
+    LOGIC_ST  = 13
     UR_W0_S   = 35
     UR_W1_S   = 36
     UR_W2_S   = 37

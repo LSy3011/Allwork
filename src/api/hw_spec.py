@@ -106,13 +106,15 @@ class HardwareSpec(BaseModel):
         registry = self.config.get("iq_registry", {})
         instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
         
-        # 1. 处理 UR 特殊端口 (硬分配 200/204 偏移以兼容仿真驱动)
+        # 1. 处理 UR 特殊端口 (动态从 registry 映射地址)
         if unit_type.upper() == "UR_READ":
+            base = registry.get("UR_READ", 30)
             count = self.config["resource_constraints"].get("total_read_ports", 4)
-            return [200 + i for i in range(count)]
+            return [base + i for i in range(count)]
         if unit_type.upper() == "UR_WRITE":
+            base = registry.get("UR_WRITE", 35)
             count = self.config["resource_constraints"].get("total_write_ports", 4)
-            return [204 + i for i in range(count)]
+            return [base + i for i in range(count)]
             
         # 2. 处理 ALU 常规端口 (基于 Registry 偏移)
         if unit_type.upper() in instances:
@@ -126,11 +128,16 @@ class HardwareSpec(BaseModel):
         """
         反向寻址：根据物理 IQ ID 获取其实例化名称 (用于生成的 HEX 文件名)。
         """
-        # 1. 探测 UR 端口
-        if 200 <= iq_id <= 203: return f"ur-r{iq_id - 200}"
-        if 204 <= iq_id <= 207: return f"ur-w{iq_id - 204}"
+        # 1. 探测 UR 端口 (动态回溯)
+        registry = self.config.get("iq_registry", {})
+        base_r = registry.get("UR_READ", 30)
+        base_w = registry.get("UR_WRITE", 35)
+        
+        if base_r <= iq_id < base_r + 4: return f"ur-r{iq_id - base_r}"
+        if base_w <= iq_id < base_w + 4: return f"ur-w{iq_id - base_w}"
         
         # 2. 探测 ALU 端口
+        # (已存在逻辑保持不变)
         registry = self.config.get("iq_registry", {})
         instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
         
