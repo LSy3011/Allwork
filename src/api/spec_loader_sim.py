@@ -47,26 +47,45 @@ class UnitSpec:
 
 class SpecLoader:
     """
-    YAML Spec 加载器 2.0
+    YAML Spec 加载器 2.0 (SSoT 版)
     负责加载增强型的硬件规格文件，并提供类型安全的数据访问。
     """
     def __init__(self):
-        # Dynamically determine the specs directory relative to this file's location
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.base_dir = os.path.join(os.path.dirname(current_dir), "specs")
         self.units_dir = os.path.join(self.base_dir, "units")
         self.system_dir = os.path.join(self.base_dir, "system")
+        self._master_data = None
+        self._master_loaded = False
+
+    def _load_master(self):
+        """延迟加载大一统规格书"""
+        if self._master_loaded:
+            return
+        master_path = os.path.join(self.base_dir, "aiacc_v2.4_master.yaml")
+        if os.path.exists(master_path):
+            with open(master_path, 'r', encoding='utf-8') as f:
+                self._master_data = yaml.safe_load(f)
+        self._master_loaded = True
 
     def get_unit(self, name: str) -> Optional[UnitSpec]:
-        """加载并返回特定单元的规格对象"""
-        file_path = os.path.join(self.units_dir, f"{name.lower()}.yaml")
-        if not os.path.exists(file_path):
+        """加载并返回特定单元的规格对象 (优先从 Master Spec 加载)"""
+        self._load_master()
+        
+        data = None
+        if self._master_data and name.upper() in self._master_data.get("functional_units", {}):
+            data = self._master_data["functional_units"][name.upper()]
+        else:
+            # 回退到独立 YAML
+            file_path = os.path.join(self.units_dir, f"{name.lower()}.yaml")
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+            
+        if not data:
             return None
             
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
-            
-        # 解析端口（显式字段提取，兼容新旧 Spec）
+        # 解析端口
         def _parse_port(p: dict) -> PortSpec:
             return PortSpec(
                 name=p["name"],
@@ -101,13 +120,18 @@ class SpecLoader:
         )
 
     def get_system_core(self) -> Bunch:
-        """从 system_core.yaml 加载全局常量和资源限制"""
+        """从 Master Spec 或 system_core.yaml 加载全局配置"""
+        self._load_master()
+        
+        if self._master_data:
+            return Bunch(self._master_data["system_core"])
+            
+        # 回退逻辑
         file_path = os.path.join(self.system_dir, "system_core.yaml")
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"System core spec not found at {file_path}")
         with open(file_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
-            # print(f"DEBUG_SPECLOADER_LOADED_SYSTEM_CORE: {data.get('resource_constraints')}")
             return Bunch(data)
 
 if __name__ == "__main__":

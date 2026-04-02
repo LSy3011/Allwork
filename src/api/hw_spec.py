@@ -58,9 +58,17 @@ class HardwareSpec(BaseModel):
         base = Path(config_dir)
         
         def load_yaml(f):
-            if not (base / f).exists(): return {}
-            with open(base / f, "r") as stream:
+            p = base / f
+            if not p.exists(): return {}
+            with open(p, "r") as stream:
                 return yaml.safe_load(stream)
+        
+        # 🛸 V2.4 大一统加载尝试 (SSoT)
+        master_spec_path = base / "specs" / "aiacc_v2.4_master.yaml"
+        master_data = None
+        if master_spec_path.exists():
+            with open(master_spec_path, "r") as f:
+                master_data = yaml.safe_load(f)
         
         # 1. 基础载入
         spec_data = {
@@ -68,29 +76,37 @@ class HardwareSpec(BaseModel):
             "modules": load_yaml("modules.yaml")["modules"],
             "iqs": load_yaml("iq_config.yaml")["iq_config"],
             "delays": load_yaml("pipeline_delays.yaml")["pipeline_delays"],
-            "system_core": load_yaml("specs/system/system_core.yaml")
+            "system_core": master_data["system_core"] if master_data else load_yaml("specs/system/system_core.yaml")
         }
         
         # 2. 深度加载每个模块的详细物理规格 (Specs Override Modules)
         modules_data = spec_data["modules"]
         for mname in modules_data:
-            # 尝试加载 specs/units/<mname>.yaml
-            spec_file = base / "specs" / "units" / f"{mname.lower()}.yaml"
-            if spec_file.exists():
-                with open(spec_file, "r") as f:
-                    u_data = yaml.safe_load(f)
-                    # 映射详细字段到 ModuleSpec 结构
-                    if "micro_instructions" in u_data:
-                        fields = []
-                        for f_info in u_data["micro_instructions"]:
-                            fields.append({
-                                "name": f_info.get("field", f_info.get("name")),
-                                "bits": f_info.get("width", f_info.get("bits")),
-                                "default": f_info.get("default", 0),
-                                "encoding": f_info.get("encoding", {})
-                            })
-                        modules_data[mname]["code_fields"] = fields
-                        modules_data[mname]["latency"] = u_data.get("latency", modules_data[mname]["latency"])
+            u_data = None
+            if master_data and mname.upper() in master_data["functional_units"]:
+                u_data = master_data["functional_units"][mname.upper()]
+            else:
+                # 回退到独立 YAML (保持兼容)
+                spec_file = base / "specs" / "units" / f"{mname.lower()}.yaml"
+                if spec_file.exists():
+                    with open(spec_file, "r") as f:
+                        u_data = yaml.safe_load(f)
+            
+            if u_data:
+                # 映射详细字段到 ModuleSpec 结构
+                if "micro_instructions" in u_data:
+                    fields = []
+                    for f_info in u_data["micro_instructions"]:
+                        fields.append({
+                            "name": f_info.get("field", f_info.get("name")),
+                            "bits": f_info.get("width", f_info.get("bits")),
+                            "default": f_info.get("default", 0),
+                            "encoding": f_info.get("encoding", {})
+                        })
+                    modules_data[mname]["code_fields"] = fields
+                    modules_data[mname]["latency"] = u_data.get("latency", modules_data[mname]["latency"])
+
+        return cls(**spec_data)
 
         return cls(**spec_data)
 

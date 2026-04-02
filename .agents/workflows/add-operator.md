@@ -10,7 +10,8 @@ description: AIACC 算子标准化开发流 (V4.0 - ADPC 契约版)
 1.  **逻辑角色解耦**：输入节点通过 `role` 标签标识，不再依赖物理名字。
 2.  **常数灵魂归位**：所有的常数（如泰勒系数）必须原位定义在 DFG 内部（`is_const=True`）。
 3.  **物理保真 (Pulse-Pass)**：深层 DFG 必须显式处理中间变量的 Bank 写回与重读。
-4.  **自动锚定**：输出节点通过 `is_output=True` 显式声明，实现结果自动比对。
+4.  **规格一致性 (Spec Integrity)**：所有指令字段（如 `SUB`, `UPDATE_ST`）必须与 `hw_config/specs/aiacc_v2.4_master.yaml` 的定义严格对齐。
+5.  **自动锚定**：输出节点通过 `is_output=True` 显式声明，实现结果自动比对。
 
 ---
 
