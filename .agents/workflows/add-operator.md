@@ -1,75 +1,64 @@
 ---
-description: AIACC 新增算子的标准化工作流 - 从数学公式到 Bit-Perfect 验证
+description: AIACC 算子标准化开发流 (V4.0 - ADPC 契约版)
 ---
 
-# /add-operator 工作流
+# AIACC 算子标准化开发 SOP (V4.0)
 
-当需要新增一个算子时，按以下步骤执行。
+本工作流旨在确保所有算子（Add, Sin, ReLU 等）从 DFG 构造到比特级仿真验证均遵循 **ADPC (物理与逻辑解耦规范)**。
 
-## Step 1: 分类 (ADM)
-根据算子复杂度判定路径：
-- **Algebraic** (≤3 MIR ops): add, mul, relu, neg
-- **Atomic** (4~15 MIR ops): sin, exp, log, sqrt
-- **Composite** (>15 MIR ops 或多段): atan2, gelu, layernorm
+## 核心契约 (The Contract)
+1.  **逻辑角色解耦**：输入节点通过 `role` 标签标识，不再依赖物理名字。
+2.  **常数灵魂归位**：所有的常数（如泰勒系数）必须原位定义在 DFG 内部（`is_const=True`）。
+3.  **物理保真 (Pulse-Pass)**：深层 DFG 必须显式处理中间变量的 Bank 写回与重读。
+4.  **自动锚定**：输出节点通过 `is_output=True` 显式声明，实现结果自动比对。
 
-## Step 2: 生成模板 (SE + 大模型)
-// turbo
-读取 `docs/adm/adr/ADR-003_lowering.md` 确认流程。
+---
 
-对于 Atomic 算子：
-```
-大模型生成候选 MIR 序列 → 存入 src/library/atomic/{name}.py
-```
-对于 Composite 算子：
-```
-拆解为多个 Atomic 子步骤 → 存入 src/library/composite/{name}.py
-```
-对于 Algebraic 算子：
-```
-直接映射到 1-2 条 IQ 指令 → 存入 src/library/algebraic/{name}.py
-```
+## 开发步骤
 
-模板必须继承 `OperatorTemplate` 基类，实现 `lower()` 和 `get_reference()`。
-
-## Step 3: 注册算子 (SE)
-在 `src/api/registry.py` 中注册：
+### 第一步：实现 DFG (library/atomic/...)
+使用 `MIROpBuilder` 构造 DFG，并注入标准元数据：
 ```python
-registry.register("{name}", path="{path}", template="library.{path}.{name}")
+def get_example_dfg():
+    b = MIROpBuilder()
+    # 1. 输入 (角色化)
+    x = b.make_op("UR_READ", "x_rd", RT.UR_READ, [], role="operand_a")
+    # 2. 定量 (原位化)
+    c1 = b.make_op("UR_READ", "c1", RT.UR_READ, [], is_const=True, value=3.14159)
+    # 3. 运算 (物理保正)
+    # ... 复杂的 FPMUL / FPADD 逻辑
+    res = b.make_op("FPMUL", "res", RT.FPMUL, [r0, r1])
+    # 4. 输出 (锚定化)
+    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
+    b.make_op("UR_WRITE", "out", RT.UR_WRITE, [rt_fin], 
+              is_output=True, meta_name="example_result")
+    return b.get_dfg()
 ```
 
-## Step 4: 写红灯测试 (TFD)
+### 第二步：注册数学特性 (tests/operators/utils/data_generator.py)
+在 `OP_DATA_SPECS` 中增加算子的收敛域和边界种子：
 ```python
-# tests/unit/test_{name}.py
-def test_{name}_lower_produces_valid_mir():
-    template = registry.get_template("{name}")
-    mir_ops = template.lower(mock_hir_node, mock_spec)
-    assert len(mir_ops) > 0
-    assert all(isinstance(op, MIROp) for op in mir_ops)
-
-def test_{name}_bit_perfect():
-    # 全链路: lower → synthesize → stitch → emit → simulate
-    sim_out = full_compile_and_simulate("{name}", test_input)
-    ref_out = template.get_reference(test_input)
-    assert torch.equal(sim_out, ref_out)
+"example_op": {
+    "range": (-10.0, 10.0), # 随机扫射范围
+    "seeds": [0.0, 1.0, -1.0, 3.14159] # 边界扫射种子
+}
 ```
 
-## Step 5: 实现并验证 (IE + PVO)
-1. 实现 `lower()` 方法
-2. 运行 `pytest tests/unit/test_{name}.py` → 绿灯
-3. 运行 `SMTOutputVerifier` → 通过
-4. 运行 `StreamScanner` → CLEAN
-5. 运行 Bit-Perfect 对比 → 通过
-
-## Step 6: 冻结模板 (IG)
-```bash
-git add src/library/{path}/{name}.py tests/unit/test_{name}.py
-git commit -m "feat: 新增算子 {name} ({path}) - Bit-Perfect 已验证"
+### 第三步：集成全自动测试 (tests/operators/arithmetic/test_arith_bank_fuzz.py)
+在参数化列表中增加算子，并定义它的 Golden 参考模型：
+```python
+@pytest.mark.parametrize("op_type", ["add", "mul", "rec", "relu", "sin", "example_op"])
+def test_arithmetic_ccug_fuzzing(self, op_type, data_mode):
+    # ... 映射逻辑已自动化 ...
+    if op_type == "example_op":
+        dfg_ops = get_example_dfg()
+        role_to_input = {"operand_a": "x_val"} # 将角色映射到通道 ch_0 (x_val)
+        ref_fn = lambda d: d["operand_a"] * 3.14159 # 定义数学预期值
 ```
 
-## 检查清单
-- [ ] 算子已分类 (Atomic/Composite/Algebraic)
-- [ ] 模板继承 OperatorTemplate
-- [ ] 已注册到 OperatorRegistry
-- [ ] 红灯测试已就绪
-- [ ] Bit-Perfect 验证通过
-- [ ] Git 提交
+---
+
+## 验收准则 (Acceptance Criteria)
+1.  **64+ CCUG 通关**：在 64 种物理冲突组合下均通过验证。
+2.  **Bit-Perfect**：仿真输出与 `ref_fn` 的最大误差符合配置（通常为 5e-3）。
+3.  **无硬编码 Bank**：DFG 内部除必要的最终输出写回外，不应包含硬编码的 Bank ID（由 SMT 自动合成）。

@@ -152,16 +152,20 @@ def run_physical_verification(case_dir: str):
             
         sim_np = np.array(sim_flat, dtype=np.float32).reshape(shape)
         
-        # Checking for NaNs which indicate reading uninitialized poisoned memory
-        if np.isnan(sim_np).any():
-             print(f"FAILED {name}: Output contains NaN values! Detected Memory Corruption / Poisoned Read.")
+        # 🛸 ADPC-ALIGN: 支持边界值测试中的 NaN 对比。
+        # 只有当 sim_np 有 NaN 但 ref 没有时，才考虑为“内存污染”。
+        mask_sim_nan = np.isnan(sim_np)
+        mask_ref_nan = np.isnan(ref)
+        
+        if np.any(mask_sim_nan & (~mask_ref_nan)):
+             print(f"FAILED {name}: Unexpected NaN detected! (Poisoned Read)")
              all_passed = False
              continue
 
         # Mathematical tolerance check
-        atol = 5e-3 # Global tolerance for taylor expansion
+        atol = 5e-3 # Global tolerance
         passed = True
-        if not np.allclose(sim_np, ref, atol=atol):
+        if not np.allclose(sim_np, ref, atol=atol, equal_nan=True):
             max_err = np.max(np.abs(sim_np - ref))
             print(f"FAILED {name}: Max Difference = {max_err}")
             all_passed = False
