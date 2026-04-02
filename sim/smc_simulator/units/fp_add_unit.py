@@ -81,7 +81,8 @@ class FPAddUnit(Component):
         update_st_this_cycle = False
         
         if valid_trigger:
-            is_sub = (instr.SUB == "SUB")
+            is_sub = (getattr(instr, "SUB", "ADD") == "SUB")
+
             update_st_this_cycle = (instr.UPDATE_ST == "YES")
             
             # 使用 Spec 引擎获取布局
