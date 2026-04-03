@@ -115,8 +115,8 @@ class FPAddUnit(Component):
                         gt = 1 if f0_f > f1_f else 0
                         eq = 1 if f0_f == f1_f else 0
                         ls = 1 if f0_f < f1_f else 0
-                        # HW Aligned: FP32 updates Groups 1, 3, 5, 7 (Bit 0, 32, 64, 96)
-                        st_val |= ((gt<<2)|(eq<<1)|ls) << (i * 32)
+                        # 🛰️ [HARDWARE-ALIGN]：Status 寄存器严格按 16-bit 步进排布 (0, 16, 32...)
+                        st_val |= ((gt<<2)|(eq<<1)|ls) << (i * 16)
                         print(f">>> [ST-AUDIT] Lane:{i} Bits0:{bits0:08x} Bits1:{bits1:08x} Flags:{(gt<<2)|(eq<<1)|ls}", flush=True)
             else: # FP16
                 for i in range(count):
@@ -132,7 +132,7 @@ class FPAddUnit(Component):
                         gt = 1 if f0_f > f1_f else 0
                         eq = 1 if f0_f == f1_f else 0
                         ls = 1 if f0_f < f1_f else 0
-                        # HW Aligned: FP16 updates all 8 groups (Bit 0, 16, 32, 48, 64, 80, 96, 112)
+                        # 🛰️ [HARDWARE-ALIGN]：FP16 同样对齐 16-bit 步进
                         st_val |= ((gt<<2)|(eq<<1)|ls) << (i * 16)
 
             # --- Output Pack ---

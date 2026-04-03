@@ -98,7 +98,8 @@ class SMTSynthesizer:
                 if dep_id in t:
                     dep_node = nodes_by_id[dep_id]
                     delay = self.norm_delays.get(dep_node.op_type.upper(), 1)
-                    transit = 1 if dep_node.op_type.upper() != "RTOVR" else 0
+                    # 🛰️ [INDUSTRIAL ALIGNMENT] UR_WRITE 之后需 2 拍物理缓冲，防止总线竞争窗口引发的读取 0 合法性冲突
+                    transit = 2 if dep_node.op_type.upper() == "UR_WRITE" else (1 if dep_node.op_type.upper() != "RTOVR" else 0)
                     solver.add(t[op.trace_id] >= t[dep_id] + (delay - 1) + transit)
 
         # 4. 物理资源互斥与公理注入 (去硬编码版)

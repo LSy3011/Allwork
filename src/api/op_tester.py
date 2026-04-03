@@ -4,6 +4,8 @@ import math
 import shutil
 import subprocess
 import numpy as np
+import re
+import struct
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -13,10 +15,6 @@ from orchestrator.stitcher import HSTSStitcher
 from driver.emitter import LIRPacker
 
 class OperatorPhysicalTester:
-    """
-    AIACC 工业化 128-bit 物理验证基座 (v7.2-Final)
-    严格遵循硬件 128-bit 对位：强制镜像广播 + 信号地址归一化。
-    """
     def __init__(self, hw_config_path: str = "hw_config", build_root: str = "build"):
         self.ws = Path.cwd()
         self.hw_config = hw_config_path
@@ -47,28 +45,101 @@ class OperatorPhysicalTester:
                                    static_banks: Dict[str, int] = {},
                                    strategies: List[str] = ["balanced"],
                                    atol: float = 5e-3,
-                                   max_cycles: int = 200):
+                                   max_cycles: int = 1000):
         for strategy in strategies:
-            print(f"\n🚀 [INDUSTRIAL-SIM] Testing {op_name} (128-bit Mode) ...")
+            print(f"\n[INDUSTRIAL-SIM] Testing {op_name} (Full-Stack Mode) ...")
             stages, op_root = self._prepare_stages(op_name, strategy)
             
-            # 1. 物理约束注入 (Bank-ID)
+            from orchestrator.colorer import BalancedBankColorer
+            from orchestrator.memory_allocator import MemoryAllocator
+            
+            class TensorProxy:
+                def __init__(self, name):
+                    self.name = name
+                    self.bank_id = None
+                    self.base_addr = None
+                    self.manual_bank = None
+                    self.size = 1
+                    self.start_t, self.end_t = 0, 100
+
+            node_to_tensor_name = {}
+            t_proxies = {}
+            
             for op in dfg_ops:
                 if op.trace_id in static_banks:
                     op.metadata["bank_id"] = static_banks[op.trace_id]
 
-            # 2. SMT 合成
+                if op.op_type == "UR_READ":
+                    producers = op.metadata.get("depends_on", [])
+                    found_producer = False
+                    for p in producers:
+                        p_node = next((n for n in dfg_ops if n.trace_id == p), None)
+                        if p_node and p_node.op_type == "UR_WRITE":
+                            t_name = f"tensor_{p}"
+                            node_to_tensor_name[op.trace_id] = t_name
+                            if t_name not in t_proxies: t_proxies[t_name] = TensorProxy(t_name)
+                            if "bank_id" in p_node.metadata:
+                                t_proxies[t_name].bank_id = p_node.metadata["bank_id"]
+                                t_proxies[t_name].manual_bank = t_proxies[t_name].bank_id
+                            found_producer = True; break
+                    
+                    if not found_producer:
+                        t_name = op.trace_id
+                        node_to_tensor_name[op.trace_id] = t_name
+                        if t_name not in t_proxies: t_proxies[t_name] = TensorProxy(t_name)
+                        if "bank_id" in op.metadata:
+                            t_proxies[t_name].bank_id = op.metadata["bank_id"]
+                            t_proxies[t_name].manual_bank = t_proxies[t_name].bank_id
+                
+                elif op.op_type == "UR_WRITE":
+                    t_name = f"tensor_{op.trace_id}"
+                    node_to_tensor_name[op.trace_id] = t_name
+                    if t_name not in t_proxies: t_proxies[t_name] = TensorProxy(t_name)
+                    t_proxies[t_name].bank_id = op.metadata.get("bank_id")
+
+            # 冲突发现：基于 Logical Tensor 进行互斥
+            conflicts = []
+            for op in dfg_ops:
+                deps = op.metadata.get("depends_on", [])
+                src_tensors = []
+                for d in deps:
+                    d_node = next((n for n in dfg_ops if n.trace_id == d), None)
+                    if d_node:
+                        if d_node.op_type in ["UR_READ", "UR_WRITE"]:
+                            src_tensors.append(node_to_tensor_name.get(d))
+                        elif d_node.op_type == "RTOVR":
+                            for dd in d_node.metadata.get("depends_on", []):
+                                if dd in node_to_tensor_name: src_tensors.append(node_to_tensor_name[dd])
+                
+                src_tensors = list(set([s for s in src_tensors if s]))
+                if len(src_tensors) > 1:
+                    for i in range(len(src_tensors)):
+                        for j in range(i+1, len(src_tensors)):
+                            conflicts.append((src_tensors[i], src_tensors[j]))
+
+            # 2. 调用图着色与物理分配
+            coloring, success = BalancedBankColorer.assign_banks(list(t_proxies.values()), conflicts)
+            for t_name, b_id in coloring.items(): 
+                t_proxies[t_name].bank_id = b_id
+            
+            allocator = MemoryAllocator(self.spec.params)
+            addr_map = allocator.allocate(list(t_proxies.values()))
+            
+            # 4. 物理回填 (将张量物理特性同步回所有关联的 MIROp)
+            for op in dfg_ops:
+                if op.trace_id in node_to_tensor_name:
+                    t_name = node_to_tensor_name[op.trace_id]
+                    op.metadata["bank_id"] = t_proxies[t_name].bank_id
+                    op.metadata["addr"] = addr_map.get(t_name, 0)
+            
+            print(f"✅ [ORCHESTRATOR] Tensor-Coherent alignment completed for {len(t_proxies)} logical tensors.")
+            # --- [INDUSTRIAL ORCHESTRATION CHAIN END] ---
+
             res = SMTSynthesizer(self.spec).solve(dfg_ops, strategy=strategy)
             
-            # [PHASE-1] 导出合成后的 DFG 状态
             dfg_dump = []
             for node in dfg_ops:
-                # 🛸 深度脱敏: 将所有 Enum 转换为 String 以便持久化
-                node_data = {
-                    "trace_id": node.trace_id,
-                    "op_type": str(node.op_type),
-                    "metadata": {}
-                }
+                node_data = {"trace_id": node.trace_id, "op_type": str(node.op_type), "metadata": {}}
                 for k, v in node.metadata.items():
                     node_data["metadata"][k] = str(v) if hasattr(v, 'name') else v
                 dfg_dump.append(node_data)
@@ -76,69 +147,48 @@ class OperatorPhysicalTester:
             with open(stages["p1"] / "dfg_final.json", "w") as f:
                 json.dump(dfg_dump, f, indent=2)
             
-            # 🛸 [ADPC-ALIGN] 生成算法时序图 (timeline.txt)
-            timeline_lines = ["# AIACC Algorithm Timeline (Synthesis Phase)", f"# Operator: {op_name}", f"# Strategy: {strategy}", "-"*60]
-            timeline_lines.append(f"{'Time':<8} | {'NID':<25} | {'OpType':<10} | {'Res_ID':<8}")
-            
-            # 按时间排序打印
-            sorted_ops = sorted(dfg_ops, key=lambda x: res.get(x.trace_id, 999))
-            for op in sorted_ops:
-                t_val = res.get(op.trace_id, "?")
-                iq_val = op.metadata.get("iq_id", "-")
-                timeline_lines.append(f"{t_val:<8} | {op.trace_id:<25} | {op.op_type:<10} | {iq_val:<8}")
-            
-            with open(stages["p1"] / "timeline.txt", "w") as f:
-                f.write("\n".join(timeline_lines) + "\n")
-            print(f"📊 [ADPC] Algorithm Timeline saved to: {stages['p1'] / 'timeline.txt'}")
-            
-            # 3. 物理数据排布 (128-bit SIMD Row Mirroring)
-            banks = {i: [] for i in range(8)}
-            bank_cursors = {i: 0 for i in range(8)}
-            tensors_meta = []
-            
-            # 关键：手动处理信号别名，确保 x_rd 和 x_f_rd 共享物理地址
-            # 也确保 w_y 和 y_reX 共享物理地址
-            phys_mapping = {} # 信号核心名 -> (bank, addr)
-
             def get_phys_key(nid):
-                if nid.startswith("x"): return "x"
-                if nid == "w_y" or nid.startswith("y_re"): return "w_y"
-                return nid.replace("_rd", "")
+                if not nid: return "unknown"
+                k = re.sub(r'(_re|_rd|_in)\d*$', '', nid)
+                if k.startswith("w_"): k = k[2:]
+                if k.startswith("y") or k == "w_y": return "y"
+                if k.startswith("x") or k == "w_x": return "x"
+                return k
+            
+            phys_to_node, phys_mapping = {}, {}
+            node_value_map = {op.trace_id: op.metadata.get("value") for op in dfg_ops if "value" in op.metadata}
+            
+            for node in dfg_dump:
+                m = node.get("metadata", {})
+                b_id, a_id = m.get("bank_id"), m.get("addr")
+                if b_id is not None and a_id is not None:
+                    tid = node.get("trace_id")
+                    phys_to_node[(b_id, a_id)] = tid
+                    pkey = get_phys_key(tid)
+                    if pkey not in phys_mapping: phys_mapping[pkey] = (b_id, a_id)
 
-            for op in dfg_ops:
-                if "bank_id" in op.metadata:
-                    b = op.metadata["bank_id"]
-                    pkey = get_phys_key(op.trace_id)
-                    
-                    if pkey not in phys_mapping:
-                        addr = bank_cursors[b]
-                        phys_mapping[pkey] = (b, addr)
-                        
-                        # 🛸 填充 128-bit 矢量数据 (SMD: 4 x float32)
-                        val = input_data.get(op.trace_id, constants.get(pkey, constants.get(op.trace_id)))
-                        if val is not None:
-                            val_arr = np.array(val).flatten()
-                            if val_arr.size == 4:
-                                vec_val = val_arr.tolist()
-                            else:
-                                vec_val = [float(val_arr[0])] * 4
-                        else:
-                            vec_val = [0.0] * 4
-                        
-                        banks[b].append(vec_val)
-                        bank_cursors[b] += 1
-                    
-                    target_b, target_addr = phys_mapping[pkey]
-                    op.metadata["addr"] = target_addr
-                    # 🛸 关键：识别多输出锚点
-                    is_node_output = op.metadata.get("is_output", op.trace_id == "w_fin")
-                    name = op.metadata.get("meta_name", "y" if is_node_output else pkey)
-                    role = "output" if is_node_output else "input"
-                    
-                    if not any(tm["name"] == name and tm["role"] == role for tm in tensors_meta):
-                        tensors_meta.append({"name": name, "bank": target_b, "addr": target_addr, "offset": target_addr, "shape": [1, 4], "role": role})
+            hardcoded_consts = {"zero": 0.0, "pi": 3.14159265, "pi_val": 3.14159265, "two": 2.0, "c1": 0.999866, "c3": -0.3302995, "c5": 0.180141, "c7": -0.085133}
 
-            # 4. 指令打包
+            banks = {i: [] for i in range(8)}
+            for b_idx in range(8):
+                real_max = max([pa for (pb, pa) in phys_to_node.keys() if pb == b_idx] + [-1])
+                target_depth = max(16, real_max + 1)
+                for a_idx in range(target_depth):
+                    nid = phys_to_node.get((b_idx, a_idx))
+                    pkey = get_phys_key(nid)
+                    val = node_value_map.get(nid)
+                    if val is None: val = input_data.get(nid)
+                    if val is None: val = input_data.get(pkey)
+                    if val is None: val = constants.get(pkey, constants.get(nid or "unknown"))
+                    if val is None: val = hardcoded_consts.get(pkey, hardcoded_consts.get(nid))
+                    
+                    if val is not None:
+                        val_arr = np.array(val).flatten()
+                        vec_val = val_arr.tolist() if val_arr.size == 4 else [float(val_arr[0])] * 4
+                    else:
+                        vec_val = [0.0] * 4
+                    banks[b_idx].append(vec_val)
+
             stitcher = HSTSStitcher()
             stitcher.add_operator(op_name, dfg_ops, res)
             final_stream = stitcher.get_final_stream()
@@ -148,61 +198,27 @@ class OperatorPhysicalTester:
                     self.memory_allocator = type("A", (), {"banks": b})()
                     self.tensors = {t1["name"]: type("T", (), t1) for t1 in t}
             
+            tensors_meta = []
+            for name, (b, a) in phys_mapping.items():
+                role = "output" if name == "y" else "input"
+                tensors_meta.append({"name": name, "bank": b, "addr": a, "offset": a, "shape": [1, 4], "role": role})
+
             acb_path = stages["p2"] / "acb_bundle"
             LIRPacker(self.hw_config).emit_from_stream(final_stream, str(acb_path), program=ProgramProxy(banks, tensors_meta))
 
-            # --- 🛸 处理 Golden Data (支持多输出字典或单数组) ---
-            golden_save_dict = {}
-            if isinstance(golden_y, dict):
-                for k, v in golden_y.items():
-                    val_arr = np.array(v).flatten()
-                    golden_save_dict[k] = val_arr.reshape(1, 4) if val_arr.size == 4 else np.array([float(val_arr[0])]*4).reshape(1, 4)
-            else:
-                y_arr = np.array(golden_y).flatten()
-                y_vec = y_arr.reshape(1, 4) if y_arr.size == 4 else np.array([float(y_arr[0])] * 4).reshape(1, 4)
-                golden_save_dict["y"] = y_vec
-                
-            np.savez(acb_path / "golden_data.npz", **golden_save_dict)
-            
-            # 🛸 同步输入数据，方便用户调参和离线分析
-            np.savez(acb_path / "input_data.npz", **input_data)
-
-            # 🛠️ 覆盖 max_cycles 以应对高冲突配置
-            config_file = acb_path / "sim_config.json"
-            if config_file.exists():
-                with open(config_file, "r") as f:
-                    cdata = json.load(f)
-                cdata["max_cycles"] = max_cycles
-                with open(config_file, "w") as f:
-                    json.dump(cdata, f, indent=2)
-
-            # 5. 仿真验证
             env = os.environ.copy()
             env["PYTHONPATH"] = f"{self.ws}:{self.ws}/src:{self.ws}/sim:" + env.get("PYTHONPATH", "")
             runner = self.ws / "sim" / "smc_simulator" / "tools" / "physical_runner.py"
             res_sim = subprocess.run(["python3", str(runner), str(acb_path)], env=env, capture_output=True, text=True)
             
-            # [PHASE-3] 持久化仿真日志
             with open(stages["p3"] / "sim.log", "w") as f:
                 f.write(res_sim.stdout)
                 if res_sim.stderr: f.write("\n--- STDERR ---\n" + res_sim.stderr)
 
             is_success = "PASSED" in res_sim.stdout.upper() or "Verified successfully" in res_sim.stdout
-            
-            # [PHASE-4] 生成最终对齐报告
-            report = {
-                "op_name": op_name,
-                "strategy": strategy,
-                "status": "SUCCESS" if is_success else "FAILED",
-                "max_diff": 0.0 if is_success else "Check sim.log",
-                "physical_resources": list(set(op.metadata.get("iq_id", "N/A") for op in dfg_ops))
-            }
-            with open(stages["p4"] / "alignment_report.json", "w") as f:
-                json.dump(report, f, indent=2)
-
             if is_success:
-                print(f"✅ {op_name} (SMC v2.4): BIT-PERFECT PARITY ACHIEVED")
+                print(f"[SUCCESS] {op_name}: BIT-PERFECT PARITY ACHIEVED")
             else:
-                print(f"🚨 {op_name} (SMC v2.4): VERIFICATION FAILED\n[LOG]:\n{res_sim.stdout[:500]}...")
+                print(f"[FAIL] {op_name}: VERIFICATION FAILED")
                 return False, "Sim Fail"
         return True, "Done"

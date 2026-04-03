@@ -34,7 +34,7 @@ class LIRPacker:
             iq_id = op.metadata.get("iq_id")
             if iq_id is not None:
                 iq_name = self.hw_spec.get_iq_name(iq_id)
-                # 🛸 动态映射 RtoVR 的 Source ID：UR_READ 映射到 30-33 端口
+                # 🛸 动态映射 RtoVR 的 Source ID：只有 UR_READ (ur-r0..3) 作为数据源
                 if "ur-r" in iq_name:
                     idx = int(iq_name.replace("ur-r", ""))
                     node_to_src_id[(op.trace_id, "D")] = PORT_OFFSET_UR_RDATA + idx
@@ -42,15 +42,9 @@ class LIRPacker:
                     # ALU 路由直连 (同步 D/ST/D0-Dn 等端子)
                     d_id, st_id = -1, -1
                     if op.op_type.upper() == "FPMUL": d_id = PORT_ID_FPMUL_D
-                    elif op.op_type.upper() == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 # 🛰️ 关键：FPADD_ST = 5
-                    elif op.op_type.upper() == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2 # 🛰️ 关键：INTADD_ST = 2
-                    elif op.op_type.upper() == "LOGIC": d_id = 10 # DR_LOGIC_D
-                    elif op.op_type.upper() == "INT8TOFP16":
-                        # 🛸 多输出对位：D0(14), D1(15), D2(16), D3(17)
-                        for i in range(4): node_to_src_id[(op.trace_id, f"D{i}")] = 14 + i
-                    elif op.op_type.upper() == "FP16MUL":
-                        # 🛸 多输出对位：D0(18) ... D7(25)
-                        for i in range(8): node_to_src_id[(op.trace_id, f"D{i}")] = 18 + i
+                    elif op.op_type.upper() == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 
+                    elif op.op_type.upper() == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2
+                    elif op.op_type.upper() == "LOGIC": d_id = 10 
                     
                     if d_id != -1: node_to_src_id[(op.trace_id, "D")] = d_id
                     if st_id != -1: node_to_src_id[(op.trace_id, "ST")] = st_id
@@ -61,18 +55,32 @@ class LIRPacker:
             iq_id = op.metadata.get("iq_id")
             m_type = op.op_type.upper()
             
-            # --- 🛰️ 物理对齐：不再手动推导，直接询问规格书 ---
-            if iq_id is not None:
+            # --- [ADPC V4.0 ALIGNMENT] 确定物理 IQ 名称 ---
+            # RtoVR 在硬件上是 Crossbar 矩阵，每一个输入端口（Slot）都是一个独立的物理指令队列。
+            # 直接通过其目的端 slot_id 来确定它所在的物理队列文件，彻底消除将 RtoVR 视为单一整体的思维。
+            if m_type == "RTOVR":
+                slot_id = op.metadata.get("slot_id")
+                name = f"rtovr-{slot_id}" if slot_id is not None else "rtovr-unknown"
+            elif iq_id is not None:
                 name = self.hw_spec.get_iq_name(iq_id)
-            elif m_type == "RTOVR":
-                name = f"rtovr-{op.metadata.get('slot_id', 0)}"
-                # 注入 p_src_id 以便 FieldMapper 能识别
-                deps = op.metadata.get("depends_on", [])
-                port = op.metadata.get("dep_port", "D")
-                if deps and (deps[0], port) in node_to_src_id:
-                    op.metadata["p_src_id"] = node_to_src_id[(deps[0], port)]
             else:
                 name = m_type.lower()
+
+            # 🚀 [MULTI-OPERAND ROUTING] 处理 S0, S1, ST 等复杂端口映射
+            deps = op.metadata.get("depends_on", [])
+            for i, dep_id in enumerate(deps):
+                # 针对 ALU 单元的映射习惯: 0->S0, 1->S1, 2->ST
+                port_suffix = f"s{i}_src" if i < 2 else "st_src"
+                
+                # 获取该依赖在算子定义中引用的端口 (默认为 D，除非显式指定 ST)
+                dep_port = op.metadata.get("dep_port", "D") if i == (len(deps)-1) else "D"
+                # 特殊处理：LOGIC 单元的第 3 个依赖默认是 ST 端口
+                if m_type == "LOGIC" and i == 2: dep_port = "ST"
+
+                if (dep_id, dep_port) in node_to_src_id:
+                    sid = node_to_src_id[(dep_id, dep_port)]
+                    op.metadata[port_suffix] = sid
+                    if i == 0: op.metadata["p_src_id"] = sid
 
             # 🛸 物理審計：確認 IQ 是否在白名單中
             lookup = f"IQ_{m_type}"
@@ -82,7 +90,7 @@ class LIRPacker:
                 continue
             
             # DEBUG PRINT
-            print(f"[EMIT-LOG] Op:{op.trace_id} Type:{m_type} IQ:{name} T:{op.metadata['global_t']}")
+            # print(f"[EMIT-LOG] Op:{op.trace_id} Type:{m_type} IQ:{name} T:{op.metadata['global_t']}")
 
             mod_spec = self.hw_spec.modules.get(m_type)
             if not mod_spec: continue

@@ -153,8 +153,6 @@ class HardwareSpec(BaseModel):
         if base_w <= iq_id < base_w + 4: return f"ur-w{iq_id - base_w}"
         
         # 2. 探测 ALU 端口
-        # (已存在逻辑保持不变)
-        registry = self.config.get("iq_registry", {})
         instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
         
         for u_type, base_id in registry.items():
@@ -162,5 +160,5 @@ class HardwareSpec(BaseModel):
             if base_id <= iq_id < base_id + count:
                 idx = iq_id - base_id
                 return f"{u_type.lower()}-{idx}" if count > 1 else u_type.lower()
-        
+
         return "unknown"

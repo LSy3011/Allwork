@@ -3,78 +3,69 @@ from ir.mir.mir_op import MIROp
 from ir.mir.builder import MIROpBuilder
 from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
-def get_sin_8order_dfg() -> List[MIROp]:
+def get_sin_standard_dfg() -> List[MIROp]:
     """
-    AIACC Sin 算子 (ADPC V3.3 物理保真版)
-    算法：泰勒展开 sin(x) ≈ x * (1 - x^2 * (1/3! - x^2 * (1/5! - x^2 * 1/7!)))
-    
-    🛸 物理特性注意：
-    AIACC 为 Pulse-Pass 架构，多次引用的中间变量 (x, x^2) 必须显式写回并在使用处重读。
+    AIACC Sin(x) 标准化初图 (Stage A: Pure Topology V6.0)
+    算法：泰勒展开 sin(x) ≈ x * (1 - x^2 * (1/6 - x^2 * 1/120))
+    🛸 [架构对齐原则]：
+    1. 零物理偏移：移除所有 bank=X, addr=Y。
+    2. 角色驱动：显式定义 operand_a, constants。
+    3. 逻辑持久化：中间变量 x_sq 需要通过 UR_WRITE 逻辑锚定，但不指定物理 Bank。
     """
     b = MIROpBuilder()
     
-    # 🛸 [Standard V3.0] 初始角色与常数固化
-    # 我们标记主输入 x 为 operand_a
-    x_init = b.make_op("UR_READ", "x_init", RT.UR_READ, [], "LOAD X", role="operand_a")
+    # --- [CONSTANTS] ---
+    # 常数通过 metadata['value'] 传递给 Stage B 算法进行分配
+    c1 = b.make_op("UR_READ", "c1_inv120", RT.UR_READ, [], is_const=True, value=0.0083333333, role="constant")
+    c2 = b.make_op("UR_READ", "c2_inv6",   RT.UR_READ, [], is_const=True, value=0.1666666667, role="constant")
+    c3 = b.make_op("UR_READ", "c3_one",    RT.UR_READ, [], is_const=True, value=1.0,          role="constant")
+
+    # --- [INPUTS] ---
+    x_in = b.make_op("UR_READ", "x_in", RT.UR_READ, [], role="operand_a")
+
+    # --- [STAGE 1: x_sq = x * x] ---
+    r0_y = b.make_op("RTOVR", "r0_y", PS.FPMUL_S0, [x_in])
+    r1_y = b.make_op("RTOVR", "r1_y", PS.FPMUL_S1, [x_in])
+    x_sq = b.make_op("FPMUL", "x_sq", RT.FPMUL, [r0_y, r1_y])
     
-    # 常数固化（泰勒系数）
-    c1 = b.make_op("UR_READ", "c1_const", RT.UR_READ, [], "1/7!", is_const=True, value=0.0001984127)
-    c2 = b.make_op("UR_READ", "c2_const", RT.UR_READ, [], "1/5!", is_const=True, value=0.0083333333)
-    c3 = b.make_op("UR_READ", "c3_const", RT.UR_READ, [], "1/3!", is_const=True, value=0.1666666667)
-    c4 = b.make_op("UR_READ", "c4_const", RT.UR_READ, [], "1.0",  is_const=True, value=1.0)
+    # 逻辑持久化锚点：交给 SMT 和 Bank 算法分配物理位置
+    w_sq = b.make_op("UR_WRITE", "w_sq", RT.UR_WRITE, [b.make_op("RTOVR", "v_sq", PS.UR_W0_S, [x_sq])])
+
+    # --- [STAGE 2: p1 = 1/120 * x_sq] ---
+    x_sq_re = b.make_op("UR_READ", "x_sq_re", RT.UR_READ, [w_sq])
+    p1 = b.make_op("FPMUL", "p1", RT.FPMUL, [
+        b.make_op("RTOVR", "p1_m0", PS.FPMUL_S0, [c1]),
+        b.make_op("RTOVR", "p1_m1", PS.FPMUL_S1, [x_sq_re])
+    ])
+
+    # --- [STAGE 3: p2 = 1/6 - p1] ---
+    p2 = b.make_op("FPADD", "p2", RT.FPADD, [
+        b.make_op("RTOVR", "p2_a0", PS.FPADD_S0, [c2]),
+        b.make_op("RTOVR", "p2_a1", PS.FPADD_S1, [p1])
+    ], SUB=1)
+
+    # --- [STAGE 4: p3 = x_sq * p2] ---
+    x_sq_re2 = b.make_op("UR_READ", "x_sq_re2", RT.UR_READ, [w_sq])
+    p3 = b.make_op("FPMUL", "p3", RT.FPMUL, [
+        b.make_op("RTOVR", "p3_m0", PS.FPMUL_S0, [x_sq_re2]),
+        b.make_op("RTOVR", "p3_m1", PS.FPMUL_S1, [p2])
+    ])
+
+    # --- [STAGE 5: p4 = 1.0 - p3] ---
+    p4 = b.make_op("FPADD", "p4", RT.FPADD, [
+        b.make_op("RTOVR", "p4_a0", PS.FPADD_S0, [c3]),
+        b.make_op("RTOVR", "p4_a1", PS.FPADD_S1, [p3])
+    ], SUB=1)
+
+    # --- [STAGE 6: res = x * p4] ---
+    res = b.make_op("FPMUL", "sin_res", RT.FPMUL, [
+        b.make_op("RTOVR", "fin_m0", PS.FPMUL_S0, [x_in]),
+        b.make_op("RTOVR", "fin_m1", PS.FPMUL_S1, [p4])
+    ])
+
+    # --- [OUTPUT] ---
+    b.make_op("UR_WRITE", "out", RT.UR_WRITE, [
+        b.make_op("RTOVR", "fout", PS.UR_W1_S, [res])
+    ], role="output", meta_name="y")
     
-    # --- Step 1: y = x^2 并保存到 Bank ---
-    r0_y1 = b.make_op("RTOVR", "r0_y1", PS.FPMUL_S0, [x_init])
-    r1_y1 = b.make_op("RTOVR", "r1_y1", PS.FPMUL_S1, [x_init])
-    y_val = b.make_op("FPMUL", "y_sq", RT.FPMUL, [r0_y1, r1_y1], "y=x*x")
-    
-    # 💾 物理保鲜：必须存入 Bank 1，否则后续读不到
-    rt_y_save = b.make_op("RTOVR", "rt_y_save", PS.UR_W0_S, [y_val])
-    w_y = b.make_op("UR_WRITE", "w_y", RT.UR_WRITE, [rt_y_save], bank=1)
-
-    # --- Step 2: a = y * c1 ---
-    y_re1 = b.make_op("UR_READ", "y_re1", RT.UR_READ, [w_y], "y_re1", bank=1)
-    r0_a = b.make_op("RTOVR", "r0_a", PS.FPMUL_S0, [y_re1])
-    r1_a = b.make_op("RTOVR", "r1_a", PS.FPMUL_S1, [c1])
-    a = b.make_op("FPMUL", "a_val", RT.FPMUL, [r0_a, r1_a], "a=y*c1")
-    
-    # --- Step 3: b = c2 - a ---
-    r0_b = b.make_op("RTOVR", "r0_b", PS.FPADD_S0, [c2])
-    r1_b = b.make_op("RTOVR", "r1_b", PS.FPADD_S1, [a])
-    b_val = b.make_op("FPADD", "b_val", RT.FPADD, [r0_b, r1_b], "b=c2-a", SUB=1)
-
-    # --- Step 4: c = y * b ---
-    y_re2 = b.make_op("UR_READ", "y_re2", RT.UR_READ, [w_y], "y_re2", bank=1)
-    r0_c = b.make_op("RTOVR", "r0_c", PS.FPMUL_S0, [y_re2])
-    r1_c = b.make_op("RTOVR", "r1_c", PS.FPMUL_S1, [b_val])
-    c = b.make_op("FPMUL", "c_val", RT.FPMUL, [r0_c, r1_c], "c=y*b")
-
-    # --- Step 5: d = c3 - c ---
-    r0_d = b.make_op("RTOVR", "r0_d", PS.FPADD_S0, [c3])
-    r1_d = b.make_op("RTOVR", "r1_d", PS.FPADD_S1, [c])
-    d = b.make_op("FPADD", "d_val", RT.FPADD, [r0_d, r1_d], "d=c3-c", SUB=1)
-
-    # --- Step 6: e = y * d ---
-    y_re3 = b.make_op("UR_READ", "y_re3", RT.UR_READ, [w_y], "y_re3", bank=1)
-    r0_e = b.make_op("RTOVR", "r0_e", PS.FPMUL_S0, [y_re3])
-    r1_e = b.make_op("RTOVR", "r1_e", PS.FPMUL_S1, [d])
-    e = b.make_op("FPMUL", "e_val", RT.FPMUL, [r0_e, r1_e], "e=y*d")
-
-    # --- Step 7: f = 1 - e ---
-    r0_f = b.make_op("RTOVR", "r0_f", PS.FPADD_S0, [c4])
-    r1_f = b.make_op("RTOVR", "r1_f", PS.FPADD_S1, [e])
-    f = b.make_op("FPADD", "f_val", RT.FPADD, [r0_f, r1_f], "f=1-e", SUB=1)
-
-    # --- Step 8: sin = x * f ---
-    # 🛸 因为 x 最初是从 Bank 0 读的，这么久过去了，必须重读以保证信号强度
-    x_re_fin = b.make_op("UR_READ", "x_re_fin", RT.UR_READ, [], "RE-LOAD X", role="operand_a")
-    r0_s = b.make_op("RTOVR", "r0_s", PS.FPMUL_S0, [x_re_fin])
-    r1_s = b.make_op("RTOVR", "r1_s", PS.FPMUL_S1, [f])
-    res = b.make_op("FPMUL", "sin_res", RT.FPMUL, [r0_s, r1_s], "sin=x*f")
-
-    # 🛸 [Standard V3.0] 输出锚定
-    rt_fin = b.make_op("RTOVR", "rt_fin", PS.UR_W1_S, [res])
-    b.make_op("UR_WRITE", "w_fin", RT.UR_WRITE, [rt_fin], 
-              bank=7, is_output=True, meta_name="sin_result")
-
     return b.get_dfg()

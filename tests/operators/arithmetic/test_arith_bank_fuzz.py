@@ -14,7 +14,7 @@ class TestArithmeticBankRobustness:
     [V3.2 更新]: 纳入 Sin 8阶泰勒展开验证。
     """
 
-    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not", "sqrt", "rsqrt", "select_gt", "select_eq", "select_ls", "int8tofp16"])
+    @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "rec", "relu", "sin", "cos", "exp", "div", "neg", "and", "or", "xor", "not", "sqrt", "rsqrt", "select_gt", "select_eq", "select_ls", "int8tofp16", "atan2"])
     @pytest.mark.parametrize("data_mode", ["fuzz", "boundary"])
     def test_arithmetic_ccug_fuzzing(self, op_type, data_mode):
         """对基础算子执行 CCUG 角色自适应压力测试"""
@@ -32,6 +32,7 @@ class TestArithmeticBankRobustness:
         from library.atomic.powers.rsqrt import get_rsqrt_v4_dfg
         from library.atomic.logical.logical_ops import get_select_gt_dfg, get_select_eq_dfg, get_select_ls_dfg
         from library.atomic.conversions.quant_ops import get_int8_to_fp16_dfg
+        from library.atomic.transcendentals.atan2 import get_atan2_v4_dfg
 
         if op_type == "add":
             dfg_ops = get_add_dfg()
@@ -134,6 +135,10 @@ class TestArithmeticBankRobustness:
                         res[f"f16_res_{k}"].append(np.array([(d_words[k] >> (j*32)) & 0xFFFFFFFF for j in range(4)], dtype=np.uint32).view(np.float32))
                 return {k: np.array(v) for k, v in res.items()}
             ref_fn = int8_to_fp16_ref
+        elif op_type == "atan2":
+            dfg_ops = get_atan2_v4_dfg()
+            role_to_input = {"operand_a": "y_val", "operand_b": "x_val", "initial_guess": "y0_val"}
+            ref_fn = lambda d: np.arctan2(d["operand_a"], d["operand_b"])
         else:
             raise ValueError(f"Unknown op_type: {op_type}")
 
@@ -167,8 +172,8 @@ class TestArithmeticBankRobustness:
             "condition": "ch_2"
         }
         
-        if op_type == "div":
-            # 🛸 特殊处理除法：x -> ch0, y -> ch1, y0 -> ch2
+        if op_type in ["div", "atan2"]:
+            # 🛸 特殊处理：x -> ch0, y -> ch1, y0 -> ch2
             role_data_channel_map["initial_guess"] = "ch_2"
         
         # 🛸 核心修复：遍历所有节点，确保所有 shared-role 节点都喂入相同数据

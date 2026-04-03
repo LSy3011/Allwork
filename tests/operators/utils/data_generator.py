@@ -93,6 +93,10 @@ OP_DATA_SPECS = {
         "seeds": [0.0, 1.0, -1.0, np.nan, 1234.5],
         "st_bits": [1, 0, 1, 0]
     },
+    "atan2": {
+        "range": (-10.0, 10.0),
+        "seeds": [0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 10.0, -10.0]
+    },
     "int8tofp16": {
         "range": (-128.0, 127.0),
         "seeds": [0, 127, -128, 1, -1]
@@ -141,6 +145,13 @@ class ArithTestDataGenerator:
             # 🛸 关键：ST 必须以 bit 形式存在于 UR 内存低位，不能是 float 含义
             st_choices = [0x0, 0x1, 0x2, 0x4, 0x7]
             data["ch_2"] = np.random.choice(st_choices, size).astype(np.uint32).view(np.float32)
+        elif op_type == "atan2":
+            # Atan2(y, x): ch_0=y, ch_1=x, ch_2=1/max(|x|,|y|)
+            y, x = data["ch_0"], data["ch_1"]
+            den = np.maximum(np.abs(x), np.abs(y))
+            with np.errstate(divide='ignore', invalid='ignore'):
+                data["ch_2"] = (1.0 / den + np.random.uniform(-0.01, 0.01, size)).astype(np.float32)
+                data["ch_2"][np.isinf(data["ch_2"])] = 0.5
         elif op_type == "int8tofp16":
             # 🛸 特殊：INT8TOFP16 物理映射为 2x128-bit -> 4x128-bit
             # S0: 32x Lo-Nibble, S1: 32x Hi-Nibble
@@ -195,6 +206,12 @@ class ArithTestDataGenerator:
             def fill_st(v_list, target_size):
                  return np.array((v_list * (target_size // len(v_list) + 1))[:target_size]).astype(np.uint32).view(np.float32)
             data["ch_2"] = fill_st(bits, size)
+        elif op_type == "atan2":
+            y, x = data["ch_0"], data["ch_1"]
+            den = np.maximum(np.abs(x), np.abs(y))
+            with np.errstate(divide='ignore', invalid='ignore'):
+                data["ch_2"] = (1.0 / den).astype(np.float32)
+                data["ch_2"][np.isinf(data["ch_2"])] = 0.5
         elif op_type == "int8tofp16":
             # 🛸 特殊：边界值扫描 (0, 127, -128)
             seeds_i8 = spec["seeds"]

@@ -90,8 +90,8 @@ class LogicUnit(Component):
                 u_a = (s0 >> (i * nbits)) & mask_lane
                 u_b = (s1 >> (i * nbits)) & mask_lane
                 
-                # HW Aligned: Group index x at bit position x * nbits
-                st_bits = (st >> (i * nbits)) & 0x7 
+                # 🛰️ [HARDWARE-ALIGN]：Status 寄存器严格按 16-bit 步进排布 (不受数据位宽 nbits 影响)
+                st_bits = (st >> (i * 16)) & 0x7 
                 gt, eq, ls = (st_bits >> 2) & 1, (st_bits >> 1) & 1, st_bits & 1
                 
                 res = 0

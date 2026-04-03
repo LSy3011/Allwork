@@ -117,7 +117,14 @@ class SynthesisAxioms:
         
         for bid, op_ids in bank_groups.items():
             if len(op_ids) > 1:
-                SynthesisAxioms._add_constraint(solver, z3.Distinct([t_vars[oid] for oid in op_ids]), f"bank_mutex_{bid}")
+                # 🛰️ [INDUSTRIAL STRENGTHENING] 将简单的不同拍 (Distinct) 升级为 2-Cycle 物理互斥间隔
+                # 这是为了避开硬件 SRAM 近距离读写引发的 RAW 亚稳态冲突。
+                for i in range(len(op_ids)):
+                    for j in range(i + 1, len(op_ids)):
+                        id_i, id_j = op_ids[i], op_ids[j]
+                        diff = t_vars[id_i] - t_vars[id_j]
+                        # |Ti - Tj| >= 2 -> (Ti - Tj >= 2) OR (Tj - Ti >= 2)
+                        SynthesisAxioms._add_constraint(solver, z3.Or(diff >= 2, diff <= -2), f"bank_gap_{bid}_{id_i}_{id_j}")
 
     @staticmethod
     def add_objective(solver: z3.Optimize, t_vars: Dict[str, z3.ArithRef]):
