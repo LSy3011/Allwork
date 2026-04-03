@@ -30,21 +30,24 @@ class LIRPacker:
         
         # 1. 建立物理端子 ID 映射表 (基于硬件规格动态反查)
         node_to_src_id = {}
+        nodes_by_id = {op.trace_id: op for op in final_stream}
+        
         for op in final_stream:
             iq_id = op.metadata.get("iq_id")
             if iq_id is not None:
                 iq_name = self.hw_spec.get_iq_name(iq_id)
-                # 🛸 动态映射 RtoVR 的 Source ID：只有 UR_READ (ur-r0..3) 作为数据源
+                # 🛸 动态映射 RtoVR 的 Source ID：UR_READ (ur-r0..3) 作为物理读数据源
                 if "ur-r" in iq_name:
                     idx = int(iq_name.replace("ur-r", ""))
                     node_to_src_id[(op.trace_id, "D")] = PORT_OFFSET_UR_RDATA + idx
                 else:
-                    # ALU 路由直连 (同步 D/ST/D0-Dn 等端子)
+                    # ALU 路由直连 (同步 D/ST 端子)
                     d_id, st_id = -1, -1
-                    if op.op_type.upper() == "FPMUL": d_id = PORT_ID_FPMUL_D
-                    elif op.op_type.upper() == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 
-                    elif op.op_type.upper() == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2
-                    elif op.op_type.upper() == "LOGIC": d_id = 10 
+                    m_type = op.op_type.upper()
+                    if m_type == "FPMUL": d_id = PORT_ID_FPMUL_D
+                    elif m_type == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 
+                    elif m_type == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2
+                    elif m_type == "LOGIC": d_id = 10 
                     
                     if d_id != -1: node_to_src_id[(op.trace_id, "D")] = d_id
                     if st_id != -1: node_to_src_id[(op.trace_id, "ST")] = st_id
@@ -72,21 +75,43 @@ class LIRPacker:
                 # 针对 ALU 单元的映射习惯: 0->S0, 1->S1, 2->ST
                 port_suffix = f"s{i}_src" if i < 2 else "st_src"
                 
-                # 获取该依赖在算子定义中引用的端口 (默认为 D，除非显式指定 ST)
-                dep_port = op.metadata.get("dep_port", "D") if i == (len(deps)-1) else "D"
-                # 特殊处理：LOGIC 单元的第 3 个依赖默认是 ST 端口
-                if m_type == "LOGIC" and i == 2: dep_port = "ST"
+                # 🛸 [BUG-FIX] 穿透 RTOVR 寻找真实物理生成者
+                real_producer_id = dep_id
+                requested_port = "D"
+                
+                # 情况 1：如果当前算子 op 是 RTOVR，它直接在元数据里声明了要引用的端子 (D 或 ST)
+                if m_type == "RTOVR" and i == 0:
+                    requested_port = op.metadata.get("dep_port", "D")
+                
+                # 情况 2：如果依赖项 dep_id 是 RTOVR，说明它是计算单元的中间跳板
+                if dep_id in nodes_by_id:
+                    dep_obj = nodes_by_id[dep_id]
+                    if dep_obj.op_type == "RTOVR":
+                        # 计算单元通过 RTOVR 引用 ST 时，由 RTOVR 的 dep_port 属性递归透传
+                        requested_port = dep_obj.metadata.get("dep_port", "D")
+                        if dep_obj.metadata.get("depends_on"):
+                            real_producer_id = dep_obj.metadata["depends_on"][0]
+                
+                # 特殊校准：LOGIC 单元的第 3 个操作数强制走物理 ST 链路
+                if m_type == "LOGIC" and i == 2: requested_port = "ST"
 
-                if (dep_id, dep_port) in node_to_src_id:
-                    sid = node_to_src_id[(dep_id, dep_port)]
+                if (real_producer_id, requested_port) in node_to_src_id:
+                    sid = node_to_src_id[(real_producer_id, requested_port)]
                     op.metadata[port_suffix] = sid
                     if i == 0: op.metadata["p_src_id"] = sid
+                
+                # 🛸 关键诊断：打印每一个 RTOVR 和计算算子的物理端子指向
+                if op.op_type == "RTOVR" or m_type == "LOGIC":
+                    print(f"  [LIR-BIND] Op:{op.trace_id} ({m_type}) Dep[{i}]:{real_producer_id}.{requested_port} -> ID:{op.metadata.get(port_suffix, 'MISSING')}")
 
-            # 🛸 物理審計：確認 IQ 是否在白名單中
+            # 🛸 物理审计：确认 IQ 是否在白名单中
             lookup = f"IQ_{m_type}"
             if "RTOVR" in m_type: lookup = "IQ_RTOVR"
+            if "UR_READ" in m_type: lookup = "IQ_UR_READ"
+            if "UR_WRITE" in m_type: lookup = "IQ_UR_WRITE"
+            
             if lookup not in self.hw_spec.iqs:
-                print(f"[EMIT-DENIED] Op:{op.trace_id} Type:{m_type} Lookup:{lookup} not in {list(self.hw_spec.iqs.keys())}")
+                print(f"[EMIT-DENIED] Op:{op.trace_id} Type:{m_type} Lookup:{lookup} IQ:{name} not in {list(self.hw_spec.iqs.keys())}")
                 continue
             
             # DEBUG PRINT
@@ -127,7 +152,8 @@ class LIRPacker:
                     embed=cmd.get("embed", 0), 
                     jump=cmd.get("jump", 0),
                     embed_end=cmd.get("embed_end", 0),
-                    hw_spec=self.hw_spec
+                    hw_spec=self.hw_spec,
+                    valid=cmd.get("valid", 1)
                 )
 
                 
@@ -139,18 +165,18 @@ class LIRPacker:
                 else:
                     val &= ~(1 << vld_bit)
                 
-                # 🛰️ 物理封裝：強制輸出 32 字符 Hex (對應 128-bit VLIW)
-                if "rtovr-13" in name:
-                    print(f">>> [EMIT-VAL-DEBUG] Unit:{name} Val:{hex(val)} VLD_Bit:{vld_bit}", flush=True)
                 hex_lines.append(f"{val:032x}")
             
-            hex_file_name = f"iq_{name.replace('-', '_')}.hex"
+            # 🛸 [NAMING ALIGNMENT] 强制全局小写 + 下划线对齐
+            # 这样无论 get_iq_name 返回什么（LOGIC 或 logic-0），产出的文件名都是 iq_logic_0.hex
+            safe_name = name.lower().replace("-", "_")
+            hex_file_name = f"iq_{safe_name}.hex"
             with open(smc0 / hex_file_name, "w") as f:
                 f.write("\n".join(hex_lines) + "\n")
             
-            print(f"[EMITTER-DEBUG] IQ: {name} | Compressed: {len(compressed)} items | Hex Lines: {len(hex_lines)}", flush=True)
+            print(f"[EMITTER-DEBUG] IQ: {name} | Name Mapping: {safe_name} | Hex Lines: {len(hex_lines)}", flush=True)
             
-            iq_init[name] = f"smc_0/{hex_file_name}"
+            iq_init[name] = f"smc_0/{hex_file_name}" # 这里 Key 依然用原始 name 以匹配 SMC Core
 
         # 4. 导出 sim_config.json
         sim_conf = {

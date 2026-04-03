@@ -159,6 +159,15 @@ class HardwareSpec(BaseModel):
             count = instances.get(u_type, 0)
             if base_id <= iq_id < base_id + count:
                 idx = iq_id - base_id
-                return f"{u_type.lower()}-{idx}" if count > 1 else u_type.lower()
+                u_u = u_type.upper()
+                # 👽 [SMC KERNEL ALIGN] 
+                # 计算单元：纯小写 (由 ParallelKernel.__init__ 控制)
+                if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT", 
+                           "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16"]:
+                    return u_u.lower()
+                else:
+                    # 路由/访存单元：带索引 (由 ParallelKernel._init_iqs 控制)
+                    p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
+                    return f"{p_name}-{idx}"
 
         return "unknown"

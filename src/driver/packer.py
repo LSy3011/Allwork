@@ -11,7 +11,7 @@ class BitPacker:
     @staticmethod
     def pack_capsule(iq_name: str, iq_conf: Any, payload: int, loops: int = 0, dly: int = 0, 
                      inc: int = 0, embed: int = 0, jump: int = 0, embed_end: int = 0, 
-                     hw_spec: Any = None) -> int:
+                     hw_spec: Any = None, valid: int = 1) -> int:
         header = 0
         
         # 🛸 物理对齐：位宽决议中心
@@ -26,7 +26,7 @@ class BitPacker:
             val_map = {
                 "INC_EMBED": embed, "INC": inc, "DLY": dly, 
                 "COND": 0, "LOOPS": loops, "EMBED_END": embed_end, 
-                "EMBED_LOOPS": 0, "JUMP": jump, "VLD": 1
+                "EMBED_LOOPS": 0, "JUMP": jump, "VLD": valid
             }
             for item in iq_header:
                 f_name = item.get("field")
@@ -44,7 +44,7 @@ class BitPacker:
             header |= ((embed_end & 0x3F) << 30)   # [30:35]
             # EMBED_LOOPS Placeholder [36:38]
             header |= ((jump & 1) << 39)           # [39]
-            header |= (1 << 40)                    # [40] VLD
+            header |= (valid << 40)                 # [40] VLD
 
         # 🛰️ 物理封裝：Header 在 Payload 的高位 (LSB-First Logic)
         return (header << bits_code) | (payload & ((1 << bits_code) - 1))

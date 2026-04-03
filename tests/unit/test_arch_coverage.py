@@ -99,6 +99,13 @@ class TestSoftwareArchitectureCoverage(unittest.TestCase):
             expected_fields={"VALID": 1, "SEL": 3}
         )
 
+    def test_algo_to_def_logic(self):
+        self._verify_algo_to_definition(
+            op_type="LOGIC",
+            metadata={"OP_TYPE": "SELECT_GT", "PRECISION": "PREC_32"},
+            expected_fields={"VALID": 1, "OP_TYPE": 5, "PRECISION": 1}
+        )
+
     # =========================================================================
     # Part 2: 后端驱动到微指令打包的测试 (Micro-instruction Hex Packing Full Coverage)
     # =========================================================================
@@ -176,6 +183,20 @@ class TestSoftwareArchitectureCoverage(unittest.TestCase):
         op = MIROp(trace_id="test", op_type="RTOVR-3", logic_cycle=0, operands=[], metadata={"slot_id": 3})
         payload = FieldMapper.map_op_to_payload(op, self.spec.modules["RTOVR"])
         self._verify_driver_to_packing("rtovr-3", payload=payload, header_kwargs={"loops": 4, "dly": 0, "inc": 0})
+
+    def test_packing_logic(self):
+        # 🚀 深度验证 BITS_CODE 与 Payload 位宽对齐性
+        iq_conf = self.spec.iqs.get("IQ_LOGIC")
+        mod_spec = self.spec.modules.get("LOGIC")
+        payload_width = sum(f.bits for f in mod_spec.code_fields)
+        
+        # 🛸 关键断言：BITS_CODE 必须等于 Payload 位宽，否则 Header 偏移会错位
+        self.assertEqual(iq_conf.BITS_CODE, payload_width, 
+                         f"IQ_LOGIC BITS_CODE ({iq_conf.BITS_CODE}) mismatch payload width ({payload_width})")
+
+        op = MIROp(trace_id="test", op_type="LOGIC", logic_cycle=0, operands=[], metadata={"OP_TYPE": "SELECT_GT", "precision": "f32"})
+        payload = FieldMapper.map_op_to_payload(op, mod_spec)
+        self._verify_driver_to_packing("logic", payload=payload, header_kwargs={"loops": 0, "dly": 0, "inc": 0})
 
 if __name__ == '__main__':
     unittest.main()

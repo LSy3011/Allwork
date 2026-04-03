@@ -21,7 +21,7 @@ iq_config:
     BITS_LOOPS: 10
     EN_DLY: true
     BITS_DLY: 3
-    BITS_CODE: 6 # VALID(1) + OP_TYPE(4) + PRECISION(1)
+    BITS_CODE: 11 # VALID(1) + OP_TYPE(4) + PRECISION(1) + SMC_ID(5)
 
   IQ_UR_READ:
     module: UR_READ

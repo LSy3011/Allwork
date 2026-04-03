@@ -115,8 +115,9 @@ class SMTSynthesizer:
             
             if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
                 for rd in rtovr_deps:
-                    # 时序同步：计算单元点火 >= RtoVR 点火 + 1 (支持异步锁存)
-                    solver.add(t[op.trace_id] >= t[rd] + 1)
+                    # 🛸 [INDUSTRIAL ALIGNMENT] 强制数据-指令对齐
+                    # 修改：从 >= 1 改为 == 1，确保数据在插槽内不会因为排布过早而丢失
+                    solver.add(t[op.trace_id] == t[rd] + 1)
                     
                     # 🛸 物理插槽对齐 (Crucial for UR_WRITE)
                     # 如果是 UR_WRITE，必须强制将其前驱 RTOVR 的 Slot 设为与其物理 IQ 对应的位置

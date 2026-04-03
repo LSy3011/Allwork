@@ -72,11 +72,12 @@ class FieldMapper:
                         fval = int(meta[k])
                         break
             
-            # 3. 特殊固定字段处理 (Legacy Support)
+            # 3. 特殊固定字段处理 (Legacy & Multi-core Support)
             elif fname == "wbe":
                 fval = int(meta.get("wbe", 0xFFFF))
             elif "smc_id" in fname.lower():
-                fval = int(meta.get("smc_id_en", 0))
+                # 🛸 兼容性：优先查 SMC_ID，其次查询编译器通用的 smc_id
+                fval = int(meta.get("SMC_ID", meta.get("smc_id", meta.get("smc_id_en", 0))))
 
             # --- 🚀 物理级联与掩码保护 (Physical Marshalling) ---
             # 修正：移入循环内部，确保每一位都被拼装

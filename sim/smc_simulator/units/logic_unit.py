@@ -50,6 +50,9 @@ class LogicUnit(Component):
         ctrl_code = inputs.get('ctrl', 0)
         instr = self.decoder.decode(ctrl_code)
         
+        if ctrl_code != 0:
+            pass # Decoded instruction processed
+
         vld_field = getattr(instr, 'VALID', 0)
         is_vld = str(vld_field).upper() in ["1", "VALID", "YES", "TRUE"] or vld_field == 1
         
@@ -67,8 +70,6 @@ class LogicUnit(Component):
         if st_v: self.regs_st = st_in
         
         # 🛰️ 物理对位：由于 Kernel 时序原因，我们在此显式追踪 Valid 状态
-        if is_vld:
-            print(f">>> [LOGIC-VLD] Cycle:{cycle} Op:{instr.OP_TYPE} S0_V:{s0_v} S1_V:{s1_v} ST_V:{st_v} REGS_ST:{self.regs_st:032x}")
         
         res_val = 0
         if is_vld:
@@ -132,6 +133,7 @@ class LogicUnit(Component):
 
                 res_val |= (res & mask_lane) << (i * nbits)
             
+            # self.logger.debug(f"LOGIC Result: {res_val:032x}")
             
             self._next_pipeline = [{'result': res_val, 'valid': True}] + self.pipeline[:-1]
         else:

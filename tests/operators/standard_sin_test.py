@@ -16,7 +16,7 @@ def test_sin_standard_pipeline():
     """
     # 1. 初始化流水线
     runner = StandardPipelineRunner(hw_config="hw_config", build_root="build/standard")
-
+    sys.path.append(str(Path(__file__).parent))
     from utils.data_generator import ArithTestDataGenerator
     
     # 2. 准备数据场景

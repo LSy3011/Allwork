@@ -68,7 +68,6 @@ class FPAddUnit(Component):
         # 核心调试日志：追踪每一拍输入到加法器的 128-bit 矢量 HEX
         if valid_trigger and (s1_v or s0_v):
              self.logger.info(f"Cycle {cycle} Add-Trace: S0={s0_in:032x}, S1={s1_in:032x}")
-             print(f">>> [FPADD-IN] Cyc:{cycle} S0:{s0_in:032x} S1:{s1_in:032x}")
         
         if s0_v: 
             self.regs_s0 = s0_in
@@ -117,7 +116,6 @@ class FPAddUnit(Component):
                         ls = 1 if f0_f < f1_f else 0
                         # 🛰️ [HARDWARE-ALIGN]：Status 寄存器严格按 16-bit 步进排布 (0, 16, 32...)
                         st_val |= ((gt<<2)|(eq<<1)|ls) << (i * 16)
-                        print(f">>> [ST-AUDIT] Lane:{i} Bits0:{bits0:08x} Bits1:{bits1:08x} Flags:{(gt<<2)|(eq<<1)|ls}", flush=True)
             else: # FP16
                 for i in range(count):
                     bits0 = (self.regs_s0 >> (i*16)) & 0xFFFF

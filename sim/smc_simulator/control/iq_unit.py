@@ -62,9 +62,6 @@ class IQUnit(Component):
             return
 
         raw_base = self.memory[self.pc]
-        if self.unit in ["ur-r0", "ur-w0"] and 0 <= cycle <= 15:
-             print(f"[IQ-EXE-AUDIT] Cyc:{cycle} Unit:{self.unit} PC:{self.pc} Raw:{hex(raw_base)} L0:{self.loop_states[0]['cnt']} L1:{self.loop_states[1]['cnt']}")
-
         stall = inputs.get("STALL", False)
 
         
