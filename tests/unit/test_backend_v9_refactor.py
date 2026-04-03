@@ -67,7 +67,22 @@ class TestBackendV9Refactor(unittest.TestCase):
         # UPDATE_ST=1 (bit 3), SUB=0 (bit 4), VALID=1 (bit 0)
         # Expected = 8 + 1 = 9
         self.assertEqual(payload2 & 0x1F, 9)
-        print("✅ FieldMapper waterfall priority verified.")
+        
+        # Test Case 3: LOGIC unit has SMC_ID
+        logic_spec = self.spec.modules["LOGIC"]
+        field_names = [f.name for f in logic_spec.code_fields]
+        self.assertIn("SMC_ID", field_names)
+        
+        # SMC_ID is at bit 6-10?
+        # VALID(0), OP_TYPE(1-4), PRECISION(5), SMC_ID(6-10)
+        op3 = MIROp(op_type="LOGIC", logic_cycle=0, trace_id="op3", metadata={"smc_id_en": 7})
+        payload3 = FieldMapper.map_op_to_payload(op3, logic_spec)
+        # 7 << 6 = 448
+        # VALID(1) + DEFAULT_PRECISION(bit 5=1->32) = 33
+        # Expected = 448 + 33 = 481
+        self.assertEqual(payload3, 481)
+        
+        print("✅ FieldMapper waterfall priority and LOGIC SMC_ID verified.")
 
     def test_03_public_head_and_packer(self):
         """3. 验证公有头字段与 BitPacker 动态映射"""

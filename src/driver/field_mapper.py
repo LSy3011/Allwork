@@ -75,7 +75,7 @@ class FieldMapper:
             # 3. 特殊固定字段处理 (Legacy Support)
             elif fname == "wbe":
                 fval = int(meta.get("wbe", 0xFFFF))
-            elif "smc_id" in fname:
+            elif "smc_id" in fname.lower():
                 fval = int(meta.get("smc_id_en", 0))
 
             # --- 🚀 物理级联与掩码保护 (Physical Marshalling) ---

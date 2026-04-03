@@ -133,6 +133,9 @@ functional_units:
       encoding:
         0: PREC_16
         1: PREC_32
+    - field: SMC_ID
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
@@ -711,6 +714,9 @@ functional_units:
       encoding:
         0: PREC_16
         1: PREC_32
+    - field: SMC_ID
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
