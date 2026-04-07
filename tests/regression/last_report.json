@@ -1,53 +1,151 @@
 {
-  "timestamp": "2026-04-07T14:13:40.986896",
-  "total": 6,
-  "active": 6,
-  "passed": 6,
+  "timestamp": "2026-04-07T14:46:46.867138",
+  "total": 20,
+  "active": 20,
+  "passed": 20,
   "failed": 0,
   "skipped": 0,
-  "duration": 13.528210639953613,
+  "duration": 26.830170154571533,
   "results": [
+    {
+      "op": "sin",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 1.07615065574646
+    },
+    {
+      "op": "cos",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 2.0971624851226807
+    },
+    {
+      "op": "tan",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 3.401901960372925
+    },
+    {
+      "op": "exp",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 4.513620138168335
+    },
+    {
+      "op": "log",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 5.56522536277771
+    },
+    {
+      "op": "sqrt",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 6.603381156921387
+    },
+    {
+      "op": "rsqrt",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 7.606103181838989
+    },
+    {
+      "op": "asin",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 9.147801637649536
+    },
+    {
+      "op": "neg",
+      "category": "unary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 10.040154933929443
+    },
+    {
+      "op": "square",
+      "category": "unary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 10.950721502304077
+    },
     {
       "op": "add",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 0.9175186157226562
+      "duration": 11.855965375900269
     },
     {
       "op": "sub",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 1.827531337738037
+      "duration": 12.78136396408081
     },
     {
       "op": "mul",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 2.722480535507202
+      "duration": 13.675275325775146
     },
     {
       "op": "div",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 4.288413047790527
+      "duration": 14.976179838180542
     },
     {
       "op": "atan2",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 10.893846988677979
+      "duration": 20.42995524406433
     },
     {
       "op": "pow",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 13.528210639953613
+      "duration": 22.446728467941284
+    },
+    {
+      "op": "gelu",
+      "category": "activation",
+      "compile": true,
+      "verify": true,
+      "duration": 23.46956992149353
+    },
+    {
+      "op": "sigmoid",
+      "category": "activation",
+      "compile": true,
+      "verify": true,
+      "duration": 24.437182188034058
+    },
+    {
+      "op": "tanh",
+      "category": "activation",
+      "compile": true,
+      "verify": true,
+      "duration": 25.860504388809204
+    },
+    {
+      "op": "swish",
+      "category": "activation",
+      "compile": true,
+      "verify": true,
+      "duration": 26.830170154571533
     }
   ]
 }

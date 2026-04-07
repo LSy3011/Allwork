@@ -11,17 +11,16 @@
       "operators": {
         "sin": {"description": "9阶泰勒展开 sin(x)", "status": "ready"},
         "cos": {"description": "cos(x) 泰勒展开", "status": "ready"},
-        "tan": {"description": "tan(x)", "status": "pending"},
+        "tan": {"description": "7阶泰勒展开 tan(x)", "status": "ready"},
         "exp": {"description": "exp(x) 指数函数", "status": "ready"},
-        "log": {"description": "log(x) 自然对数", "status": "pending"},
-        "sqrt": {"description": "sqrt(x) 平方根", "status": "pending"},
-        "rsqrt": {"description": "rsqrt(x) 逆平方根", "status": "pending"},
-        "asin": {"description": "arcsin(x)", "status": "pending"},
+        "log": {"description": "5阶泰勒展开 log(x)", "status": "ready"},
+        "sqrt": {"description": "5阶泰勒展开 sqrt(x)", "status": "ready"},
+        "rsqrt": {"description": "5阶泰勒展开 rsqrt(x)", "status": "ready"},
+        "asin": {"description": "7阶泰勒展开 asin(x)", "status": "ready"},
         "acos": {"description": "arccos(x)", "status": "pending"},
         "atan": {"description": "arctan(x)", "status": "pending"},
         "sinh": {"description": "sinh(x) 双曲正弦", "status": "pending"},
-        "cosh": {"description": "cosh(x) 双曲余弦", "status": "pending"},
-        "tanh": {"description": "tanh(x) 双曲正切", "status": "pending"}
+        "cosh": {"description": "cosh(x) 双曲余弦", "status": "pending"}
       }
     },
     "unary/math": {
@@ -66,10 +65,10 @@
     "activation": {
       "operators": {
         "relu": {"description": "ReLU 激活", "status": "pending"},
-        "gelu": {"description": "GELU 激活", "status": "pending"},
+        "gelu": {"description": "GELU 激活 (Sigmoid 近似)", "status": "ready"},
         "sigmoid": {"description": "Sigmoid 激活", "status": "ready"},
-        "tanh": {"description": "Tanh 激活", "status": "pending"},
-        "swish": {"description": "Swish/SiLU 激活", "status": "pending"},
+        "tanh": {"description": "7阶泰勒展开 tanh(x)", "status": "ready"},
+        "swish": {"description": "Swish/SiLU (Sigmoid 近似)", "status": "ready"},
         "selu": {"description": "SELU 激活", "status": "pending"},
         "elu": {"description": "ELU 激活", "status": "pending"},
         "leaky_relu": {"description": "Leaky ReLU 激活", "status": "pending"}

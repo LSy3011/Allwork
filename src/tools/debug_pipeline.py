@@ -266,86 +266,19 @@ def check_stage_d(op_dir):
 
 
 def check_stage_e(op_dir, val_map):
-    """[Stage E] 逐周期仿真对比。"""
+    """[Stage E] 逐周期仿真对比 — 使用影子寄存器同步模型。"""
+    from tools.cycle_verifier import CycleVerifier
     r = StageResult("E: 仿真逐周期对比")
+    
+    try:
+        verifier = CycleVerifier(op_dir)
+        errors = verifier.run()
+        if errors > 0:
+            r.fail(f"物理寄存器同步失败, 共发现 {errors} 个偏差")
+    except Exception as e:
+        r.fail(f"加载物理验证器失败: {e}")
 
-    sim_log_path = op_dir / "sim.log"
-    stage_b_path = op_dir / "stage_b_mapped.json"
-
-    if not sim_log_path.exists():
-        r.fail("sim.log 不存在")
-        return r
-    if not stage_b_path.exists():
-        r.fail("stage_b_mapped.json 不存在")
-        return r
-
-    with open(stage_b_path) as f:
-        dfg = json.load(f)
-
-    # 解析 sim.log
-    actual_cycles = {}
-    current_cyc = -1
-    with open(sim_log_path) as f:
-        for line in f:
-            line = line.strip()
-            m = re.match(r".*\[KERNEL-STEP\] Cycle:\s*(\d+)\s*Started", line)
-            if m:
-                current_cyc = int(m.group(1))
-            if "[MUL-EXEC]" in line:
-                c = int(re.search(r"Cyc:(\d+)", line).group(1))
-                actual_cycles.setdefault(c, {}).setdefault("FPMUL", []).append(line)
-            elif "[ADD-EXEC]" in line:
-                c = int(re.search(r"Cyc:(\d+)", line).group(1))
-                actual_cycles.setdefault(c, {}).setdefault("FPADD", []).append(line)
-            elif "[UR-WRITE]" in line:
-                actual_cycles.setdefault(current_cyc, {}).setdefault("UR_WRITE", []).append(line)
-
-    # 逐周期对比
-    for n in dfg:
-        if n["op_type"] not in ["FPMUL", "FPADD", "UR_WRITE"]:
-            continue
-        cyc = n.get("cycle")
-        if cyc is None:
-            continue
-        cyc = int(cyc)
-        tid = n["trace_id"]
-        op_type = n["op_type"]
-        math_val = val_map.get(tid, 0.0)
-        deps = parse_deps(n.get("metadata", {}))
-        logs = actual_cycles.get(cyc, {}).get(op_type, [])
-
-        if op_type in ["FPMUL", "FPADD"]:
-            if not logs:
-                if op_type == "FPADD":
-                    r.warn(f"T={cyc} {op_type}({tid}): 模拟器无 [ADD-EXEC] 输出")
-                else:
-                    r.fail(f"T={cyc} {op_type}({tid}): sim.log 无执行回执")
-                continue
-
-            log_line = logs[0]
-            m_s0 = re.search(r"S0:([0-9a-fA-F]+)", log_line)
-            m_s1 = re.search(r"S1:([0-9a-fA-F]+)", log_line)
-            if m_s0 and m_s1 and len(deps) >= 2:
-                hw_s0 = hex128_to_float_lane0(m_s0.group(1))
-                hw_s1 = hex128_to_float_lane0(m_s1.group(1))
-                exp_s0 = val_map.get(deps[0], 0.0)
-                exp_s1 = val_map.get(deps[1], 0.0)
-
-                if not np.isclose(exp_s0, hw_s0, atol=1e-3):
-                    r.fail(f"T={cyc} {op_type}({tid}) S0 偏差: 预期={exp_s0:.6f} 硬件={hw_s0:.6f}")
-                if not np.isclose(exp_s1, hw_s1, atol=1e-3):
-                    r.fail(f"T={cyc} {op_type}({tid}) S1 偏差: 预期={exp_s1:.6f} 硬件={hw_s1:.6f}")
-
-        elif op_type == "UR_WRITE":
-            if not logs:
-                r.fail(f"T={cyc} UR_WRITE({tid}): sim.log 无写入回执")
-                continue
-
-            match = re.search(r"Data:([0-9a-fA-F]+)", logs[0])
-            if match:
-                real_val = hex128_to_float_lane0(match.group(1))
-                if not np.isclose(math_val, real_val, atol=1e-3):
-                    r.fail(f"T={cyc} UR_WRITE({tid}): 预期={math_val:.6f} 硬件={real_val:.6f}")
+    return r
 
     # Golden 对比
     if "PASSED" in open(sim_log_path).read() or "Verified successfully" in open(sim_log_path).read():

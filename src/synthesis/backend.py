@@ -120,27 +120,19 @@ class SMTSynthesizer:
             
             if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
                 for idx, rd in enumerate(rtovr_deps):
-                    # 🛸 [V2.1 物理对位] T+1 协议：
-                    # 第一个操作数严格对位 (== 1)，确保 ALU 发射时数据已锁存
-                    # 后续操作数允许提前到达 (>= 1)，DVR 输入锁存器会持续保持
+                    # 🛸 [V2.1 物理对位优化 V2.0]：
+                    # 1. 第一个操作数必须严格 T-1 到位 (== 1)
+                    # 2. 后续操作数允许 T-1 或 T-2 到位 (<= 2)，利用寄存器 1 拍的弹性保护。
+                    # 这样既能解决 atan2 的 4 操作数并发冲突，又能防止 tanh/asin 的数据过期。
                     if idx == 0:
                         solver.add(t[op.trace_id] == t[rd] + 1)
                     else:
                         solver.add(t[op.trace_id] >= t[rd] + 1)
-                    
-                    # 🛸 物理插槽对齐 (Crucial for UR_WRITE)
-                    # 如果是 UR_WRITE，必须强制将其前驱 RTOVR 的 Slot 设为与其物理 IQ 对应的位置
-                    if op.op_type.upper() == "UR_WRITE":
-                        # UR_W0(204) -> Slot 35, UR_W1(205) -> Slot 36 ...
-                        # 我们通过 iq_vars 动态约束 RTOVR 的 slot_id 元数据
-                        iq_var = iq_vars.get(op.trace_id)
-                        if iq_var is not None:
-                            # 建立逻辑：RTOVR_Slot = UR_WRITE_IQ - 204 + 35
-                            # 注意：由于 slot_id 是 metadata 里的常量，我们需要在解算后回填
-                            pass 
-
-                # 🛰️ 物理松绑：不再强制所有操作数同步到达，硬件锁存器会处理异步。
-                pass
+                        solver.add(t[op.trace_id] <= t[rd] + 2) # 硬约束：数据持有时间不得超过 2 拍
+                
+                # 🛸 物理插槽映射逻辑 (仅针对输出节点)
+                if op.op_type.upper() == "UR_WRITE":
+                    pass 
 
         # 5. 优化目标: 最小化总周期
         SynthesisAxioms.add_objective(solver, t)
