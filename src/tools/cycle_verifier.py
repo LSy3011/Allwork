@@ -332,10 +332,10 @@ class CycleVerifier:
                         pid = PORT_MAP.get(raw_iq, raw_iq)
                         
                         current_reg_val = physical_regs.get(pid, 0.0)
-                        ok = np.isclose(exp_v, current_reg_val, atol=5e-3)
+                        ok = np.isclose(exp_v, current_reg_val, atol=5e-3, equal_nan=True)
                         
                         log_v = hw_val_extracted[i] if i < len(hw_val_extracted) else 0.0
-                        log_sync = np.isclose(current_reg_val, log_v, atol=1e-5)
+                        log_sync = np.isclose(current_reg_val, log_v, atol=1e-5, equal_nan=True)
                         
                         status = "✅" if ok else "❌"
                         sync_mark = " (RegSync)" if log_sync else f" (LogMismatch: HW={log_v:.6f})"
@@ -344,7 +344,7 @@ class CycleVerifier:
                     else:
                         # 非 RTOVR 依赖
                         log_v = hw_val_extracted[i] if i < len(hw_val_extracted) else 0.0
-                        ok = np.isclose(exp_v, log_v, atol=5e-3)
+                        ok = np.isclose(exp_v, log_v, atol=5e-3, equal_nan=True)
                         status = "✅" if ok else "❌"
                         print(f"       {status} In[{i}]-[Internal]: 预期={exp_v:.6f}  硬件={log_v:.6f}")
                         if not ok: errors += 1
@@ -355,7 +355,7 @@ class CycleVerifier:
                     if m_r:
                         hw_r = hex128_to_float_lane0(m_r.group(1))
                         # 对 LOGIC 结果也进行校验
-                        ok = np.isclose(math_val, hw_r, atol=5e-3)
+                        ok = np.isclose(math_val, hw_r, atol=5e-3, equal_nan=True)
                         status = "✅" if ok else "❌"
                         print(f"       {status} Result: 预期={math_val:.6f}  硬件={hw_r:.6f}")
                         if not ok: errors += 1
@@ -365,7 +365,7 @@ class CycleVerifier:
                     m_d = re.search(r"Data:([0-9a-fA-F]+)", logs_for_type[0])
                     if m_d:
                         hw_d = hex128_to_float_lane0(m_d.group(1))
-                        ok = np.isclose(math_val, hw_d, atol=5e-3)
+                        ok = np.isclose(math_val, hw_d, atol=5e-3, equal_nan=True)
                         status = "✅" if ok else "❌"
                         print(f"       {status} Memory: 预期={math_val:.6f}  硬件={hw_d:.6f}")
                         if not ok: errors += 1

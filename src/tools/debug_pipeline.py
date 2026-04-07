@@ -95,7 +95,7 @@ def check_stage_a(dfg, input_data):
         if n["op_type"] == "UR_READ" and str(meta.get("is_const", "")).lower() == "true":
             expected = float(meta.get("value", 0))
             actual = val_map.get(tid, None)
-            if actual is None or not np.isclose(expected, actual, atol=1e-10):
+            if actual is None or not np.isclose(expected, actual, atol=1e-10, equal_nan=True):
                 r.fail(f"常量 {tid}: 期望={expected}, eval_dfg={actual}")
 
     # 检查输出节点是否存在
@@ -241,7 +241,7 @@ def check_stage_d(op_dir):
             if a < len(lines):
                 real_val = hex128_to_float_lane0(lines[a].replace("0x", ""))
                 expected = float(meta["value"])
-                if not np.isclose(expected, real_val, atol=1e-4):
+                if not np.isclose(expected, real_val, atol=1e-4, equal_nan=True):
                     r.fail(f"常量 {n['trace_id']}: Bank{b_id}[{a}] "
                            f"期望={expected:.6f}, 实际={real_val:.6f}")
 

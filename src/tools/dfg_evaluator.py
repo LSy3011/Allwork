@@ -8,6 +8,7 @@ AIACC DFG 数学求值引擎 (SSoT - Single Source of Truth)
   - debug_pipeline.py (一键定位)
 """
 import json
+import struct
 import numpy as np
 from typing import Dict, Any, List, Optional
 
@@ -138,10 +139,34 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
             val_map[nid] = val
             return val
         
-        if op_type == "Min":
+        if op_type.upper() == "MIN":
             v0 = eval_op(deps[0]) if len(deps) > 0 else 0.0
             v1 = eval_op(deps[1]) if len(deps) > 1 else 0.0
             val = min(v0, v1)
+            val_map[nid] = val
+            return val
+
+        if op_type.upper() in ["TRUNC", "FPTOINT"]:
+            v0 = eval_op(deps[0]) if deps else 0.0
+            val = float(int(v0))
+            val_map[nid] = val
+            return val
+
+        if op_type.upper() in ["FLOOR"]:
+            v0 = eval_op(deps[0]) if deps else 0.0
+            val = float(np.floor(v0))
+            val_map[nid] = val
+            return val
+
+        if op_type.upper() in ["CEILING", "CEIL"]:
+            v0 = eval_op(deps[0]) if deps else 0.0
+            val = float(np.ceil(v0))
+            val_map[nid] = val
+            return val
+
+        if op_type.upper() == "INTTOFP":
+            # 硬件 INTTOFP 仅做透传（配合 FPTOINT 实现截断）
+            val = eval_op(deps[0]) if deps else 0.0
             val_map[nid] = val
             return val
 
@@ -152,6 +177,11 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
             st = eval_op(deps[2]) if len(deps) > 2 else 0.0
             op_str = str(meta.get("OP_TYPE", "AND")).upper()
             
+            def to_bits(f):
+                return struct.unpack('>I', struct.pack('>f', f))[0]
+            def to_float(i):
+                return struct.unpack('>f', struct.pack('>I', i & 0xFFFFFFFF))[0]
+
             if "SELECT_GT" in op_str:
                  val = v0 if int(st) & 0x4 else v1
             elif "SELECT_GE" in op_str:
@@ -165,20 +195,20 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
             elif "SELECT_NE" in op_str:
                  val = v0 if not (int(st) & 0x2) else v1
             elif "AND" in op_str:
-                 val = float(int(v0) & int(v1))
+                 val = to_float(to_bits(v0) & to_bits(v1))
             elif "OR" in op_str:
-                 val = float(int(v0) | int(v1))
+                 val = to_float(to_bits(v0) | to_bits(v1))
             elif "XOR" in op_str:
-                 val = float(int(v0) ^ int(v1))
+                 val = to_float(to_bits(v0) ^ to_bits(v1))
             elif "NOT" in op_str:
-                 val = float(~int(v0))
+                 val = to_float(~to_bits(v0))
             else:
                  val = v0 # Fallback
             val_map[nid] = val
             return val
 
         # ─── UR_WRITE: 内存写入 ───
-        if op_type == "UR_WRITE":
+        if op_type.upper() == "UR_WRITE":
             val = eval_op(deps[0]) if deps else 0.0
             val_map[nid] = val
             return val
