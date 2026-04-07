@@ -107,6 +107,12 @@ class LogicUnit(Component):
                     res = u_a if eq else u_b
                 elif op_id == 7 or "SELECT_LESS" in op_str or "SELECT_LS" in op_str:
                     res = u_a if ls else u_b
+                elif "SELECT_GE" in op_str:
+                    res = u_a if (gt or eq) else u_b
+                elif "SELECT_LE" in op_str:
+                    res = u_a if (ls or eq) else u_b
+                elif "SELECT_NE" in op_str:
+                    res = u_a if not eq else u_b
                 elif "LOGIC_SHIFT" in op_str or op_id == 8: # Assuming 8 is Logic Shift Left
                     res = (u_a << (u_b & 0x1F)) & mask_lane
                 elif "ARITH_SHIFT" in op_str or op_id == 12:
@@ -127,14 +133,13 @@ class LogicUnit(Component):
                             found = bit; break
                     res = found if found != -1 else mask_lane # Return all 1s if not found
                 
-                # Debug print for critical operations
-                if op_id in [0, 5, 6, 7] or "SELECT" in op_str:
-                     print(f">>> [LOGIC-TRACE] Cycle {self.cycle} Lane:{i} OpId:{op_id} OpStr:{op_str} U_A:{u_a:08x} U_B:{u_b:08x} LS:{ls} RES:{res:08x}")
+                # Debug print for all operations
+                print(f">>> [LOGIC-TRACE] Cycle {self.cycle} Lane:{i} OpStr:{op_str} U_A:{u_a:08x} U_B:{u_b:08x} ST_BITS:{st_bits} LS:{ls} EQ:{eq} GT:{gt} RES:{res:08x}")
 
                 res_val |= (res & mask_lane) << (i * nbits)
             
             self.logger.info(f"Cycle {self.cycle} Logic-Trace: S0={s0:032x}, S1={s1:032x}, ST={st:032x}, R={res_val:032x}")
-            print(f">>> [LOGIC-EXEC] Cyc:{self.cycle} S0:{s0:032x} S1:{s1:032x} R:{res_val:032x}")
+            print(f">>> [LOGIC-EXEC] Cyc:{self.cycle} S0:{s0:032x} S1:{s1:032x} ST:{st:032x} R:{res_val:032x}")
             
             self._next_pipeline = [{'result': res_val, 'valid': True}] + self.pipeline[:-1]
         else:

@@ -50,8 +50,32 @@ iq_config:
     BITS_LOOPS: 10
     BITS_CODE: 18
 
+  IQ_FPTOINT:
+    module: FPTOINT
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 10
+
+  IQ_INTTOFP:
+    module: INTTOFP
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 11 # 修正对齐 inttofp.yaml (1+1+1+1+1+1+5=11)
+
+  IQ_INTTOINT:
+    module: INTTOINT
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 12
+
   IQ_FPTOFP:
     module: FPTOFP
     EN_LOOPS: true
     BITS_LOOPS: 10
-    BITS_CODE: 5
+    BITS_CODE: 10
+
+  IQ_INT8toFP16:
+    module: INT8toFP16
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 7

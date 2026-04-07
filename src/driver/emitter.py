@@ -47,6 +47,7 @@ class LIRPacker:
                     
                     d_map = {
                         "INTADD": 0, "FPMUL": 3, "FPADD": 4, "LOGIC": 10,
+                        "FPTOFP": 6, "INTTOINT": 7, "FPTOINT": 8, "INTTOFP": 9,
                         "INT8TOFP16": 14, "FP16MUL": 18,
                         "FP32ADDTREE5TO1": 26, "FP32ADDTREE8TO1": 28, "SHIFTDN": 29
                     }

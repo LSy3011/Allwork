@@ -17,6 +17,10 @@ class GraphCompiler:
             "FPADD": [PS.FPADD_S0, PS.FPADD_S1],
             "INTADD": [PS.INTADD_S0, PS.INTADD_S1, PS.INTADD_S2],
             "LOGIC": [PS.LOGIC_S0, PS.LOGIC_S1],
+            "FPTOFP": [PS.FPTOFP_S],
+            "INTTOINT": [PS.INTTOINT_S],
+            "FPTOINT": [PS.FPTOINT_S],
+            "INTTOFP": [PS.INTTOFP_S],
             "INT8TOFP16": [PS.INT8TOFP16_S0, PS.INT8TOFP16_S1],
             "UR_WRITE": [PS.UR_W0_S, PS.UR_W1_S, PS.UR_W2_S, PS.UR_W3_S]
         }
@@ -199,6 +203,76 @@ class GraphCompiler:
             self.mir_env[sym] = self._get_op(formula)
             return
 
+        # 匹配【符号函数】 -> sign(x) = SELECT_GT(1.0, SELECT_LS(-1.0, 0.0))
+        if isinstance(expr, sp.sign):
+             x = self._get_op(expr.args[0])
+             one = self._get_const(1.0)
+             neg_one = self._get_const(-1.0)
+             zero = self._get_const(0.0)
+             
+             # 1. cmp1 = x - 0.0 (判断正负)
+             r0_cmp1 = self._route(x, PS.FPADD_S0)
+             r1_cmp1 = self._route(zero, PS.FPADD_S1)
+             cmp1 = self.b.make_op("FPADD", f"{sym}_cmp1", RT.FPADD, [r0_cmp1, r1_cmp1], UPDATE_ST=1, SUB=1)
+             st_wire1 = self._route(cmp1, PS.LOGIC_ST, dep_port="ST")
+             
+             # 2. SELECT_LS(neg_one, zero) -> if x < 0 then -1 else 0
+             s0_ls = self._route(neg_one, PS.LOGIC_S0)
+             s1_ls = self._route(zero, PS.LOGIC_S1)
+             ls_node = self.b.make_op("LOGIC", f"{sym}_ls", RT.LOGIC, [s0_ls, s1_ls, st_wire1], OP_TYPE="SELECT_LS", VALID=1)
+             
+             # 3. SELECT_GT(one, ls_node) -> if x > 0 then 1 else (if x < 0 then -1 else 0)
+             r0_gt = self._route(one, PS.LOGIC_S0)
+             r1_gt = self._route(ls_node, PS.LOGIC_S1)
+             st_wire2 = self._route(cmp1, PS.LOGIC_ST, dep_port="ST") # 复用 cmp1 状态
+             self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_gt, r1_gt, st_wire2], OP_TYPE="SELECT_GT", VALID=1)
+             return
+
+        # 匹配【向上/向下取整】 -> FPTOINT (Trunc) + SELECT
+        if isinstance(expr, (sp.floor, sp.ceiling)):
+             x = self._get_op(expr.args[0])
+             one = self._get_const(1.0)
+             
+             # 1. Truncate
+             r0_f32 = self._route(x, PS.FPTOINT_S)
+             i32 = self.b.make_op("FPTOINT", f"{sym}_trunc", RT.FPTOINT, [r0_f32])
+             r0_i32 = self._route(i32, PS.INTTOFP_S)
+             f_trunc = self.b.make_op("INTTOFP", f"{sym}_recept", RT.INTTOFP, [r0_i32])
+             
+             # 2. Compare f_trunc with x
+             r0_cmp = self._route(f_trunc, PS.FPADD_S0)
+             r1_cmp = self._route(x, PS.FPADD_S1)
+             cmp = self.b.make_op("FPADD", f"{sym}_cmp", RT.FPADD, [r0_cmp, r1_cmp], UPDATE_ST=1, SUB=1)
+             st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
+             
+             if isinstance(expr, sp.floor):
+                 # floor: if f_trunc > x, then f_trunc - 1.0, else f_trunc
+                 r0_sub = self._route(f_trunc, PS.FPADD_S0)
+                 r1_sub = self._route(one, PS.FPADD_S1)
+                 f_minus_1 = self.b.make_op("FPADD", f"{sym}_minus1", RT.FPADD, [r0_sub, r1_sub], SUB=1)
+                 
+                 s0_sel = self._route(f_minus_1, PS.LOGIC_S0)
+                 s1_sel = self._route(f_trunc, PS.LOGIC_S1)
+                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [s0_sel, s1_sel, st_wire], OP_TYPE="SELECT_GT", VALID=1)
+             else:
+                 # ceiling: if f_trunc < x, then f_trunc + 1.0, else f_trunc
+                 r0_add = self._route(f_trunc, PS.FPADD_S0)
+                 r1_add = self._route(one, PS.FPADD_S1)
+                 f_plus_1 = self.b.make_op("FPADD", f"{sym}_plus1", RT.FPADD, [r0_add, r1_add], SUB=0)
+                 
+                 s0_sel = self._route(f_plus_1, PS.LOGIC_S0)
+                 s1_sel = self._route(f_trunc, PS.LOGIC_S1)
+                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [s0_sel, s1_sel, st_wire], OP_TYPE="SELECT_LS", VALID=1)
+             return
+
+        # 匹配【四舍五入】 -> floor(x + 0.5)
+        if str(expr.func) == "round" or isinstance(expr, sp.Round):
+             arg = expr.args[0]
+             half = sp.Float(0.5)
+             formula = sp.floor(arg + half)
+             self.mir_env[sym] = self._get_op(formula)
+             return
+
         # 匹配【逻辑比较】 -> FPADD(ST) + LOGIC(SEL 常数 1.0 / 0.0)
         # 支持: a > b, a >= b, a < b, a <= b, a == b, a != b
         if isinstance(expr, (sp.GreaterThan, sp.LessThan, sp.StrictGreaterThan, sp.StrictLessThan, sp.Equality, sp.Unequality)):
@@ -212,24 +286,54 @@ class GraphCompiler:
              st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
              one = self._get_const(1.0)
              zero = self._get_const(0.0)
+             op_type = "SELECT_GT" 
              r0_sel = self._route(one, PS.LOGIC_S0)
              r1_sel = self._route(zero, PS.LOGIC_S1)
              
-             op_type = "SELECT_GT" # Default
-             if isinstance(expr, (sp.Ge, sp.GreaterThan)): op_type = "SELECT_GE"
-             elif isinstance(expr, (sp.Lt, sp.StrictLessThan)): op_type = "SELECT_LS" 
-             elif isinstance(expr, (sp.Le, sp.LessThan)): op_type = "SELECT_LE"
-             elif isinstance(expr, (sp.Eq, sp.Equality)): op_type = "SELECT_EQ"
-             elif isinstance(expr, sp.Unequality): 
-                  op_type = "SELECT_GT" # Actually we'd need NE. For now, let's just pick one.
-                  # Note: Logic unit needs to support standard logic ops
+             if isinstance(expr, sp.StrictGreaterThan): # a > b
+                  op_type = "SELECT_GT"
+             elif isinstance(expr, sp.GreaterThan): # a >= b (SymPy default for >=)
+                  # a >= b  <=>  !(a < b)  <=> SELECT_LS(zero, one)
+                  op_type = "SELECT_LS"
+                  r0_sel, r1_sel = self._route(zero, PS.LOGIC_S0), self._route(one, PS.LOGIC_S1)
+             elif isinstance(expr, sp.StrictLessThan): # a < b
+                  op_type = "SELECT_LS"
+             elif isinstance(expr, sp.LessThan): # a <= b
+                  # a <= b <=> !(a > b) <=> SELECT_GT(zero, one)
+                  op_type = "SELECT_GT"
+                  r0_sel, r1_sel = self._route(zero, PS.LOGIC_S0), self._route(one, PS.LOGIC_S1)
+             elif isinstance(expr, (sp.Eq, sp.Equality)): # a == b
+                  op_type = "SELECT_EQ"
+             elif isinstance(expr, (sp.Ne, sp.Unequality)): # a != b
+                  # a != b <=> !(a == b) <=> SELECT_EQ(zero, one)
+                  op_type = "SELECT_EQ"
+                  r0_sel, r1_sel = self._route(zero, PS.LOGIC_S0), self._route(one, PS.LOGIC_S1)
              
              self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_sel, r1_sel, st_wire], 
                                                 OP_TYPE=op_type, VALID=1, comment=str(expr))
              return
 
+        # 匹配【逻辑非】 -> Logical Not(a) -> (a == 0.0) -> SELECT_EQ(1.0, 0.0)
+        if isinstance(expr, sp.Not):
+             a_node = self._get_op(expr.args[0])
+             zero = self._get_const(0.0)
+             one = self._get_const(1.0)
+             # 1. cmp = a - 0.0
+             r0_cmp = self._route(a_node, PS.FPADD_S0)
+             r1_cmp = self._route(zero, PS.FPADD_S1)
+             cmp = self.b.make_op("FPADD", f"{sym}_cmp", RT.FPADD, [r0_cmp, r1_cmp], 
+                                  UPDATE_ST=1, SUB=1, comment="LOGIC_NOT_CMP")
+             
+             # 2. 从状态位选择 1.0 或 0.0
+             st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
+             r0_sel = self._route(one, PS.LOGIC_S0)
+             r1_sel = self._route(zero, PS.LOGIC_S1)
+             self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_sel, r1_sel, st_wire], 
+                                                OP_TYPE="SELECT_EQ", VALID=1, comment="NOT_SEL")
+             return
+
         # 匹配【位运算】 -> LOGIC
-        if isinstance(expr, (sp.And, sp.Or, sp.Xor, sp.Not)):
+        if isinstance(expr, (sp.And, sp.Or, sp.Xor)):
              args = list(expr.args)
              op_map = {sp.And: "AND", sp.Or: "OR", sp.Xor: "XOR", sp.Not: "NOT"}
              op_name = op_map[type(expr)]

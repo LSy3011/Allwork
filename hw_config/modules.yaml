@@ -104,3 +104,62 @@ modules:
       - {name: update_st, bits: 1}
       - {name: add_sub, bits: 1}
       - {name: smc_id_en, bits: 5}
+
+  FPTOINT:
+    type: compute
+    latency: 1
+    code_bits: 10
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_prec, bits: 1}
+      - {name: dst_prec, bits: 1}
+      - {name: src_pos, bits: 1}
+      - {name: dst_pos, bits: 1}
+      - {name: smc_id_en, bits: 5}
+
+  INTTOFP:
+    type: compute
+    latency: 1
+    code_bits: 10
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_prec, bits: 1}
+      - {name: dst_prec, bits: 1}
+      - {name: src_pos, bits: 1}
+      - {name: dst_pos, bits: 1}
+      - {name: smc_id_en, bits: 5}
+
+  INTTOINT:
+    type: compute
+    latency: 1
+    code_bits: 12
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_prec, bits: 1}
+      - {name: dst_prec, bits: 1}
+      - {name: src_sign, bits: 1}
+      - {name: dst_sign, bits: 1}
+      - {name: src_pos, bits: 1}
+      - {name: dst_pos, bits: 1}
+      - {name: smc_id_en, bits: 5}
+
+  FPTOFP:
+    type: compute
+    latency: 1
+    code_bits: 10
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_prec, bits: 1}
+      - {name: dst_prec, bits: 1}
+      - {name: src_pos, bits: 1}
+      - {name: dst_pos, bits: 1}
+      - {name: smc_id_en, bits: 5}
+
+  INT8toFP16:
+    type: compute
+    latency: 2
+    code_bits: 7
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_sign, bits: 1}
+      - {name: smc_id_en, bits: 5}

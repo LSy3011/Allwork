@@ -294,7 +294,12 @@ class CycleVerifier:
                 m_d = re.search(r"Data:([0-9a-fA-F]+)", rt_log)
                 if m_p and m_d:
                     pid = m_p.group(1) # RTOVR 端口 ID
-                    val = hex128_to_float_lane0(m_d.group(1))
+                    hex_val = m_d.group(1)
+                    if pid == "13":
+                         # 特殊处理 ST 状态位：提取低位 bitmask 并转为 float
+                         val = float(int(hex_val[-8:], 16) & 0xFFFF)
+                    else:
+                         val = hex128_to_float_lane0(hex_val)
                     physical_regs[pid] = val
             
             # --- [Step B] 计算校验: 模拟硬件在计算瞬间从寄存器中读取数据 ---
@@ -312,8 +317,10 @@ class CycleVerifier:
                     log_line = logs_for_type[0]
                     m_s0 = re.search(r"S0:([0-9a-fA-F]+)", log_line)
                     m_s1 = re.search(r"S1:([0-9a-fA-F]+)", log_line)
+                    m_st = re.search(r"ST:([0-9a-fA-F]+)", log_line)
                     if m_s0: hw_val_extracted.append(hex128_to_float_lane0(m_s0.group(1)))
                     if m_s1: hw_val_extracted.append(hex128_to_float_lane0(m_s1.group(1)))
+                    if m_st: hw_val_extracted.append(float(int(m_st.group(1)[-8:], 16) & 0xFFFF))
 
                 for i, d in enumerate(deps):
                     exp_v = self.val_map.get(d, 0.0)

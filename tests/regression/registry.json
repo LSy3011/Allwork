@@ -27,12 +27,12 @@
       "operators": {
         "abs": {"description": "abs(x) 绝对值", "status": "ready"},
         "neg": {"description": "neg(x) 取反", "status": "ready"},
-        "ceil": {"description": "ceil(x) 向上取整", "status": "pending"},
-        "floor": {"description": "floor(x) 向下取整", "status": "pending"},
-        "round": {"description": "round(x) 四舍五入", "status": "pending"},
-        "sign": {"description": "sign(x) 符号函数", "status": "pending"},
+        "ceil": {"description": "ceil(x) 向上取整", "status": "ready"},
+        "floor": {"description": "floor(x) 向下取整", "status": "ready"},
+        "round": {"description": "round(x) 四舍五入", "status": "ready"},
+        "sign": {"description": "sign(x) 符号函数", "status": "ready"},
         "square": {"description": "x^2 平方", "status": "ready"},
-        "reciprocal": {"description": "1/x 倒数", "status": "pending"}
+        "reciprocal": {"description": "1/x 倒数", "status": "ready"}
       }
     },
     "binary/math": {
@@ -51,15 +51,15 @@
     "binary/logical": {
       "operators": {
         "gt": {"description": "a > b", "status": "ready"},
-        "ge": {"description": "a >= b", "status": "pending"},
-        "lt": {"description": "a < b", "status": "pending"},
-        "le": {"description": "a <= b", "status": "pending"},
-        "eq": {"description": "a == b", "status": "pending"},
-        "ne": {"description": "a != b", "status": "pending"},
+        "ge": {"description": "a >= b", "status": "ready"},
+        "lt": {"description": "a < b", "status": "ready"},
+        "le": {"description": "a <= b", "status": "ready"},
+        "eq": {"description": "a == b", "status": "ready"},
+        "ne": {"description": "a != b", "status": "ready"},
         "and": {"description": "a & b", "status": "ready"},
-        "or": {"description": "a | b", "status": "pending"},
-        "xor": {"description": "a ^ b", "status": "pending"},
-        "not": {"description": "!a 逻辑非", "status": "pending"}
+        "or": {"description": "a | b", "status": "ready"},
+        "xor": {"description": "a ^ b", "status": "ready"},
+        "not": {"description": "!a 逻辑非", "status": "ready"}
       }
     },
     "activation": {
@@ -69,9 +69,9 @@
         "sigmoid": {"description": "Sigmoid 激活", "status": "ready"},
         "tanh": {"description": "7阶泰勒展开 tanh(x)", "status": "ready"},
         "swish": {"description": "Swish/SiLU (Sigmoid 近似)", "status": "ready"},
-        "selu": {"description": "SELU 激活", "status": "pending"},
-        "elu": {"description": "ELU 激活", "status": "pending"},
-        "leaky_relu": {"description": "Leaky ReLU 激活", "status": "pending"}
+        "selu": {"description": "SELU 激活", "status": "ready"},
+        "elu": {"description": "ELU 激活", "status": "ready"},
+        "leaky_relu": {"description": "Leaky ReLU 激活", "status": "ready"}
       }
     },
     "normalization": {
