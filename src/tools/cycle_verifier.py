@@ -308,19 +308,34 @@ class CycleVerifier:
                 tid = op["trace_id"]
                 math_val = self.val_map.get(tid, 0.0)
                 deps = parse_deps(op.get("metadata", {}))
+                
+                op_meta = op.get("metadata", {})
+                logic_op_str = str(op_meta.get("OP_TYPE", "")).upper()
+                # 🚀 [BITWISE-CHECK]: 仅针对 AND, OR, XOR... 进行 HEX 对称校验
+                is_bitwise = op_type == "LOGIC" and logic_op_str in ["AND", "OR", "XOR", "NOT"]
 
                 print(f"\n  ⏱  [T={t:3d}] {op_type} ({tid})")
                 
                 logs_for_type = actual_logs.get(op_type, [])
                 hw_val_extracted = []
+                hw_hex_extracted = []
                 if logs_for_type:
                     log_line = logs_for_type[0]
                     m_s0 = re.search(r"S0:([0-9a-fA-F]+)", log_line)
                     m_s1 = re.search(r"S1:([0-9a-fA-F]+)", log_line)
                     m_st = re.search(r"ST:([0-9a-fA-F]+)", log_line)
-                    if m_s0: hw_val_extracted.append(hex128_to_float_lane0(m_s0.group(1)))
-                    if m_s1: hw_val_extracted.append(hex128_to_float_lane0(m_s1.group(1)))
-                    if m_st: hw_val_extracted.append(float(int(m_st.group(1)[-8:], 16) & 0xFFFF))
+                    if m_s0: 
+                        hw_val_extracted.append(hex128_to_float_lane0(m_s0.group(1)))
+                        hw_hex_extracted.append(m_s0.group(1)[-8:])
+                    if m_s1: 
+                        hw_val_extracted.append(hex128_to_float_lane0(m_s1.group(1)))
+                        hw_hex_extracted.append(m_s1.group(1)[-8:])
+                    if m_st: 
+                        hw_val_extracted.append(float(int(m_st.group(1)[-8:], 16) & 0xFFFF))
+                        hw_hex_extracted.append(m_st.group(1)[-8:])
+
+                def get_exp_hex(v):
+                    return f"{struct.unpack('>I', struct.pack('>f', float(v)))[0]:08x}"
 
                 for i, d in enumerate(deps):
                     exp_v = self.val_map.get(d, 0.0)
@@ -332,14 +347,24 @@ class CycleVerifier:
                         pid = PORT_MAP.get(raw_iq, raw_iq)
                         
                         current_reg_val = physical_regs.get(pid, 0.0)
-                        ok = np.isclose(exp_v, current_reg_val, atol=5e-3, equal_nan=True)
                         
-                        log_v = hw_val_extracted[i] if i < len(hw_val_extracted) else 0.0
-                        log_sync = np.isclose(current_reg_val, log_v, atol=1e-5, equal_nan=True)
+                        if is_bitwise:
+                            exp_h = get_exp_hex(exp_v)
+                            # 这里我们需要从 physical_regs 中反推 hex，或者修改 physical_regs 存储
+                            # 为了简单且准确，我们直接通过寄存器的 float 值反推 (因为 bits 是一致的)
+                            reg_h = get_exp_hex(current_reg_val)
+                            ok = (exp_h == reg_h)
+                            log_v_h = hw_hex_extracted[i] if i < len(hw_hex_extracted) else "00000000"
+                            status = "✅" if ok else "❌"
+                            print(f"       {status} In[{i}]-[Port:{pid:3s}]: 预期={exp_h}  寄存器={reg_h} (HW={log_v_h})")
+                        else:
+                            ok = np.isclose(exp_v, current_reg_val, atol=5e-3, equal_nan=True)
+                            log_v = hw_val_extracted[i] if i < len(hw_val_extracted) else 0.0
+                            log_sync = np.isclose(current_reg_val, log_v, atol=1e-5, equal_nan=True)
+                            status = "✅" if ok else "❌"
+                            sync_mark = " (RegSync)" if log_sync else f" (LogMismatch: HW={log_v:.6f})"
+                            print(f"       {status} In[{i}]-[Port:{pid:3s}]: 预期={exp_v:.6f}  寄存器={current_reg_val:.6f}{sync_mark}")
                         
-                        status = "✅" if ok else "❌"
-                        sync_mark = " (RegSync)" if log_sync else f" (LogMismatch: HW={log_v:.6f})"
-                        print(f"       {status} In[{i}]-[Port:{pid:3s}]: 预期={exp_v:.6f}  寄存器={current_reg_val:.6f}{sync_mark}")
                         if not ok: errors += 1
                     else:
                         # 非 RTOVR 依赖
@@ -353,11 +378,17 @@ class CycleVerifier:
                 if logs_for_type and op_type in ["FPMUL", "FPADD", "LOGIC"]:
                     m_r = re.search(r"R:([0-9a-fA-F]+)", logs_for_type[0])
                     if m_r:
-                        hw_r = hex128_to_float_lane0(m_r.group(1))
-                        # 对 LOGIC 结果也进行校验
-                        ok = np.isclose(math_val, hw_r, atol=5e-3, equal_nan=True)
-                        status = "✅" if ok else "❌"
-                        print(f"       {status} Result: 预期={math_val:.6f}  硬件={hw_r:.6f}")
+                        if is_bitwise:
+                            exp_h = get_exp_hex(math_val)
+                            hw_r_h = m_r.group(1)[-8:]
+                            ok = (exp_h == hw_r_h)
+                            status = "✅" if ok else "❌"
+                            print(f"       {status} Result: 预期={exp_h}  硬件={hw_r_h}")
+                        else:
+                            hw_r = hex128_to_float_lane0(m_r.group(1))
+                            ok = np.isclose(math_val, hw_r, atol=5e-3, equal_nan=True)
+                            status = "✅" if ok else "❌"
+                            print(f"       {status} Result: 预期={math_val:.6f}  硬件={hw_r:.6f}")
                         if not ok: errors += 1
 
                 # 校验内存写入 (UR_WRITE)

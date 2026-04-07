@@ -31,7 +31,7 @@ class GraphCompiler:
     def _route(self, nid: str, target_slot: PS, dep_port: str = None):
         """路由下发：在数学操作数进计算器前，必须包一层硬件专属搬运指令 RTOVR"""
         self.rt_cnt += 1
-        uid = f"rt_{nid}_{target_slot.name}_{self.rt_cnt}"[:25]
+        uid = f"rt_{nid}_{target_slot.name}_{self.rt_cnt}"[:64]
         kwargs = {"dep_port": dep_port} if dep_port else {}
         return self.b.make_op("RTOVR", uid, target_slot, [nid], **kwargs)
 
@@ -206,9 +206,9 @@ class GraphCompiler:
         # 匹配【符号函数】 -> sign(x) = SELECT_GT(1.0, SELECT_LS(-1.0, 0.0))
         if isinstance(expr, sp.sign):
              x = self._get_op(expr.args[0])
-             one = self._get_const(1.0)
-             neg_one = self._get_const(-1.0)
-             zero = self._get_const(0.0)
+             one = self._get_const(1.0, is_int=False)
+             neg_one = self._get_const(-1.0, is_int=False)
+             zero = self._get_const(0.0, is_int=False)
              
              # 1. cmp1 = x - 0.0 (判断正负)
              r0_cmp1 = self._route(x, PS.FPADD_S0)
@@ -266,7 +266,7 @@ class GraphCompiler:
              return
 
         # 匹配【四舍五入】 -> floor(x + 0.5)
-        if str(expr.func) == "round" or isinstance(expr, sp.Round):
+        if str(expr.func).lower() == "round":
              arg = expr.args[0]
              half = sp.Float(0.5)
              formula = sp.floor(arg + half)
@@ -284,8 +284,8 @@ class GraphCompiler:
                                   UPDATE_ST=1, SUB=1, comment=f"CMP {expr}")
              
              st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
-             one = self._get_const(1.0)
-             zero = self._get_const(0.0)
+             one = self._get_const(1.0, is_int=False)
+             zero = self._get_const(0.0, is_int=False)
              op_type = "SELECT_GT" 
              r0_sel = self._route(one, PS.LOGIC_S0)
              r1_sel = self._route(zero, PS.LOGIC_S1)
@@ -334,28 +334,28 @@ class GraphCompiler:
 
         # 匹配【位运算】 -> LOGIC
         if isinstance(expr, (sp.And, sp.Or, sp.Xor)):
-             args = list(expr.args)
-             op_map = {sp.And: "AND", sp.Or: "OR", sp.Xor: "XOR", sp.Not: "NOT"}
-             op_name = op_map[type(expr)]
-             
-             v0 = self._get_op(args[0])
-             r0 = self._route(v0, PS.LOGIC_S0)
-             if len(args) > 1:
-                 v1 = self._get_op(args[1])
-                 r1 = self._route(v1, PS.LOGIC_S1)
-                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0, r1], OP_TYPE=op_name, VALID=1)
-             else:
-                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0], OP_TYPE=op_name, VALID=1)
-             return
+            args = list(expr.args)
+            op_map = {sp.And: "AND", sp.Or: "OR", sp.Xor: "XOR", sp.Not: "NOT"}
+            op_name = op_map[type(expr)]
+            
+            v0 = self._get_op(args[0], is_int=True)
+            r0 = self._route(v0, PS.LOGIC_S0)
+            if len(args) > 1:
+                v1 = self._get_op(args[1], is_int=True)
+                r1 = self._route(v1, PS.LOGIC_S1)
+                self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0, r1], OP_TYPE=op_name, VALID=1)
+            else:
+                self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0], OP_TYPE=op_name, VALID=1)
+            return
 
         # 兜底：未知表达式
         raise NotImplementedError(f"Compiler Error: 不支持的 SymPy 表达式类型 {type(expr)}: {expr}. "
                                   f"请在 tests/operators/ 中检查 DFG 定义是否超出了当前硬件能力。")
             
-    def _get_op(self, arg):
+    def _get_op(self, arg, is_int=False):
         """安全的取值助手"""
         if arg in self.inputs_meta:
-            return self._get_input(arg)
+            return self._get_input(arg, is_int=is_int)
             
         if arg in self.cse_vars:
             # 读取被释放到 SRAM 的长期活状态值
@@ -366,7 +366,7 @@ class GraphCompiler:
             
         if arg in self.mir_env: return self.mir_env[arg]
         if isinstance(arg, (sp.Float, sp.Integer, sp.Rational)):
-            return self._get_const(arg)
+            return self._get_const(arg, is_int=is_int)
         
         # 递归下沉剩余的 inline 表达式
         self.inl_cnt += 1
@@ -374,17 +374,18 @@ class GraphCompiler:
         self._lower_expr(inline_sym, arg)
         return self.mir_env[inline_sym]
 
-    def _get_const(self, expr):
+    def _get_const(self, expr, is_int=False):
         """常数匿名补丁"""
-        val = float(expr)
+        val = int(expr) if is_int else float(expr)
         self.inl_cnt += 1
         new_id = f"cinl_{str(val).replace('.', '_')}_{self.inl_cnt}"[:25]
-        op = self.b.make_op("UR_READ", new_id, RT.UR_READ, [], is_const=True, value=val, role="constant")
+        op = self.b.make_op("UR_READ", new_id, RT.UR_READ, [], is_const=True, value=val, is_int=is_int, role="constant")
         return op
         
-    def _get_input(self, sym):
+    def _get_input(self, sym, is_int=False):
         """为输入张量产生一个严格贴近使用时间的全新读取操作，绕开物理引脚 Liveness 覆盖"""
         self.inl_cnt += 1
         new_id = f"{sym}_read_{self.inl_cnt}"
-        kwargs = self.inputs_meta[sym]
+        kwargs = self.inputs_meta[sym].copy()
+        kwargs["is_int"] = is_int # 注入类型偏好
         return self.b.make_op("UR_READ", new_id, RT.UR_READ, [], meta_name=str(sym), **kwargs)

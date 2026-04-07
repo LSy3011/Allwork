@@ -76,10 +76,11 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
         # ─── UR_READ: 常量或变量读取 ───
         if op_type == "UR_READ":
             is_const = str(meta.get("is_const", "")).lower() == "true"
+            is_int = str(meta.get("is_int", "False")).lower() == "true"
             if is_const or nid.startswith("cinl_"):
                 v_str = meta.get("value", None)
                 if v_str is not None:
-                    val = float(v_str)
+                    val = int(v_str) if is_int else float(v_str)
                 else:
                     val = 0.0
                 val_map[nid] = val
@@ -178,9 +179,11 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
             op_str = str(meta.get("OP_TYPE", "AND")).upper()
             
             def to_bits(f):
-                return struct.unpack('>I', struct.pack('>f', f))[0]
+                if isinstance(f, int): return f & 0xFFFFFFFF
+                return struct.unpack('>I', struct.pack('>f', float(f)))[0]
+
             def to_float(i):
-                return struct.unpack('>f', struct.pack('>I', i & 0xFFFFFFFF))[0]
+                return struct.unpack('>f', struct.pack('>I', int(i) & 0xFFFFFFFF))[0]
 
             if "SELECT_GT" in op_str:
                  val = v0 if int(st) & 0x4 else v1

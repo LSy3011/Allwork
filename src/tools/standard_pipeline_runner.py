@@ -208,7 +208,14 @@ class StandardPipelineRunner:
                         if node.metadata.get("role") == "operand_a": val = input_data.get("x")
                 
                 if val is not None:
-                    v4 = [float(val)] * 4 if isinstance(val, (float, int)) else list(val)
+                    # Preserve the original type for bit-accurate simulation
+                    # Supporting both native Python types and numpy types
+                    if isinstance(val, (float, int, np.floating, np.integer)):
+                        v4 = [val] * 4
+                    elif hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
+                        v4 = list(val)
+                    else:
+                        v4 = [val] * 4
                     banks[b][a] = v4
                 
                 # 建立 Tensor 角色映射

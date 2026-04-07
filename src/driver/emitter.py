@@ -215,7 +215,13 @@ class LIRPacker:
                         entry = [entry] * 4
                     
                     # 🛰️ 128-bit 矢量物理通道对位 (修正为 LSB-First: Index i -> Lane i)
-                    packed = sum((int(struct.unpack(">I", struct.pack(">f", x))[0]) & 0xFFFFFFFF) << (32 * i) for i, x in enumerate(entry[:4]))
+                    packed = 0
+                    for i, x in enumerate(entry[:4]):
+                        if isinstance(x, int):
+                            bits = x & 0xFFFFFFFF
+                        else:
+                            bits = int(struct.unpack(">I", struct.pack(">f", float(x)))[0]) & 0xFFFFFFFF
+                        packed |= (bits << (32 * i))
                     f.write(f"{packed:032x}\n")
         
         for t_name, t_obj in program.tensors.items():
