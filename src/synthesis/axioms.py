@@ -109,10 +109,10 @@ class SynthesisAxioms:
         """
         Bank 冲突公理：已切换至 trace_id。
         """
-        bank_ops = [o for o in ops if "bank_id" in o.metadata]
+        bank_ops = [o for o in ops if o.metadata.get("manual_bank") is not None]
         bank_groups = {}
         for op in bank_ops:
-            bid = op.metadata["bank_id"]
+            bid = op.metadata["manual_bank"]
             bank_groups.setdefault(bid, []).append(op.trace_id)
         
         for bid, op_ids in bank_groups.items():

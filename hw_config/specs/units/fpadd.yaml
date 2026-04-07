@@ -39,7 +39,7 @@ micro_instructions:
     1: PREC_32
 - field: UPDATE_ST
   width: 1
-  default: 1
+  default: 0
   encoding:
     0: 'NO'
     1: 'YES'

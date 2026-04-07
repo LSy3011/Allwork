@@ -32,30 +32,30 @@ class StandardPipelineRunner:
         self._dump_dfg(dfg, op_dir / "stage_a_initial.json")
         print(f"  [A] MIR DFG initial graph generated and connectivity verified.")
 
-        # --- Stage B: Bank & Address Allocation (物理分配) ---
-        dfg = self._perform_physical_allocation(dfg, input_data, op_dir)
-        self._verify_stage_b(dfg)
-        self._dump_dfg(dfg, op_dir / "stage_b_mapped.json")
-        print(f"  [B] Physical bank/addr allocation completed and conflict-free.")
-
-        # --- Stage C: SMT Synthesis (时序合成) ---
+        # --- Stage C (现移至 B 阶段): SMT Synthesis (解耦时序合成) ---
         synthesis_res = SMTSynthesizer(self.spec).solve(dfg)
         if not synthesis_res:
-            raise RuntimeError(f"❌ Stage C Failed: SMT UNSAT for {op_name}")
+            raise RuntimeError(f"❌ Stage C(B) Failed: SMT UNSAT for {op_name}")
             
         from orchestrator.stitcher import HSTSStitcher
         stitcher = HSTSStitcher()
         stitcher.add_operator(op_name, dfg, synthesis_res)
         final_stream = stitcher.get_final_stream()
         
-        # 将时序信息填回 DFG 以便 Dump
+        # 将时序信息填回 DFG 以备后验与分配
         for node in dfg:
             if node.trace_id in synthesis_res:
                 node.logic_cycle = synthesis_res[node.trace_id]
         
         self._verify_stage_c(dfg)
         self._dump_dfg(dfg, op_dir / "stage_c_synthesis.json")
-        print(f"  [C] SMT synthesis completed. (Max Cycle: {max(synthesis_res.values())})")
+        print(f"  [B/C] SMT synthesis completed. (Max Cycle: {max(synthesis_res.values())})")
+
+        # --- Stage B (现移至 C 阶段): Bank & Address Allocation (后置预染色物理分配) ---
+        dfg = self._perform_physical_allocation(dfg, input_data, op_dir)
+        self._verify_stage_b(dfg)
+        self._dump_dfg(dfg, op_dir / "stage_b_mapped.json")
+        print(f"  [C/B] Physical bank/addr allocation completed and true-conflict-free.")
 
         # --- Stage D: LIR Emission (指令打包) ---
         acb_path = op_dir / "acb_bundle"
@@ -118,26 +118,43 @@ class StandardPipelineRunner:
                 # 如果是多实例 ALU，我们可以更复杂一点，这里简单取第一个
                 node.metadata["iq_id"] = alu_ids[m_type][0]
 
-            # --- [内存 Tensors 识别] ---
+            # --- [内存 Tensors 识别: 增加预着色感知] ---
+            mb = node.metadata.get("manual_bank")
             if node.metadata.get("is_const"):
-                t = SimpleNamespace(name=node.trace_id, size=1, manual_bank=None, start_t=0, end_t=1000)
+                t = SimpleNamespace(name=node.trace_id, size=1, manual_bank=mb, start_t=0, end_t=1000)
                 tensors.append(t)
                 node_to_tensor[node.trace_id] = t
             elif node.metadata.get("role") == "operand_a" or node.metadata.get("role") == "operand_b":
-                t = SimpleNamespace(name=node.trace_id, size=1, manual_bank=None, start_t=0, end_t=1000)
+                t = SimpleNamespace(name=node.trace_id, size=1, manual_bank=mb, start_t=0, end_t=1000)
                 tensors.append(t)
                 node_to_tensor[node.trace_id] = t
             elif m_type == "UR_WRITE":
                 t_name = f"tensor_{node.trace_id}"
-                t = SimpleNamespace(name=t_name, size=1, manual_bank=None, start_t=0, end_t=1000)
+                t = SimpleNamespace(name=t_name, size=1, manual_bank=mb, start_t=0, end_t=1000)
                 tensors.append(t)
                 node_to_tensor[node.trace_id] = t
                 for consumer in dfg:
                     if node.trace_id in consumer.metadata.get("depends_on", []):
                         node_to_tensor[consumer.trace_id] = t
 
-        # 3. 运行着色与地址分配
-        conflicts = [(tensors[i].name, tensors[j].name) for i in range(len(tensors)) for j in range(i+1, len(tensors))]
+        # 3. 运行着色与地址分配：基于前置 SMT 准确时序的冲突探测
+        conflicts = []
+        tensor_to_times = {}
+        # 通过节点回溯张量时间
+        for node in dfg:
+            if hasattr(node, "logic_cycle") and node.trace_id in node_to_tensor:
+                t_name = node_to_tensor[node.trace_id].name
+                tensor_to_times.setdefault(t_name, []).append(node.logic_cycle)
+        
+        t_names = list(tensor_to_times.keys())
+        for i in range(len(t_names)):
+            for j in range(i+1, len(t_names)):
+                name_a, name_b = t_names[i], t_names[j]
+                times_a, times_b = tensor_to_times[name_a], tensor_to_times[name_b]
+                # 任何跨越张量的读写操作如果在2周期内接近，则视为强冲突，必须异色
+                if any(abs(ta - tb) < 2 for ta in times_a for tb in times_b):
+                    conflicts.append((name_a, name_b))
+
         coloring, _ = BalancedBankColorer.assign_banks(tensors, conflicts)
         allocator = MemoryAllocator(self.spec.params)
         for t in tensors: t.bank_id = coloring.get(t.name, 0)
@@ -235,18 +252,21 @@ class StandardPipelineRunner:
         pass
 
     def _verify_stage_b(self, dfg):
-        """静态 Bank 冲突检测。"""
-        # 如果在同一周期（逻辑上，后期会被 SMT 精确化）存在对同一 Bank 的多读或多写且地址不同，即为冲突。
-        # 此处阶段 B 尚未分配时序，暂时检测地址重合。
-        addr_usage = {} # (bank, addr) -> node_id
+        """动态时序 Bank 冲突断言检测。"""
+        # 断言所有映射到同一物理 Bank 的节点，其时钟距离必须 >= 2
+        bank_to_nodes = {}
         for node in dfg:
             b = node.metadata.get("bank_id")
-            a = node.metadata.get("addr")
-            if b is not None and a is not None:
-                if (b, a) in addr_usage:
-                    # 只有当生命周期重合时才冲突 (Stage B 简单认为所有 IO 节点生命周期都冲突)
-                    pass 
-                addr_usage[(b, a)] = node.trace_id
+            if b is not None and hasattr(node, "logic_cycle"):
+                bank_to_nodes.setdefault(b, []).append(node)
+                
+        for bid, nodes_in_bank in bank_to_nodes.items():
+            for i in range(len(nodes_in_bank)):
+                for j in range(i+1, len(nodes_in_bank)):
+                    n1, n2 = nodes_in_bank[i], nodes_in_bank[j]
+                    if abs(n1.logic_cycle - n2.logic_cycle) < 2:
+                        raise ValueError(f"Stage C/B Violation: Time Collision in Bank {bid} "
+                                         f"between {n1.trace_id}(T={n1.logic_cycle}) & {n2.trace_id}(T={n2.logic_cycle})")
 
     def _verify_stage_c(self, dfg):
         """时序延迟契约验证。"""
