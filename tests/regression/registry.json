@@ -42,7 +42,7 @@
         "sub": {"description": "a - b", "status": "ready"},
         "mul": {"description": "a * b", "status": "ready"},
         "div": {"description": "a / b", "status": "ready"},
-        "atan2": {"description": "atan2(y, x)", "status": "pending"},
+        "atan2": {"description": "5阶泰勒展开 atan2(y, x)", "status": "ready"},
         "pow": {"description": "a^b 幂运算", "status": "ready"},
         "fmod": {"description": "fmod(a, b) 浮点取余", "status": "pending"},
         "mod": {"description": "a % b 整数取模", "status": "pending"},

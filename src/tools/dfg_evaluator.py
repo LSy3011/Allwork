@@ -92,7 +92,7 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
                 else:
                     d = input_data.get(m_name, 0.0)
                     if isinstance(d, (list, np.ndarray)):
-                        val = float(d[0])
+                        val = float(np.asanyarray(d).ravel()[0])
                     else:
                         val = float(d)
                 val_map[nid] = val

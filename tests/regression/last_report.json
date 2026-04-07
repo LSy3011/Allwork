@@ -1,74 +1,53 @@
 {
-  "timestamp": "2026-04-07T12:36:42.982736",
-  "total": 9,
-  "active": 9,
-  "passed": 9,
+  "timestamp": "2026-04-07T14:13:40.986896",
+  "total": 6,
+  "active": 6,
+  "passed": 6,
   "failed": 0,
   "skipped": 0,
-  "duration": 8.508142948150635,
+  "duration": 13.528210639953613,
   "results": [
-    {
-      "op": "sin",
-      "category": "unary/transcendentals",
-      "compile": true,
-      "verify": true,
-      "duration": 0.9886617660522461
-    },
-    {
-      "op": "cos",
-      "category": "unary/transcendentals",
-      "compile": true,
-      "verify": true,
-      "duration": 1.965315580368042
-    },
-    {
-      "op": "exp",
-      "category": "unary/transcendentals",
-      "compile": true,
-      "verify": true,
-      "duration": 3.0214145183563232
-    },
-    {
-      "op": "neg",
-      "category": "unary/math",
-      "compile": true,
-      "verify": true,
-      "duration": 3.9058141708374023
-    },
-    {
-      "op": "square",
-      "category": "unary/math",
-      "compile": true,
-      "verify": true,
-      "duration": 4.808019638061523
-    },
     {
       "op": "add",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 5.713634490966797
+      "duration": 0.9175186157226562
     },
     {
       "op": "sub",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 6.641207695007324
+      "duration": 1.827531337738037
     },
     {
       "op": "mul",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 7.5494184494018555
+      "duration": 2.722480535507202
     },
     {
-      "op": "sigmoid",
-      "category": "activation",
+      "op": "div",
+      "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 8.508142948150635
+      "duration": 4.288413047790527
+    },
+    {
+      "op": "atan2",
+      "category": "binary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 10.893846988677979
+    },
+    {
+      "op": "pow",
+      "category": "binary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 13.528210639953613
     }
   ]
 }

@@ -49,6 +49,7 @@ class SMTSynthesizer:
 
     def solve(self, ops: List[MIROp], strategy: str = "balanced", **kwargs) -> Dict[str, int]:
         solver = z3.Optimize()
+        
         nodes_by_id = {op.trace_id: op for op in ops}
         t = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in ops}
         
@@ -109,7 +110,7 @@ class SMTSynthesizer:
         SynthesisAxioms.add_rtovr_crossbar_axiom(solver, ops, t, self.hw_spec)
         SynthesisAxioms.add_bank_conflict_axiom(solver, ops, t)
         SynthesisAxioms.add_spill_reload_mutex_axiom(solver, ops, t)
-        SynthesisAxioms.add_alu_pipeline_axiom(solver, ops, t, self.hw_spec)
+        SynthesisAxioms.add_alu_pipeline_axiom(solver, ops, t, iq_vars, self.hw_spec)
         SynthesisAxioms.add_write_port_mutex_axiom(solver, ops, t, iq_vars)
 
         # 5. 影子绑定与同步
@@ -118,10 +119,14 @@ class SMTSynthesizer:
                          if d in nodes_by_id and nodes_by_id[d].op_type == "RTOVR"]
             
             if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
-                for rd in rtovr_deps:
-                    # 🛸 [INDUSTRIAL ALIGNMENT] 强制数据-指令对位
-                    # 修改：从 == 改为 >=，物理松绑允许写操作在时间轴上自由平铺
-                    solver.add(t[op.trace_id] >= t[rd] + 1)
+                for idx, rd in enumerate(rtovr_deps):
+                    # 🛸 [V2.1 物理对位] T+1 协议：
+                    # 第一个操作数严格对位 (== 1)，确保 ALU 发射时数据已锁存
+                    # 后续操作数允许提前到达 (>= 1)，DVR 输入锁存器会持续保持
+                    if idx == 0:
+                        solver.add(t[op.trace_id] == t[rd] + 1)
+                    else:
+                        solver.add(t[op.trace_id] >= t[rd] + 1)
                     
                     # 🛸 物理插槽对齐 (Crucial for UR_WRITE)
                     # 如果是 UR_WRITE，必须强制将其前驱 RTOVR 的 Slot 设为与其物理 IQ 对应的位置
@@ -137,6 +142,7 @@ class SMTSynthesizer:
                 # 🛰️ 物理松绑：不再强制所有操作数同步到达，硬件锁存器会处理异步。
                 pass
 
+        # 5. 优化目标: 最小化总周期
         SynthesisAxioms.add_objective(solver, t)
 
         if solver.check() == z3.sat:

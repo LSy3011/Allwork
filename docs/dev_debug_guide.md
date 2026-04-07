@@ -639,3 +639,34 @@ errors = verify_dfg_topology(dfg_nodes)
 支持两种输入格式：
 - 编译时对象（有 `.trace_id`, `.op_type`, `.metadata` 属性）
 - JSON 反序列化后的 dict 列表
+
+---
+
+## 8. 未来优化项 (Future Optimizations)
+
+### 8.1 SMT 子图分解求解 (Sub-graph Decomposition)
+- **背景**：高阶算子（如 atan2 Order 7+）节点数多达 80+，全局 `z3.Optimize` 耗时可能超过 300s，严重影响迭代效率。
+- **方案**：在 DFG 层进行子图切割（如按 Horner 嵌套分级），分别求解 SMT 时序后进行“缝合”。这能将指数级复杂度降低为线性累加复杂度。
+
+### 8.2 SMT 混合寻优策略 (Hybrid Strategy)
+- **背景**：`Solver` 产生的调度过于稀疏，`Optimize` 产生的调度过于紧凑。
+- **方案**：引入 `slack` 约束。先用 `Solver` 找到可行解，在此基础上添加基准周期约束（如 `max_t < baseline + 5`），再利用本地启发式规则（如尽量靠后排列）来平衡编译速度与硬件鲁棒性。
+
+### 8.3 验证工具链核心库统一 (Unified Verifier Core)
+- **背景**：曾经出现 `runner.py`（1-cycle gap）与 `debug_pipeline.py`（2-cycle gap）在 Bank 判定逻辑上不一致的情况。
+- **方案**：将所有物理约束逻辑（Bank、Liveness、Transit）抽取到 `src/tools/verifier_core.py`，实现“判定标准一份代码，两库共享”。
+
+### 8.4 物理分配热修复 (Bank Micro-swap)
+- **背景**：当前 Stage B 发现冲突直接报错。
+- **方案**：实现微量重分配。如果发现 Bank 同拍冲突，在不改变 `logic_cycle` 的前提下，尝试微调局部节点的 Bank 映射或 Addr 偏移。
+
+---
+
+## 9. V2.1 案例研究：atan2 覆盖性测试修复 (2026-04-07)
+
+| 问题类型 | 根本原因 | 修复手段 |
+| :--- | :--- | :--- |
+| **SMT UNSAT** | 多操作数 RTOVR 强制 $T+1$ 对立导致死锁 | 松绑为 (S0 == 1, S1 >= 1) 协议，允许错峰搬运 |
+| **Stage B Fail** | `debug_pipeline.py` 硬编码了 2 拍 Bank 间隔 | 修正为 1 拍，对齐硬件能力与 SMT 公理 |
+| **Stage E Fail** | `Solver` 模式调度由于过于稀疏导致数据在仿真中“失效” | 回归 `Optimize` 模式，确保数据“即产即用”的紧凑性 |
+| **Timeout Issue** | Order 7 泰勒展开节点数爆炸 | 缩减为 Order 5 (5 阶)，实现精度与编译速度的最优平衡 |

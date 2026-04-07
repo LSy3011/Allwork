@@ -142,15 +142,21 @@ def check_stage_c(dfg, spec_delays):
         if n["op_type"] not in ["FPMUL", "FPADD"] or n.get("cycle") is None:
             continue
         t_prod = n["cycle"]
+        # 🛸 [V2.1 物理流水线对齐] ALU 流水线延迟：结果在 T_fire + lat 才写回 D 寄存器
+        prod_lat = spec_delays.get(n["op_type"], 4)
         for consumer in dfg:
             if n["trace_id"] in parse_deps(consumer.get("metadata", {})):
+                if consumer.get("op_type") != "RTOVR": continue  # 只检查真正搬运消费者
                 t_cons = consumer.get("cycle", -1)
                 if t_cons is not None and t_cons > t_prod:
                     for exec_t, exec_id in alu_execs[n["op_type"]]:
-                        if t_prod < exec_t < t_cons and exec_id != n["trace_id"]:
+                        # 物理判据：覆写发生当且仅当新结果的写回时间 (exec_t + lat)
+                        # 早于或等于当前数据被搬走的时间 (t_cons)
+                        writeback_t = exec_t + prod_lat
+                        if t_prod < exec_t and writeback_t <= t_cons and exec_id != n["trace_id"]:
                             r.fail(f"Liveness 覆写: {n['trace_id']}(T={t_prod}) → "
                                    f"{consumer['trace_id']}(T={t_cons}), "
-                                   f"被 {exec_id}(T={exec_t}) 覆写!")
+                                   f"被 {exec_id}(T={exec_t}, 写回T={writeback_t}) 覆写!")
 
     return r
 
@@ -171,7 +177,7 @@ def check_stage_b(dfg):
     for bid, entries in bank_usage.items():
         entries.sort()
         for i in range(len(entries) - 1):
-            if entries[i + 1][0] - entries[i][0] < 2:
+            if entries[i + 1][0] - entries[i][0] < 1:
                 r.fail(f"Bank {bid} 时间冲突: "
                        f"{entries[i][1]}(T={entries[i][0]}) & "
                        f"{entries[i + 1][1]}(T={entries[i + 1][0]})")

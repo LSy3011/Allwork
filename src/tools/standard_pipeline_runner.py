@@ -339,9 +339,17 @@ class StandardPipelineRunner:
                 if dep_id not in nodes: continue
                 dep = nodes[dep_id]
                 expected_latency = norm_delays.get(dep.op_type.upper(), 1)
-                if node.logic_cycle < dep.logic_cycle + expected_latency:
-                    if dep.op_type == "RTOVR" and node.logic_cycle >= dep.logic_cycle + 1: continue
-                    raise ValueError(f"Stage C Violation: {node.trace_id}(T={node.logic_cycle}) < "
+                # 🛸 [V2.1 物理规约]
+                # RTOVR 作为生产方供给 ALU/WRITE 时，数据必须在 ALU 发射前至少 1 拍到达
+                # (第一操作数严格 ==1, 后续操作数 >=1, 但验证层统一放宽为 >=1)
+                if dep.op_type == "RTOVR" and node.op_type in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
+                    if node.logic_cycle < dep.logic_cycle + 1:
+                        raise ValueError(f"Stage C Violation (T+1 Protocol): {node.trace_id}(T={node.logic_cycle}) "
+                                         f"must be >= {dep.trace_id}(T={dep.logic_cycle}) + 1")
+                
+                # 规则 2: 其他依赖只需满足结果就绪 (>= latency)
+                elif node.logic_cycle < dep.logic_cycle + expected_latency:
+                    raise ValueError(f"Stage C Violation (RAW): {node.trace_id}(T={node.logic_cycle}) < "
                                    f"{dep.trace_id}(T={dep.logic_cycle}) + latency({expected_latency})")
 
         # 2. Liveness Error Detection
