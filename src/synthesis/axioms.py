@@ -105,6 +105,25 @@ class SynthesisAxioms:
                 solver.add(z3.Implies(iq_vars[op_A.trace_id] == iq_vars[op_B.trace_id], z3.Or(cond_B_after_A, cond_A_after_B)))
 
     @staticmethod
+    def add_alu_liveness_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef], iq_vars: Dict[str, z3.ArithRef]):
+        """
+        [工业级架构对齐] ALU 防复写公理：ALU 的执行结果必须等待所有下游消费者(RTOVR)读取完毕后，才能执行下一次计算。
+        """
+        alu_ops = [o for o in ops if o.op_type in ["FPMUL", "FPADD"]]
+        for i in range(len(alu_ops)):
+            for j in range(i + 1, len(alu_ops)):
+                op_A, op_B = alu_ops[i], alu_ops[j]
+                if op_A.op_type != op_B.op_type: continue
+
+                consumers_A = [o for o in ops if op_A.trace_id in o.metadata.get("depends_on", [])]
+                consumers_B = [o for o in ops if op_B.trace_id in o.metadata.get("depends_on", [])]
+                
+                cond_B_after_A = z3.And([t_vars[op_B.trace_id] > t_vars[c.trace_id] for c in consumers_A]) if consumers_A else t_vars[op_B.trace_id] > t_vars[op_A.trace_id]
+                cond_A_after_B = z3.And([t_vars[op_A.trace_id] > t_vars[c.trace_id] for c in consumers_B]) if consumers_B else t_vars[op_A.trace_id] > t_vars[op_B.trace_id]
+                
+                solver.add(z3.Implies(iq_vars[op_A.trace_id] == iq_vars[op_B.trace_id], z3.Or(cond_B_after_A, cond_A_after_B)))
+
+    @staticmethod
     def add_bank_conflict_axiom(solver, ops: List[MIROp], t_vars: Dict[str, z3.ArithRef]):
         """
         Bank 冲突公理：已切换至 trace_id。

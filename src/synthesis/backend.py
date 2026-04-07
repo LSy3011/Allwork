@@ -107,6 +107,7 @@ class SMTSynthesizer:
         SynthesisAxioms.add_rtovr_crossbar_axiom(solver, ops, t, self.hw_spec)
         SynthesisAxioms.add_bank_conflict_axiom(solver, ops, t)
         SynthesisAxioms.add_liveness_flush_axiom(solver, ops, t, iq_vars)
+        SynthesisAxioms.add_alu_liveness_axiom(solver, ops, t, iq_vars)
 
         # 5. 影子绑定与同步
         for op in ops:

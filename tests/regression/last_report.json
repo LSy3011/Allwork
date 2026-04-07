@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-04-07T11:36:57.537576",
+  "total": 1,
+  "active": 1,
+  "passed": 1,
+  "failed": 0,
+  "skipped": 0,
+  "duration": 0.9934036731719971,
+  "results": [
+    {
+      "op": "sin",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 0.9934036731719971
+    }
+  ]
+}

@@ -68,6 +68,7 @@ class FPAddUnit(Component):
         # 核心调试日志：追踪每一拍输入到加法器的 128-bit 矢量 HEX
         if valid_trigger and (s1_v or s0_v):
              self.logger.info(f"Cycle {cycle} Add-Trace: S0={s0_in:032x}, S1={s1_in:032x}")
+             print(f">>> [ADD-EXEC] Cyc:{cycle} S0:{s0_in:032x} S1:{s1_in:032x}")
         
         if s0_v: 
             self.regs_s0 = s0_in

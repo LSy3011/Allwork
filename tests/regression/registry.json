@@ -1,0 +1,117 @@
+{
+  "_comment": "AIACC 算子回归注册表 V2.0 — 按类别组织，路径自动推导",
+  "_convention": {
+    "test_script": "tests/operators/{category}/{op_name}/test_{op_name}.py",
+    "build_dir": "build/operators/{category}/{op_name}/",
+    "说明": "遵循约定 > 配置，只需注册算子名称，路径自动推导"
+  },
+  "build_root": "build/operators",
+  "categories": {
+    "unary/transcendentals": {
+      "operators": {
+        "sin": {"description": "9阶泰勒展开 sin(x)", "status": "ready"},
+        "cos": {"description": "cos(x) 泰勒展开", "status": "pending"},
+        "tan": {"description": "tan(x)", "status": "pending"},
+        "exp": {"description": "exp(x) 指数函数", "status": "pending"},
+        "log": {"description": "log(x) 自然对数", "status": "pending"},
+        "sqrt": {"description": "sqrt(x) 平方根", "status": "pending"},
+        "rsqrt": {"description": "rsqrt(x) 逆平方根", "status": "pending"},
+        "asin": {"description": "arcsin(x)", "status": "pending"},
+        "acos": {"description": "arccos(x)", "status": "pending"},
+        "atan": {"description": "arctan(x)", "status": "pending"},
+        "sinh": {"description": "sinh(x) 双曲正弦", "status": "pending"},
+        "cosh": {"description": "cosh(x) 双曲余弦", "status": "pending"},
+        "tanh": {"description": "tanh(x) 双曲正切", "status": "pending"}
+      }
+    },
+    "unary/math": {
+      "operators": {
+        "abs": {"description": "abs(x) 绝对值", "status": "pending"},
+        "neg": {"description": "neg(x) 取反", "status": "pending"},
+        "ceil": {"description": "ceil(x) 向上取整", "status": "pending"},
+        "floor": {"description": "floor(x) 向下取整", "status": "pending"},
+        "round": {"description": "round(x) 四舍五入", "status": "pending"},
+        "sign": {"description": "sign(x) 符号函数", "status": "pending"},
+        "square": {"description": "x^2 平方", "status": "pending"},
+        "reciprocal": {"description": "1/x 倒数", "status": "pending"}
+      }
+    },
+    "binary/math": {
+      "operators": {
+        "add": {"description": "a + b", "status": "pending"},
+        "sub": {"description": "a - b", "status": "pending"},
+        "mul": {"description": "a * b", "status": "pending"},
+        "div": {"description": "a / b", "status": "pending"},
+        "atan2": {"description": "atan2(y, x)", "status": "pending"},
+        "pow": {"description": "a^b 幂运算", "status": "pending"},
+        "fmod": {"description": "fmod(a, b) 浮点取余", "status": "pending"},
+        "mod": {"description": "a % b 整数取模", "status": "pending"},
+        "rem": {"description": "remainder(a, b)", "status": "pending"}
+      }
+    },
+    "binary/logical": {
+      "operators": {
+        "gt": {"description": "a > b", "status": "pending"},
+        "ge": {"description": "a >= b", "status": "pending"},
+        "lt": {"description": "a < b", "status": "pending"},
+        "le": {"description": "a <= b", "status": "pending"},
+        "eq": {"description": "a == b", "status": "pending"},
+        "ne": {"description": "a != b", "status": "pending"},
+        "and": {"description": "a & b", "status": "pending"},
+        "or": {"description": "a | b", "status": "pending"},
+        "xor": {"description": "a ^ b", "status": "pending"},
+        "not": {"description": "!a 逻辑非", "status": "pending"}
+      }
+    },
+    "activation": {
+      "operators": {
+        "relu": {"description": "ReLU 激活", "status": "pending"},
+        "gelu": {"description": "GELU 激活", "status": "pending"},
+        "sigmoid": {"description": "Sigmoid 激活", "status": "pending"},
+        "tanh": {"description": "Tanh 激活", "status": "pending"},
+        "swish": {"description": "Swish/SiLU 激活", "status": "pending"},
+        "selu": {"description": "SELU 激活", "status": "pending"},
+        "elu": {"description": "ELU 激活", "status": "pending"},
+        "leaky_relu": {"description": "Leaky ReLU 激活", "status": "pending"}
+      }
+    },
+    "normalization": {
+      "operators": {
+        "layernorm": {"description": "Layer Normalization", "status": "pending"},
+        "batchnorm": {"description": "Batch Normalization", "status": "pending"},
+        "rmsnorm": {"description": "RMS Normalization", "status": "pending"},
+        "groupnorm": {"description": "Group Normalization", "status": "pending"},
+        "instancenorm": {"description": "Instance Normalization", "status": "pending"}
+      }
+    },
+    "reduction": {
+      "operators": {
+        "sum": {"description": "reduce_sum", "status": "pending"},
+        "mean": {"description": "reduce_mean", "status": "pending"},
+        "max": {"description": "reduce_max", "status": "pending"},
+        "min": {"description": "reduce_min", "status": "pending"},
+        "prod": {"description": "reduce_prod", "status": "pending"},
+        "argmax": {"description": "argmax", "status": "pending"},
+        "argmin": {"description": "argmin", "status": "pending"},
+        "all": {"description": "all (logical)", "status": "pending"},
+        "any": {"description": "any (logical)", "status": "pending"}
+      }
+    },
+    "tensor": {
+      "operators": {
+        "transpose": {"description": "矩阵转置", "status": "pending"},
+        "reshape": {"description": "形状变换", "status": "pending"},
+        "concat": {"description": "张量拼接", "status": "pending"},
+        "slice": {"description": "切片", "status": "pending"},
+        "gather": {"description": "索引聚集", "status": "pending"},
+        "scatter": {"description": "索引散射", "status": "pending"},
+        "pad": {"description": "填充", "status": "pending"},
+        "squeeze": {"description": "压缩维度", "status": "pending"},
+        "unsqueeze": {"description": "扩展维度", "status": "pending"},
+        "permute": {"description": "维度重排", "status": "pending"},
+        "split": {"description": "张量拆分", "status": "pending"},
+        "stack": {"description": "张量堆叠", "status": "pending"}
+      }
+    }
+  }
+}

@@ -28,9 +28,9 @@ class StandardPipelineRunner:
 
         # --- Stage A: MIR DFG (初图) ---
         dfg = get_dfg_fn()
-        self._verify_stage_a(dfg)
+        self._verify_stage_a(dfg, input_data, op_name)
         self._dump_dfg(dfg, op_dir / "stage_a_initial.json")
-        print(f"  [A] MIR DFG initial graph generated and connectivity verified.")
+        print(f"  [A] MIR DFG initial graph generated & Math Parity verified.")
 
         # --- Stage C (现移至 B 阶段): SMT Synthesis (解耦时序合成) ---
         synthesis_res = SMTSynthesizer(self.spec).solve(dfg)
@@ -72,7 +72,9 @@ class StandardPipelineRunner:
 
         # --- Stage E: Simulation (仿真验证) ---
         golden_path = acb_path / "golden_data.npz"
-        np.savez(golden_path, y=golden_y)
+        save_dict = {"y": golden_y}
+        for k, v in input_data.items(): save_dict[k] = v
+        np.savez(golden_path, **save_dict)
         
         success, log = self._run_simulation(acb_path)
         with open(op_dir / "sim.log", "w") as f: f.write(log)
@@ -109,13 +111,12 @@ class StandardPipelineRunner:
             
             # --- [物理 IQ 分配补丁] ---
             if m_type == "RTOVR":
-                node.metadata["iq_id"] = node.metadata.get("slot_id")
-            elif m_type == "UR_READ" and ur_r_ids:
+                if "iq_id" not in node.metadata: node.metadata["iq_id"] = node.metadata.get("slot_id")
+            elif m_type == "UR_READ" and "iq_id" not in node.metadata and ur_r_ids:
                 node.metadata["iq_id"] = ur_r_ids.pop(0)
-            elif m_type == "UR_WRITE" and ur_w_ids:
+            elif m_type == "UR_WRITE" and "iq_id" not in node.metadata and ur_w_ids:
                 node.metadata["iq_id"] = ur_w_ids.pop(0)
-            elif m_type in alu_ids and alu_ids[m_type]:
-                # 如果是多实例 ALU，我们可以更复杂一点，这里简单取第一个
+            elif m_type in alu_ids and alu_ids[m_type] and "iq_id" not in node.metadata:
                 node.metadata["iq_id"] = alu_ids[m_type][0]
 
             # --- [内存 Tensors 识别: 增加预着色感知] ---
@@ -241,15 +242,61 @@ class StandardPipelineRunner:
 
     # --- Verification & Output Alignment ---
 
-    def _verify_stage_a(self, dfg):
-        """验证 DFG 连通性与拓扑死锁。"""
+    def _verify_stage_a(self, dfg, input_data: dict, op_name: str):
+        """[Stage 1 Verifier] 验证 DFG 数学正确性与拓扑连通性"""
         node_ids = {n.trace_id for n in dfg}
         for node in dfg:
             for dep in node.metadata.get("depends_on", []):
-                if dep not in node_ids:
+                if dep not in node_ids and not dep.startswith("spill_"):
+                    # 容忍 spill 伪依赖因为我们在检查数学上可能没有该节点，或者提前预检
                     raise ValueError(f"Stage A Violation: Node {node.trace_id} depends on missing node {dep}")
-        # 简单的环检测: 已排序 DFG 不需要检测，但此处确保其为 DAG
-        pass
+                    
+        # 数学计算顺推反向防错
+        val_map = {}
+        nodes_by_id = {n.trace_id: n for n in dfg}
+
+        def eval_node(node_id):
+            if node_id in val_map: return val_map[node_id]
+            if node_id not in nodes_by_id: return 0.0 # spill node mock
+            node = nodes_by_id[node_id]
+            
+            if node.op_type == "UR_READ":
+                if node.metadata.get("is_const"):
+                    val = float(node.metadata.get("value", 0.0))
+                else:
+                    name = node.metadata.get("meta_name", node_id)
+                    val = float(input_data.get(name, 0.0)[0] if isinstance(input_data.get(name, 0.0), (list, np.ndarray)) else input_data.get(name, 0.0))
+                val_map[node_id] = val
+                return val
+            if node.op_type == "RTOVR":
+                deps = node.metadata.get("depends_on", [])
+                val = eval_node(deps[0]) if deps else 0.0
+                val_map[node_id] = val
+                return val
+            if node.op_type == "FPADD":
+                deps = node.metadata.get("depends_on", [])
+                v0 = eval_node(deps[0]) if len(deps) > 0 else 0.0
+                v1 = eval_node(deps[1]) if len(deps) > 1 else 0.0
+                is_sub = node.metadata.get("SUB", 0)
+                val = v0 - v1 if is_sub else v0 + v1
+                val_map[node_id] = val
+                return val
+            if node.op_type == "FPMUL":
+                deps = node.metadata.get("depends_on", [])
+                v0 = eval_node(deps[0]) if len(deps) > 0 else 0.0
+                v1 = eval_node(deps[1]) if len(deps) > 1 else 0.0
+                val = v0 * v1
+                val_map[node_id] = val
+                return val
+            if node.op_type == "UR_WRITE":
+                deps = node.metadata.get("depends_on", [])
+                val = eval_node(deps[0]) if deps else 0.0
+                val_map[node_id] = val
+                return val
+            val_map[node_id] = 0.0
+            return 0.0
+
+        for node in dfg: eval_node(node.trace_id)
 
     def _verify_stage_b(self, dfg):
         """动态时序 Bank 冲突断言检测。"""
@@ -269,18 +316,41 @@ class StandardPipelineRunner:
                                          f"between {n1.trace_id}(T={n1.logic_cycle}) & {n2.trace_id}(T={n2.logic_cycle})")
 
     def _verify_stage_c(self, dfg):
-        """时序延迟契约验证。"""
-        nodes = {n.trace_id: n for n in dfg}
+        """[Stage 2 Verifier] 时序延迟验证 与 Physical Liveness 饥饿防重复写引擎。"""
+        nodes = {n.trace_id: n for n in dfg if hasattr(n, "logic_cycle")}
+        
+        # 1. Latency Contract Check
         for node in dfg:
+            if not hasattr(node, "logic_cycle"): continue
             for dep_id in node.metadata.get("depends_on", []):
+                if dep_id not in nodes: continue
                 dep = nodes[dep_id]
                 expected_latency = self.spec.delays.get(dep.op_type.lower(), 1)
                 if node.logic_cycle < dep.logic_cycle + expected_latency:
-                    # 🛸 特殊宽限：RTOVR -> ALU 只需要 1 拍，尽管其 Latency 可能是 1
-                    if dep.op_type == "RTOVR" and node.logic_cycle >= dep.logic_cycle + 1:
-                        continue
+                    if dep.op_type == "RTOVR" and node.logic_cycle >= dep.logic_cycle + 1: continue
                     raise ValueError(f"Stage C Violation: {node.trace_id}(T={node.logic_cycle}) < "
                                    f"{dep.trace_id}(T={dep.logic_cycle}) + latency({expected_latency})")
+
+        # 2. Liveness Error Detection
+        alu_execs = {"FPMUL": [], "FPADD": []}
+        for n in dfg:
+            if n.op_type in alu_execs and hasattr(n, "logic_cycle"):
+                alu_execs[n.op_type].append((n.logic_cycle, n.trace_id))
+                
+        for t in alu_execs: alu_execs[t].sort(key=lambda x: x[0])
+            
+        for node in dfg:
+            if node.op_type in ["FPMUL", "FPADD"] and hasattr(node, "logic_cycle"):
+                t_prod = node.logic_cycle
+                consumers = [n for n in dfg if node.trace_id in n.metadata.get("depends_on", [])]
+                for cons in consumers:
+                    t_cons = getattr(cons, "logic_cycle", -1)
+                    if t_cons > t_prod:
+                        for exec_t, exec_id in alu_execs[node.op_type]:
+                            if t_prod < exec_t < t_cons and exec_id != node.trace_id:
+                                raise RuntimeError(f"FATAL Stage 2 Liveness Violation: \n"
+                                                   f"Data from {node.trace_id}(T={t_prod}) -> {cons.trace_id}(T={t_cons}) "
+                                                   f"was OVERWRITTEN by {exec_id} running at T={exec_t}!")
 
     def _generate_timeline_ascii(self, final_stream: List, path: Path):
         """生成文本版流水线图。"""

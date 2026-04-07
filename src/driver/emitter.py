@@ -41,13 +41,19 @@ class LIRPacker:
                     idx = int(iq_name.replace("ur-r", ""))
                     node_to_src_id[(op.trace_id, "D")] = PORT_OFFSET_UR_RDATA + idx
                 else:
-                    # ALU 路由直连 (同步 D/ST 端子)
+                    # ALU 路由直连 (同步 D/ST 端子) - 完全物理对接 rtovr_config.yaml
                     d_id, st_id = -1, -1
                     m_type = op.op_type.upper()
-                    if m_type == "FPMUL": d_id = PORT_ID_FPMUL_D
-                    elif m_type == "FPADD": d_id, st_id = PORT_ID_FPADD_D, 5 
-                    elif m_type == "INTADD": d_id, st_id = PORT_ID_INTADD_D0, 2
-                    elif m_type == "LOGIC": d_id = 10 
+                    
+                    d_map = {
+                        "INTADD": 0, "FPMUL": 3, "FPADD": 4, "LOGIC": 10,
+                        "INT8TOFP16": 14, "FP16MUL": 18,
+                        "FP32ADDTREE5TO1": 26, "FP32ADDTREE8TO1": 28, "SHIFTDN": 29
+                    }
+                    st_map = { "INTADD": 2, "FPADD": 5 }
+                    
+                    if m_type in d_map: d_id = d_map[m_type]
+                    if m_type in st_map: st_id = st_map[m_type]
                     
                     if d_id != -1: node_to_src_id[(op.trace_id, "D")] = d_id
                     if st_id != -1: node_to_src_id[(op.trace_id, "ST")] = st_id

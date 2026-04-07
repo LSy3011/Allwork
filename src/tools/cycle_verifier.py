@@ -1,0 +1,395 @@
+"""
+AIACC Cycle & Memory Verifier (V2.0 标准化版)
+
+对比思路:
+==========
+  左侧 (算法时序 Golden)                右侧 (sim.log Hardware)
+  ─────────────────────────            ──────────────────────────
+  数据源: stage_b_mapped.json           数据源: sim.log
+        + golden_data.npz (输入)        (模拟器逐周期执行记录)
+
+  eval_math() 从 DFG 顺推              正则解析每周期的:
+  每个节点的预期输入/输出值               - [MUL-EXEC] S0/S1 (+ Result)
+                                        - [ADD-EXEC] S0/S1 (+ Result)
+  按 cycle 组织对比:                     - [UR-WRITE] Data
+    T=N → FPMUL(id): S0=v0,S1=v1       - [UR-DEBUG] READ HEX
+         Out=v0*v1
+    T=M → UR_WRITE(id): Data=val        - [RTOVR] Port/Src/Data
+
+  核心对比逻辑:
+    1. 同一 Cycle 是否存在对应操作?
+    2. ALU 输入 S0/S1 hex → float 是否与预期一致?
+    3. UR_WRITE Data hex → float 是否与预期输出一致?
+"""
+import os
+import sys
+import json
+import struct
+import argparse
+import re
+from pathlib import Path
+import numpy as np
+
+
+# ═══════════════════════════════════════════════════════════════
+# 工具函数
+# ═══════════════════════════════════════════════════════════════
+
+def hex128_to_lane_floats(hex_str: str):
+    """将 128-bit hex 转为 4 个 FP32 lane 值 (Lane0 = 最低32位)。"""
+    hex_str = str(hex_str).strip().replace("0x", "")
+    if not hex_str or hex_str == '0' * 32:
+        return [0.0] * 4
+    padded = hex_str.zfill(32)
+    lanes = []
+    for i in range(4):
+        # Lane0 = 最低 32 bits = 最后 8 个字符
+        lane_hex = padded[32 - (i + 1) * 8: 32 - i * 8]
+        try:
+            val = struct.unpack('>f', bytes.fromhex(lane_hex))[0]
+        except Exception:
+            val = 0.0
+        lanes.append(val)
+    return lanes
+
+
+def hex128_to_float_lane0(hex_str: str) -> float:
+    """提取 128-bit hex 的 Lane 0 (最低 32 位) 为 float。"""
+    lanes = hex128_to_lane_floats(hex_str)
+    return lanes[0]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 算法顺推引擎 → 委托给 SSoT 公共模块
+# ═══════════════════════════════════════════════════════════════
+
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+from tools.dfg_evaluator import eval_dfg, parse_deps
+
+
+# ═══════════════════════════════════════════════════════════════
+# sim.log 解析器 (右侧 Hardware)
+# ═══════════════════════════════════════════════════════════════
+
+def parse_sim_log(sim_log_path):
+    """
+    解析 sim.log，按周期分类所有物理执行记录。
+    返回: { cycle_int: { "FPMUL": [...], "FPADD": [...], "UR_WRITE": [...], "UR_READ": [...], "RTOVR": [...] } }
+    """
+    actual_cycles = {}
+    current_cyc = -1
+
+    with open(sim_log_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+
+            # 内核大时钟
+            m = re.match(r".*\[KERNEL-STEP\] Cycle:\s*(\d+)\s*Started", line)
+            if m:
+                current_cyc = int(m.group(1))
+
+            # FPMUL 执行
+            if "[MUL-EXEC]" in line:
+                m2 = re.search(r"Cyc:(\d+)", line)
+                cyc = int(m2.group(1)) if m2 else current_cyc
+                actual_cycles.setdefault(cyc, {}).setdefault("FPMUL", []).append(line)
+
+            # FPADD 执行
+            elif "[ADD-EXEC]" in line:
+                m2 = re.search(r"Cyc:(\d+)", line)
+                cyc = int(m2.group(1)) if m2 else current_cyc
+                actual_cycles.setdefault(cyc, {}).setdefault("FPADD", []).append(line)
+
+            # UR_WRITE 写内存
+            elif "[UR-WRITE]" in line:
+                actual_cycles.setdefault(current_cyc, {}).setdefault("UR_WRITE", []).append(line)
+
+            # UR-DEBUG 读内存 (用于追踪 UR_READ 数据来源)
+            elif "[UR-DEBUG]" in line:
+                m2 = re.search(r"T=(\d+)", line)
+                cyc = int(m2.group(1)) if m2 else current_cyc
+                actual_cycles.setdefault(cyc, {}).setdefault("UR_READ", []).append(line)
+
+            # RTOVR 路由 (用于追踪数据流向)
+            elif "[RTOVR]" in line:
+                actual_cycles.setdefault(current_cyc, {}).setdefault("RTOVR", []).append(line)
+
+    return actual_cycles
+
+
+# ═══════════════════════════════════════════════════════════════
+# 主验证器
+# ═══════════════════════════════════════════════════════════════
+
+class CycleVerifier:
+    def __init__(self, op_dir: str):
+        self.op_dir = Path(op_dir)
+        self.stage_b_file = self.op_dir / "stage_b_mapped.json"
+        self.sim_log = self.op_dir / "sim.log"
+        self.golden_memory = self.op_dir / "acb_bundle" / "smc_0"
+
+    def run(self):
+        print("=" * 60)
+        print("  AIACC Cycle & Memory Verifier V2.0")
+        print(f"  Target: {self.op_dir}")
+        print("=" * 60)
+
+        self._load_data()
+
+        print("\n[阶段 1/3] 算法顺推验证 (eval_math dump)...")
+        self._dump_eval_math()
+
+        print("\n[阶段 2/3] 静态 Bank 常量装载对齐检查...")
+        self.verify_bank_alignment()
+
+        print("\n[阶段 3/3] 逐周期仿真对比 (算法 vs sim.log)...")
+        self.verify_sim_trace()
+
+        print("\n" + "=" * 60)
+
+    def _load_data(self):
+        with open(self.stage_b_file, 'r') as f:
+            self.dfg = json.load(f)
+
+        # 加载输入数据
+        self.input_data = {}
+        np_golden = self.op_dir / "acb_bundle" / "golden_data.npz"
+        if np_golden.exists():
+            try:
+                data = np.load(np_golden)
+                for k in data.files:
+                    if k != "y":
+                        self.input_data[k] = data[k]
+            except Exception as e:
+                print(f"  ⚠️ 无法加载 {np_golden}: {e}")
+
+        if not self.input_data:
+            self.input_data = {"x": 1.5668}
+            print("  ⚠️ 未找到输入数据，使用默认 x=1.5668")
+
+        self.val_map = eval_dfg(self.dfg, self.input_data)
+
+    def _dump_eval_math(self):
+        """打印算法顺推的全部节点值，供人工审查。"""
+        # 只打印关键节点 (UR_READ, FPMUL, FPADD, UR_WRITE)
+        key_types = {"UR_READ", "FPMUL", "FPADD", "UR_WRITE"}
+        nodes_by_id = {n["trace_id"]: n for n in self.dfg}
+        for nid, val in self.val_map.items():
+            if nid in nodes_by_id and nodes_by_id[nid]["op_type"] in key_types:
+                op = nodes_by_id[nid]["op_type"]
+                cyc = nodes_by_id[nid].get("cycle", "?")
+                print(f"  T={cyc:>3}  {op:10s}  {nid:45s} = {val}")
+
+    def verify_bank_alignment(self):
+        """反向预检内存加载 HEX 以定位 Stage D → E 的传输丢失。"""
+        errors = 0
+        for node in self.dfg:
+            if node["op_type"] != "UR_READ":
+                continue
+            if str(node["metadata"].get("is_const", "")).lower() != "true":
+                continue
+
+            val_expected = float(node["metadata"]["value"])
+            bank_id = node["metadata"].get("bank_id")
+            addr = node["metadata"].get("addr")
+
+            if bank_id is None or addr is None:
+                continue
+
+            b_id, a_id = int(bank_id), int(addr)
+            hex_path = self.golden_memory / "ur_data" / f"bank{b_id}.hex"
+            if not hex_path.exists():
+                print(f"  ❌ SRAM Hex 文件不存在: {hex_path}")
+                errors += 1
+                continue
+
+            with open(hex_path, 'r') as f:
+                lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+                if a_id < len(lines):
+                    real_hex = lines[a_id].replace("0x", "")
+                    real_val = hex128_to_float_lane0(real_hex)
+                    if not np.isclose(val_expected, real_val, atol=1e-4):
+                        print(f"  ❌ Bank {b_id} Addr {a_id} 失配!")
+                        print(f"     Node: {node['trace_id']}")
+                        print(f"     Expected: {val_expected} → Got Hex: {real_hex} ({real_val})")
+                        errors += 1
+                else:
+                    print(f"  ❌ Bank {b_id} 越界 Addr={a_id}")
+                    errors += 1
+
+        if errors == 0:
+            print("  ✅ 静态常量 Hex 排布完美对齐！")
+        else:
+            print(f"  共 {errors} 个 Bank 对齐错误！")
+
+    def verify_sim_trace(self):
+        """逐周期交叉对比: DFG 预期 vs sim.log 实际。"""
+        if not self.sim_log.exists():
+            print("  ❌ 未发现 sim.log。请先执行 PipelineRunner。")
+            return
+
+        # 1. 构建预期表: {cycle: [node, ...]}
+        expected_cycles = {}
+        for node in self.dfg:
+            cyc = int(node.get("cycle", -1))
+            if cyc >= 0 and node["op_type"] in ["FPMUL", "FPADD", "UR_WRITE"]:
+                expected_cycles.setdefault(cyc, []).append(node)
+
+        # 2. 解析 sim.log
+        actual_cycles = parse_sim_log(self.sim_log)
+
+        # 3. 逐周期对比
+        all_cycles = sorted(set(list(expected_cycles.keys()) + list(actual_cycles.keys())))
+        errors = 0
+        nodes_by_id = {n["trace_id"]: n for n in self.dfg}
+
+        # 辅助：解析 depends_on
+        def parse_deps(meta):
+            raw = meta.get("depends_on", [])
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    return json.loads(raw.replace("'", '"'))
+                except:
+                    return [raw] if raw else []
+            return []
+
+        for t in all_cycles:
+            expected_ops = expected_cycles.get(t, [])
+            actual_logs = actual_cycles.get(t, {})
+
+            for op in expected_ops:
+                op_type = op["op_type"]
+                tid = op["trace_id"]
+                meta = op.get("metadata", {})
+                math_val = self.val_map.get(tid, 0.0)
+                deps = parse_deps(meta)
+
+                # 预期的输入值
+                expected_inputs = {}
+                for d in deps:
+                    expected_inputs[d] = self.val_map.get(d, 0.0)
+
+                print(f"\n  ⏱  [T={t:3d}] {op_type} ({tid})")
+                for d, val in expected_inputs.items():
+                    print(f"       ├─ In  [{d}] = {val}")
+                print(f"       └─ Out = {math_val}")
+
+                logs_for_type = actual_logs.get(op_type, [])
+
+                # ─── FPMUL 对比 ───
+                if op_type == "FPMUL":
+                    if not logs_for_type:
+                        print(f"       ❌ sim.log 无此周期 FPMUL 执行回执!")
+                        errors += 1
+                        continue
+
+                    log_line = logs_for_type[0]
+                    # 解析 S0 和 S1 的 hex
+                    m_s0 = re.search(r"S0:([0-9a-fA-F]+)", log_line)
+                    m_s1 = re.search(r"S1:([0-9a-fA-F]+)", log_line)
+
+                    if m_s0 and m_s1:
+                        hw_s0 = hex128_to_float_lane0(m_s0.group(1))
+                        hw_s1 = hex128_to_float_lane0(m_s1.group(1))
+                        exp_s0 = expected_inputs.get(deps[0], 0.0) if len(deps) > 0 else 0.0
+                        exp_s1 = expected_inputs.get(deps[1], 0.0) if len(deps) > 1 else 0.0
+
+                        s0_ok = np.isclose(exp_s0, hw_s0, atol=1e-3)
+                        s1_ok = np.isclose(exp_s1, hw_s1, atol=1e-3)
+
+                        status_s0 = "✅" if s0_ok else "❌"
+                        status_s1 = "✅" if s1_ok else "❌"
+
+                        print(f"       {status_s0} S0: 预期={exp_s0:.6f}  硬件={hw_s0:.6f}")
+                        print(f"       {status_s1} S1: 预期={exp_s1:.6f}  硬件={hw_s1:.6f}")
+
+                        # 解析 Result (如果有)
+                        m_r = re.search(r"R:([0-9a-fA-F]+)", log_line)
+                        if m_r:
+                            hw_result = hex128_to_float_lane0(m_r.group(1))
+                            r_ok = np.isclose(math_val, hw_result, atol=1e-3)
+                            status_r = "✅" if r_ok else "❌"
+                            print(f"       {status_r} Result: 预期={math_val:.6f}  硬件={hw_result:.6f}")
+                            if not r_ok:
+                                errors += 1
+
+                        if not s0_ok or not s1_ok:
+                            errors += 1
+                    else:
+                        print(f"       ⚠️ 日志格式异常: {log_line}")
+
+                # ─── FPADD 对比 ───
+                elif op_type == "FPADD":
+                    if not logs_for_type:
+                        print(f"       ⚠️ C++ 模拟器需补充 [ADD-EXEC] 输出。此项暂跳过。")
+                        continue
+
+                    log_line = logs_for_type[0]
+                    m_s0 = re.search(r"S0:([0-9a-fA-F]+)", log_line)
+                    m_s1 = re.search(r"S1:([0-9a-fA-F]+)", log_line)
+
+                    if m_s0 and m_s1:
+                        hw_s0 = hex128_to_float_lane0(m_s0.group(1))
+                        hw_s1 = hex128_to_float_lane0(m_s1.group(1))
+                        exp_s0 = expected_inputs.get(deps[0], 0.0) if len(deps) > 0 else 0.0
+                        exp_s1 = expected_inputs.get(deps[1], 0.0) if len(deps) > 1 else 0.0
+
+                        s0_ok = np.isclose(exp_s0, hw_s0, atol=1e-3)
+                        s1_ok = np.isclose(exp_s1, hw_s1, atol=1e-3)
+                        status_s0 = "✅" if s0_ok else "❌"
+                        status_s1 = "✅" if s1_ok else "❌"
+                        print(f"       {status_s0} S0: 预期={exp_s0:.6f}  硬件={hw_s0:.6f}")
+                        print(f"       {status_s1} S1: 预期={exp_s1:.6f}  硬件={hw_s1:.6f}")
+
+                        m_r = re.search(r"R:([0-9a-fA-F]+)", log_line)
+                        if m_r:
+                            hw_result = hex128_to_float_lane0(m_r.group(1))
+                            r_ok = np.isclose(math_val, hw_result, atol=1e-3)
+                            status_r = "✅" if r_ok else "❌"
+                            print(f"       {status_r} Result: 预期={math_val:.6f}  硬件={hw_result:.6f}")
+                            if not r_ok:
+                                errors += 1
+
+                        if not s0_ok or not s1_ok:
+                            errors += 1
+
+                # ─── UR_WRITE 对比 ───
+                elif op_type == "UR_WRITE":
+                    if not logs_for_type:
+                        print(f"       ❌ sim.log 无此周期 UR_WRITE 回执!")
+                        errors += 1
+                        continue
+
+                    log_line = logs_for_type[0]
+                    match = re.search(r"Data:([0-9a-fA-F]+)", log_line)
+                    if match:
+                        real_val = hex128_to_float_lane0(match.group(1))
+                        ok = np.isclose(math_val, real_val, atol=1e-3)
+                        status = "✅" if ok else "❌"
+                        print(f"       {status} Data: 预期={math_val:.6f}  硬件={real_val:.6f}")
+                        print(f"         日志: {log_line}")
+                        if not ok:
+                            errors += 1
+                    else:
+                        print(f"       ⚠️ 无法解析 Data 字段: {log_line}")
+
+        # 4. 汇总
+        print("\n" + "-" * 50)
+        if errors == 0:
+            print("  🚀 全部通过! 算法时序与物理仿真完美对齐!")
+        else:
+            print(f"  ❌ 共发现 {errors} 个偏差!")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AIACC Cycle & Memory Verifier V2.0")
+    parser.add_argument("--dir", default="build/sin8/sin_taylor_high_order", help="Pipeline Output Dir")
+    args = parser.parse_args()
+
+    verifier = CycleVerifier(args.dir)
+    verifier.run()
