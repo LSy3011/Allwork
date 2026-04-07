@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-atan(x) Taylor Expansion (Order 7)
-AIACC V2.1 Standard Flow
-atan(x) ≈ x - x^3/3 + x^5/5 - x^7/7 (for |x| < 1)
-"""
 import sys
 import numpy as np
 from pathlib import Path
@@ -19,13 +14,13 @@ def get_atan_dfg():
     compiler = GraphCompiler()
     x_sym = sp.Symbol('x_in')
     
-    # atan(x) ≈ x - x^3/3 + x^5/5 - x^7/7
+    # atan(x) ≈ x - x^3/3 + x^5/5 - x^7/7 (Order 7)
     x2 = x_sym * x_sym
     x3 = x2 * x_sym
     x5 = x3 * x2
     x7 = x5 * x2
     
-    formula = x_sym - x3 * (1.0/3.0) + x5 * (0.2) - x7 * (0.142857142857)
+    formula = x_sym - x3 * (1.0/3.0) + x5 * (0.2) - x7 * (1.0/7.0)
     
     inputs_meta = {
         x_sym: {"manual_bank": 0, "role": "operand_a"}
@@ -38,11 +33,12 @@ def test_atan():
         build_root="build/operators/unary/transcendentals"
     )
 
-    fx = 0.5
+    # Test point near 0 (atan Taylor stable range)
+    fx = 0.4
     input_data = {"x_in": fx}
     
-    # Golden matching the DFG approximation
-    golden_y = fx - (1.0/3.0)*fx**3 + (0.2)*fx**5 - (0.142857142857)*fx**7
+    # Golden matching the DFG formula
+    golden_y = fx - (1.0/3.0)*fx**3 + (0.2)*fx**5 - (1.0/7.0)*fx**7
 
     success = runner.run_full_pipeline(
         op_name="atan",

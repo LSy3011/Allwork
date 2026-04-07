@@ -19,8 +19,8 @@
         "asin": {"description": "7阶泰勒展开 asin(x)", "status": "ready"},
         "acos": {"description": "arccos(x)", "status": "ready"},
         "atan": {"description": "arctan(x)", "status": "ready"},
-        "sinh": {"description": "sinh(x) 双曲正弦", "status": "pending"},
-        "cosh": {"description": "cosh(x) 双曲余弦", "status": "pending"}
+        "sinh": {"description": "sinh(x) 双曲正弦", "status": "ready"},
+        "cosh": {"description": "cosh(x) 双曲余弦", "status": "ready"}
       }
     },
     "unary/math": {

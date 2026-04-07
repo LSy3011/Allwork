@@ -48,6 +48,7 @@ class SMTSynthesizer:
         return res_map
 
     def solve(self, ops: List[MIROp], strategy: str = "balanced", **kwargs) -> Dict[str, int]:
+        print(f"[SMT-DEBUG] Solving for {len(ops)} nodes")
         solver = z3.Optimize()
         
         nodes_by_id = {op.trace_id: op for op in ops}

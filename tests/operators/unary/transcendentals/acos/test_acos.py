@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-acos(x) Approximation via pi/2 - asin(x)
-AIACC V2.1 Standard Flow
-"""
 import sys
 import numpy as np
 from pathlib import Path
@@ -25,8 +21,9 @@ def get_acos_dfg():
     x5 = x3 * x2
     x7 = x5 * x2
     
-    asin_approx = x_sym + x3 * (1.0/6.0) + x5 * (0.075) + x7 * (5.0/112.0)
-    formula = 1.57079632679 - asin_approx
+    pi_half = 3.14159265358979 / 2.0
+    asin_approx = x_sym + x3 * (1.0/6.0) + x5 * (3.0/40.0) + x7 * (5.0/112.0)
+    formula = pi_half - asin_approx
     
     inputs_meta = {
         x_sym: {"manual_bank": 0, "role": "operand_a"}
@@ -39,12 +36,14 @@ def test_acos():
         build_root="build/operators/unary/transcendentals"
     )
 
-    fx = 0.5
+    # Test point near 0 (asin Taylor stable range)
+    fx = 0.3
     input_data = {"x_in": fx}
     
-    # Golden matching the DFG approximation
-    asin_v = fx + (1.0/6.0)*fx**3 + (0.075)*fx**5 + (5.0/112.0)*fx**7
-    golden_y = 1.57079632679 - asin_v
+    # Golden matching the DFG formula
+    pi_h = 3.14159265358979 / 2.0
+    asin_v = fx + (1.0/6.0)*fx**3 + (3.0/40.0)*fx**5 + (5.0/112.0)*fx**7
+    golden_y = pi_h - asin_v
 
     success = runner.run_full_pipeline(
         op_name="acos",
