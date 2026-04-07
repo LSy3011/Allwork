@@ -28,7 +28,9 @@ def run_logical_test(op_name, formula_fn, golden_fn):
 
 if __name__ == "__main__":
     op = sys.argv[1]
-    if op == "ge":
+    if op == "gt":
+        res = run_logical_test("gt", lambda a, b: sp.Gt(a, b), lambda a, b: a > b)
+    elif op == "ge":
         res = run_logical_test("ge", lambda a, b: sp.Ge(a, b), lambda a, b: a >= b)
     elif op == "lt":
         res = run_logical_test("lt", lambda a, b: sp.Lt(a, b), lambda a, b: a < b)
@@ -38,6 +40,9 @@ if __name__ == "__main__":
         res = run_logical_test("eq", lambda a, b: sp.Eq(a, b), lambda a, b: a == b)
     elif op == "ne":
         res = run_logical_test("ne", lambda a, b: sp.Ne(a, b), lambda a, b: a != b)
+    elif op == "and":
+        res = run_logical_test("and", lambda a, b: a & b, 
+                               lambda a, b: np.frombuffer((a.view(np.int32) & b.view(np.int32)), dtype=np.float32))
     elif op == "or":
         res = run_logical_test("or", lambda a, b: a | b, 
                                lambda a, b: np.frombuffer((a.view(np.int32) | b.view(np.int32)), dtype=np.float32))

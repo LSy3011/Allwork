@@ -43,7 +43,7 @@
         "div": {"description": "a / b", "status": "ready"},
         "atan2": {"description": "5阶泰勒展开 atan2(y, x)", "status": "ready"},
         "pow": {"description": "a^b 幂运算", "status": "ready"},
-        "fmod": {"description": "fmod(a, b) 浮点取余", "status": "pending"},
+        "fmod": {"description": "fmod(a, b) 浮点取余", "status": "ready"},
         "mod": {"description": "a % b 整数取模", "status": "pending"},
         "rem": {"description": "remainder(a, b)", "status": "pending"}
       }

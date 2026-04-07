@@ -58,17 +58,34 @@ def load_registry():
 
 
 def run_compile(entry: dict) -> dict:
-    """执行编译。"""
+    """执行编译。支持通过 Template 回退执行。"""
     script = WS / entry["test_script"]
+    cmd = [sys.executable, str(script)]
+    
+    # 模板回退逻辑
+    is_template = False
     if not script.exists():
-        return {"passed": False, "duration": 0,
-                "output": f"测试脚本不存在: {entry['test_script']}"}
+        category = entry["category"]
+        template = None
+        if category.startswith("unary/math"):
+            template = WS / "tests/operators/unary/math/unary_test_template.py"
+        elif category.startswith("binary/logical"):
+            template = WS / "tests/operators/binary/logical/logical_test_template.py"
+            
+        if template and template.exists():
+            cmd = [sys.executable, str(template), entry["op_name"]]
+            is_template = True
+        else:
+            return {"passed": False, "duration": 0, 
+                    "output": f"❌ 错误: 找不到测试脚本 {entry['test_script']}，且无可用模板"}
 
     t0 = time.time()
     try:
+        if is_template:
+            print(f" 💡 (Template: {entry['op_name']})", end="", flush=True)
+            
         result = subprocess.run(
-            [sys.executable, str(script)],
-            capture_output=True, text=True, cwd=str(WS), timeout=120
+            cmd, capture_output=True, text=True, cwd=str(WS), timeout=120
         )
     except subprocess.TimeoutExpired:
         return {"passed": False, "duration": time.time() - t0, "output": "编译超时 (120s)"}
@@ -200,14 +217,6 @@ def main():
         # 编译
         compile_ok = True
         if not args.verify_only:
-            script_path = WS / entry["test_script"]
-            if not script_path.exists():
-                print(f"  ⏭️  测试脚本不存在: {entry['test_script']}")
-                results.append({"op": op_name, "category": category,
-                                "compile": False, "verify": False, "duration": 0,
-                                "detail": f"脚本不存在: {entry['test_script']}"})
-                continue
-
             print("  ⚙️  编译中...", end="", flush=True)
             compile_res = run_compile(entry)
             total_time += compile_res["duration"]

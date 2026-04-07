@@ -4,10 +4,14 @@ from ir.mir.mir_op import MIROp
 from api.hw_spec import HardwareSpec
 
 class SynthesisAxioms:
+    _label_idx = 0
+
     @staticmethod
     def _add_constraint(solver, constraint: Any, label_name: str):
+        SynthesisAxioms._label_idx += 1
+        unique_label = f"{label_name}_{SynthesisAxioms._label_idx}"
         if isinstance(solver, z3.Solver):
-            solver.assert_and_track(constraint, z3.Bool(label_name))
+            solver.assert_and_track(constraint, z3.Bool(unique_label))
         else:
             solver.add(constraint)
 
@@ -28,7 +32,7 @@ class SynthesisAxioms:
                     if producer.op_type == "UR_READ":
                         SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, f"flex_{label}")
                     else:
-                        SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] == t_vars[dep_id] + lat, label)
+                        SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label)
                 else:
                     SynthesisAxioms._add_constraint(solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label)
 
@@ -115,7 +119,7 @@ class SynthesisAxioms:
         """
         [ADPC 物理对齐] ALU 流水线公理：物理上共用同一单元的操作，其结果写回前必须搬走前一结果。
         """
-        for alu_type in ["FPMUL", "FPADD"]:
+        for alu_type in ["FPMUL", "FPADD", "FPTOINT", "INTTOFP", "LOGIC", "SHIFTUP", "SHIFTDN", "INTADD"]:
             alu_ops = [o for o in ops if o.op_type == alu_type]
             if len(alu_ops) <= 1: continue
             lat = spec.delays.get(alu_type, 4)
@@ -211,6 +215,7 @@ class SynthesisAxioms:
 
     @staticmethod
     def add_objective(solver: z3.Optimize, t_vars: Dict[str, z3.ArithRef]):
-        max_t = z3.Int("max_t")
-        for t in t_vars.values(): solver.add(max_t >= t)
-        solver.minimize(max_t)
+        if isinstance(solver, z3.Optimize):
+           max_t = z3.Int("max_t")
+           for t in t_vars.values(): solver.add(max_t >= t)
+           solver.minimize(max_t)

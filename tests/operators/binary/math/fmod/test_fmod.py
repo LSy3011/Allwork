@@ -41,8 +41,8 @@ def test_fmod():
         build_root="build/operators/binary/math"
     )
 
-    fa = np.array([2.5, 3.1, 4.2], dtype=np.float32)
-    fb = np.array([1.1, 1.2, 1.1], dtype=np.float32)
+    fa = np.array([2.5, 3.1, 4.2, 5.0], dtype=np.float32)
+    fb = np.array([1.1, 1.2, 1.1, 2.0], dtype=np.float32)
     input_data = {"a": fa, "b": fb}
     
     # Golden calculation

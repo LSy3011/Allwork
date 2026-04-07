@@ -119,17 +119,13 @@ class SMTSynthesizer:
             rtovr_deps = [d for d in op.metadata.get("depends_on", []) 
                          if d in nodes_by_id and nodes_by_id[d].op_type == "RTOVR"]
             
-            if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
+            if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC", "FPTOINT", "INTTOFP", "SHIFTUP", "SHIFTDN", "INTADD"]:
                 for idx, rd in enumerate(rtovr_deps):
-                    # 🛸 [V2.1 物理对位优化 V2.0]：
-                    # 1. 第一个操作数必须严格 T-1 到位 (== 1)
-                    # 2. 后续操作数允许 T-1 或 T-2 到位 (<= 2)，利用寄存器 1 拍的弹性保护。
-                    # 这样既能解决 atan2 的 4 操作数并发冲突，又能防止 tanh/asin 的数据过期。
-                    if idx == 0:
-                        solver.add(t[op.trace_id] == t[rd] + 1)
-                    else:
-                        solver.add(t[op.trace_id] >= t[rd] + 1)
-                        solver.add(t[op.trace_id] <= t[rd] + 2) # 硬约束：数据持有时间不得超过 2 拍
+                    # 🛸 [V2.2 物理对位优化 V5.0]：
+                    # 允许 1-4 拍的搬运窗口，利用 Latch 缓冲解决不同延迟单元的操作数到达时间差问题。
+                    # 特别是针对 fmod/floor 这种需要组合 FPADD (4拍) 和 INTTOFP (1拍) 的场景。
+                    solver.add(t[op.trace_id] >= t[rd] + 1)
+                    solver.add(t[op.trace_id] <= t[rd] + 4) # 配合 SSoT 物理寄存器持有期 (Lat=4)
                 
                 # 🛸 物理插槽映射逻辑 (仅针对输出节点)
                 if op.op_type.upper() == "UR_WRITE":
@@ -147,7 +143,6 @@ class SMTSynthesizer:
                     op.metadata["iq_id"] = assigned_iq
                     
                     # 🛰️ 物理自动对位：如果当前是 UR_WRITE，强制纠正其消费的 RTOVR Slot
-                    base_w = registry.get("UR_WRITE", 35)
                     if op.op_type.upper() == "UR_WRITE":
                         for dep_id in op.metadata.get("depends_on", []):
                             dep_node = nodes_by_id.get(dep_id)
