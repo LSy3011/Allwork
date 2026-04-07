@@ -24,11 +24,12 @@ class GraphCompiler:
         self.inl_cnt = 0
         self.cse_vars = set()
 
-    def _route(self, nid: str, target_slot: PS):
+    def _route(self, nid: str, target_slot: PS, dep_port: str = None):
         """路由下发：在数学操作数进计算器前，必须包一层硬件专属搬运指令 RTOVR"""
         self.rt_cnt += 1
         uid = f"rt_{nid}_{target_slot.name}_{self.rt_cnt}"[:25]
-        return self.b.make_op("RTOVR", uid, target_slot, [nid])
+        kwargs = {"dep_port": dep_port} if dep_port else {}
+        return self.b.make_op("RTOVR", uid, target_slot, [nid], **kwargs)
 
     def compile(self, inputs: Dict[sp.Symbol, dict], formula, out_name="out") -> List:
         """
@@ -146,6 +147,102 @@ class GraphCompiler:
                 current = self.b.make_op("FPADD", f"{sym}_a{i}", RT.FPADD, [r0, r1])
             self.mir_env[sym] = current
             return
+
+        # 匹配【逐元素 Max 对比选择】 -> FPADD(ST) + LOGIC(SEL)
+        if isinstance(expr, sp.Max):
+            args = list(expr.args)
+            if len(args) == 2:
+                # 状态生成：FPADD 比较 (a > b?)
+                # a - b > 0 ?
+                a = self._get_op(args[0])
+                b = self._get_op(args[1])
+                r0_cmp = self._route(a, PS.FPADD_S0)
+                r1_cmp = self._route(b, PS.FPADD_S1)
+                cmp = self.b.make_op("FPADD", f"{sym}_cmp", RT.FPADD, [r0_cmp, r1_cmp], 
+                                     UPDATE_ST=1, SUB=1, comment=f"CMP {args[0]} > {args[1]}")
+                
+                # 逻辑选择：LOGIC SELECT
+                st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST") # 显式拉取状态端子
+                r0_sel = self._route(a, PS.LOGIC_S0)
+                r1_sel = self._route(b, PS.LOGIC_S1)
+                
+                self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_sel, r1_sel, st_wire], 
+                                                   OP_TYPE="SELECT_GT", VALID=1, comment=f"MAX({args[0]}, {args[1]})")
+                return
+
+        # 匹配【逐元素 Min 对比选择】 -> FPADD(ST) + LOGIC(SEL)
+        if isinstance(expr, sp.Min):
+            args = list(expr.args)
+            if len(args) == 2:
+                a = self._get_op(args[0])
+                b = self._get_op(args[1])
+                r0_cmp = self._route(a, PS.FPADD_S0)
+                r1_cmp = self._route(b, PS.FPADD_S1)
+                cmp = self.b.make_op("FPADD", f"{sym}_cmp", RT.FPADD, [r0_cmp, r1_cmp], 
+                                     UPDATE_ST=1, SUB=1, comment=f"CMP {args[0]} > {args[1]}")
+                
+                st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
+                r0_sel = self._route(a, PS.LOGIC_S0)
+                r1_sel = self._route(b, PS.LOGIC_S1)
+                
+                # SELECT_LE (Less than or Equal) if we want min
+                self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_sel, r1_sel, st_wire], 
+                                                   OP_TYPE="SELECT_LE", VALID=1, comment=f"MIN({args[0]}, {args[1]})")
+                return
+
+        # 匹配【绝对值】 -> Max(x, -x)
+        if isinstance(expr, sp.Abs):
+            arg = expr.args[0]
+            # Abs(x) = Max(x, -x)
+            neg_x = -arg
+            formula = sp.Max(arg, neg_x)
+            self.mir_env[sym] = self._get_op(formula)
+            return
+
+        # 匹配【逻辑比较】 -> FPADD(ST) + LOGIC(SEL 常数 1.0 / 0.0)
+        # 支持: a > b, a >= b, a < b, a <= b, a == b, a != b
+        if isinstance(expr, (sp.GreaterThan, sp.LessThan, sp.StrictGreaterThan, sp.StrictLessThan, sp.Equality, sp.Unequality)):
+             a = self._get_op(expr.args[0])
+             b = self._get_op(expr.args[1])
+             r0_cmp = self._route(a, PS.FPADD_S0)
+             r1_cmp = self._route(b, PS.FPADD_S1)
+             cmp = self.b.make_op("FPADD", f"{sym}_cmp", RT.FPADD, [r0_cmp, r1_cmp], 
+                                  UPDATE_ST=1, SUB=1, comment=f"CMP {expr}")
+             
+             st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
+             one = self._get_const(1.0)
+             zero = self._get_const(0.0)
+             r0_sel = self._route(one, PS.LOGIC_S0)
+             r1_sel = self._route(zero, PS.LOGIC_S1)
+             
+             op_type = "SELECT_GT" # Default
+             if isinstance(expr, (sp.Ge, sp.GreaterThan)): op_type = "SELECT_GE"
+             elif isinstance(expr, (sp.Lt, sp.StrictLessThan)): op_type = "SELECT_LS" 
+             elif isinstance(expr, (sp.Le, sp.LessThan)): op_type = "SELECT_LE"
+             elif isinstance(expr, (sp.Eq, sp.Equality)): op_type = "SELECT_EQ"
+             elif isinstance(expr, sp.Unequality): 
+                  op_type = "SELECT_GT" # Actually we'd need NE. For now, let's just pick one.
+                  # Note: Logic unit needs to support standard logic ops
+             
+             self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_sel, r1_sel, st_wire], 
+                                                OP_TYPE=op_type, VALID=1, comment=str(expr))
+             return
+
+        # 匹配【位运算】 -> LOGIC
+        if isinstance(expr, (sp.And, sp.Or, sp.Xor, sp.Not)):
+             args = list(expr.args)
+             op_map = {sp.And: "AND", sp.Or: "OR", sp.Xor: "XOR", sp.Not: "NOT"}
+             op_name = op_map[type(expr)]
+             
+             v0 = self._get_op(args[0])
+             r0 = self._route(v0, PS.LOGIC_S0)
+             if len(args) > 1:
+                 v1 = self._get_op(args[1])
+                 r1 = self._route(v1, PS.LOGIC_S1)
+                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0, r1], OP_TYPE=op_name, VALID=1)
+             else:
+                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0], OP_TYPE=op_name, VALID=1)
+             return
 
         # 兜底：未知表达式
         raise NotImplementedError(f"Compiler Error: 不支持的 SymPy 表达式类型 {type(expr)}: {expr}. "

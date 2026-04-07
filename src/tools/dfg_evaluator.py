@@ -100,9 +100,17 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
 
         # ─── RTOVR: 透传路由 ───
         if op_type == "RTOVR":
-            val = eval_op(deps[0]) if deps else 0.0
-            val_map[nid] = val
-            return val
+            target_port = str(meta.get("dep_port", "D")).upper()
+            base_val = eval_op(deps[0]) if deps else 0.0
+            if target_port == "ST":
+                # 🛸 仿真数学建模: 将状态标志位映射为一个浮点数。
+                # 由于 FPADD 在 (S0 - S1) > 0 时硬件 ST=bit4.
+                # 为简化，直接透传该对比结果。
+                val_map[nid] = base_val 
+                return base_val
+            else:
+                val_map[nid] = base_val
+                return base_val
 
         # ─── FPADD: 浮点加法 ───
         if op_type == "FPADD":
@@ -118,6 +126,42 @@ def eval_dfg(dfg_nodes, input_data: Dict[str, Any]) -> Dict[str, float]:
             v0 = eval_op(deps[0]) if len(deps) > 0 else 0.0
             v1 = eval_op(deps[1]) if len(deps) > 1 else 0.0
             val = v0 * v1
+            val_map[nid] = val
+            return val
+
+        # ─── Max/Min (阶段 A 逻辑节点) ───
+        if op_type == "Max":
+            v0 = eval_op(deps[0]) if len(deps) > 0 else 0.0
+            v1 = eval_op(deps[1]) if len(deps) > 1 else 0.0
+            val = max(v0, v1)
+            val_map[nid] = val
+            return val
+        
+        if op_type == "Min":
+            v0 = eval_op(deps[0]) if len(deps) > 0 else 0.0
+            v1 = eval_op(deps[1]) if len(deps) > 1 else 0.0
+            val = min(v0, v1)
+            val_map[nid] = val
+            return val
+
+        # ─── LOGIC: 逻辑与选择电路 ───
+        if op_type == "LOGIC":
+            v0 = eval_op(deps[0]) if len(deps) > 0 else 0.0
+            v1 = eval_op(deps[1]) if len(deps) > 1 else 0.0
+            st = eval_op(deps[2]) if len(deps) > 2 else 0.0
+            op_str = str(meta.get("OP_TYPE", "AND")).upper()
+            
+            if "SELECT_GT" in op_str:
+                 # 预期 ST 链路如果来源于 (a-b)，且 a-b > 0, 则选 s0
+                 val = v0 if st > 1e-6 else v1
+            elif "SELECT_LE" in op_str:
+                 val = v0 if st <= 1e-6 else v1
+            elif "AND" in op_str:
+                 val = float(int(v0) & int(v1))
+            elif "OR" in op_str:
+                 val = float(int(v0) | int(v1))
+            else:
+                 val = v0 # Fallback
             val_map[nid] = val
             return val
 

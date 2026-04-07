@@ -133,7 +133,8 @@ class LogicUnit(Component):
 
                 res_val |= (res & mask_lane) << (i * nbits)
             
-            # self.logger.debug(f"LOGIC Result: {res_val:032x}")
+            self.logger.info(f"Cycle {self.cycle} Logic-Trace: S0={s0:032x}, S1={s1:032x}, ST={st:032x}, R={res_val:032x}")
+            print(f">>> [LOGIC-EXEC] Cyc:{self.cycle} S0:{s0:032x} S1:{s1:032x} R:{res_val:032x}")
             
             self._next_pipeline = [{'result': res_val, 'valid': True}] + self.pipeline[:-1]
         else:

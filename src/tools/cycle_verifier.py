@@ -113,6 +113,12 @@ def parse_sim_log(sim_log_path):
                 cyc = int(m2.group(1)) if m2 else current_cyc
                 actual_cycles.setdefault(cyc, {}).setdefault("UR_READ", []).append(line)
 
+            # LOGIC 执行
+            elif "[LOGIC-EXEC]" in line:
+                m2 = re.search(r"Cyc:(\d+)", line)
+                cyc = int(m2.group(1)) if m2 else current_cyc
+                actual_cycles.setdefault(cyc, {}).setdefault("LOGIC", []).append(line)
+
             # RTOVR 路由 (用于追踪数据流向)
             elif "[RTOVR]" in line:
                 actual_cycles.setdefault(current_cyc, {}).setdefault("RTOVR", []).append(line)
@@ -188,8 +194,8 @@ class CycleVerifier:
 
     def _dump_eval_math(self):
         """打印算法顺推的全部节点值，供人工审查。"""
-        # 只打印关键节点 (UR_READ, FPMUL, FPADD, UR_WRITE)
-        key_types = {"UR_READ", "FPMUL", "FPADD", "UR_WRITE"}
+        # 只打印关键节点 (UR_READ, FPMUL, FPADD, LOGIC, UR_WRITE)
+        key_types = {"UR_READ", "FPMUL", "FPADD", "LOGIC", "UR_WRITE"}
         nodes_by_id = {n["trace_id"]: n for n in self.dfg}
         for nid, val in self.val_map.items():
             if nid in nodes_by_id and nodes_by_id[nid]["op_type"] in key_types:
@@ -249,7 +255,7 @@ class CycleVerifier:
         expected_cycles = {}
         for node in self.dfg:
             cyc = int(node.get("cycle", -1))
-            if cyc >= 0 and node["op_type"] in ["FPMUL", "FPADD", "UR_WRITE"]:
+            if cyc >= 0 and node["op_type"] in ["FPMUL", "FPADD", "LOGIC", "UR_WRITE"]:
                 expected_cycles.setdefault(cyc, []).append(node)
 
         # 2. 解析 sim.log
@@ -264,7 +270,10 @@ class CycleVerifier:
             "PortSlot.FPMUL_S0": "3",
             "PortSlot.FPMUL_S1": "4",
             "PortSlot.FPADD_S0": "5",
-            "PortSlot.FPADD_S1": "6"
+            "PortSlot.FPADD_S1": "6",
+            "PortSlot.LOGIC_S0": "11",
+            "PortSlot.LOGIC_S1": "12",
+            "PortSlot.LOGIC_ST": "13"
         }
         
         # 🛸 影子寄存器堆 (Shadow Register File)
@@ -334,10 +343,11 @@ class CycleVerifier:
                         if not ok: errors += 1
 
                 # 校验计算结果 (Result)
-                if logs_for_type and op_type in ["FPMUL", "FPADD"]:
+                if logs_for_type and op_type in ["FPMUL", "FPADD", "LOGIC"]:
                     m_r = re.search(r"R:([0-9a-fA-F]+)", logs_for_type[0])
                     if m_r:
                         hw_r = hex128_to_float_lane0(m_r.group(1))
+                        # 对 LOGIC 结果也进行校验
                         ok = np.isclose(math_val, hw_r, atol=5e-3)
                         status = "✅" if ok else "❌"
                         print(f"       {status} Result: 预期={math_val:.6f}  硬件={hw_r:.6f}")

@@ -17,15 +17,15 @@
         "sqrt": {"description": "5阶泰勒展开 sqrt(x)", "status": "ready"},
         "rsqrt": {"description": "5阶泰勒展开 rsqrt(x)", "status": "ready"},
         "asin": {"description": "7阶泰勒展开 asin(x)", "status": "ready"},
-        "acos": {"description": "arccos(x)", "status": "pending"},
-        "atan": {"description": "arctan(x)", "status": "pending"},
+        "acos": {"description": "arccos(x)", "status": "ready"},
+        "atan": {"description": "arctan(x)", "status": "ready"},
         "sinh": {"description": "sinh(x) 双曲正弦", "status": "pending"},
         "cosh": {"description": "cosh(x) 双曲余弦", "status": "pending"}
       }
     },
     "unary/math": {
       "operators": {
-        "abs": {"description": "abs(x) 绝对值", "status": "pending"},
+        "abs": {"description": "abs(x) 绝对值", "status": "ready"},
         "neg": {"description": "neg(x) 取反", "status": "ready"},
         "ceil": {"description": "ceil(x) 向上取整", "status": "pending"},
         "floor": {"description": "floor(x) 向下取整", "status": "pending"},
@@ -50,13 +50,13 @@
     },
     "binary/logical": {
       "operators": {
-        "gt": {"description": "a > b", "status": "pending"},
+        "gt": {"description": "a > b", "status": "ready"},
         "ge": {"description": "a >= b", "status": "pending"},
         "lt": {"description": "a < b", "status": "pending"},
         "le": {"description": "a <= b", "status": "pending"},
         "eq": {"description": "a == b", "status": "pending"},
         "ne": {"description": "a != b", "status": "pending"},
-        "and": {"description": "a & b", "status": "pending"},
+        "and": {"description": "a & b", "status": "ready"},
         "or": {"description": "a | b", "status": "pending"},
         "xor": {"description": "a ^ b", "status": "pending"},
         "not": {"description": "!a 逻辑非", "status": "pending"}
@@ -64,7 +64,7 @@
     },
     "activation": {
       "operators": {
-        "relu": {"description": "ReLU 激活", "status": "pending"},
+        "relu": {"description": "ReLU 激活", "status": "ready"},
         "gelu": {"description": "GELU 激活 (Sigmoid 近似)", "status": "ready"},
         "sigmoid": {"description": "Sigmoid 激活", "status": "ready"},
         "tanh": {"description": "7阶泰勒展开 tanh(x)", "status": "ready"},
