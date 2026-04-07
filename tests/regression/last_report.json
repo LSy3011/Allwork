@@ -1,18 +1,74 @@
 {
-  "timestamp": "2026-04-07T11:36:57.537576",
-  "total": 1,
-  "active": 1,
-  "passed": 1,
+  "timestamp": "2026-04-07T12:36:42.982736",
+  "total": 9,
+  "active": 9,
+  "passed": 9,
   "failed": 0,
   "skipped": 0,
-  "duration": 0.9934036731719971,
+  "duration": 8.508142948150635,
   "results": [
     {
       "op": "sin",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.9934036731719971
+      "duration": 0.9886617660522461
+    },
+    {
+      "op": "cos",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 1.965315580368042
+    },
+    {
+      "op": "exp",
+      "category": "unary/transcendentals",
+      "compile": true,
+      "verify": true,
+      "duration": 3.0214145183563232
+    },
+    {
+      "op": "neg",
+      "category": "unary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 3.9058141708374023
+    },
+    {
+      "op": "square",
+      "category": "unary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 4.808019638061523
+    },
+    {
+      "op": "add",
+      "category": "binary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 5.713634490966797
+    },
+    {
+      "op": "sub",
+      "category": "binary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 6.641207695007324
+    },
+    {
+      "op": "mul",
+      "category": "binary/math",
+      "compile": true,
+      "verify": true,
+      "duration": 7.5494184494018555
+    },
+    {
+      "op": "sigmoid",
+      "category": "activation",
+      "compile": true,
+      "verify": true,
+      "duration": 8.508142948150635
     }
   ]
 }

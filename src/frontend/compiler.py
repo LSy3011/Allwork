@@ -49,7 +49,7 @@ class GraphCompiler:
             # 突破点: 拥有超过1个下游子代的特征向量，必须转储(Spilled)出被覆写的 ALU FIFO
             write_slot = self.slot_map["UR_WRITE"][(1 + i) % 4]
             routed_res = self._route(self.mir_env[sym], write_slot)
-            self.b.make_op("UR_WRITE", f"spill_{sym}", RT.UR_WRITE, [routed_res], role="intermediate", meta_name=str(sym), iq_id=35 + (1 + i) % 4)
+            self.b.make_op("UR_WRITE", f"spill_{sym}", RT.UR_WRITE, [routed_res], role="intermediate", meta_name=str(sym))
             
         # --- Stage 2.3: 终极连线并汇出至输出寄存器 ---
         for i, res_expr in enumerate(final_res):
@@ -146,6 +146,10 @@ class GraphCompiler:
                 current = self.b.make_op("FPADD", f"{sym}_a{i}", RT.FPADD, [r0, r1])
             self.mir_env[sym] = current
             return
+
+        # 兜底：未知表达式
+        raise NotImplementedError(f"Compiler Error: 不支持的 SymPy 表达式类型 {type(expr)}: {expr}. "
+                                  f"请在 tests/operators/ 中检查 DFG 定义是否超出了当前硬件能力。")
             
     def _get_op(self, arg):
         """安全的取值助手"""

@@ -440,14 +440,27 @@ def main():
     with open(stage_b_path) as f:
         dfg = json.load(f)
 
+    # 识别输出名称 (从 DFG metadata 中获取)
+    out_name = "y" # 默认值
+    for n in dfg:
+        if n.get("metadata", {}).get("role") == "output":
+            out_name = n.get("metadata", {}).get("meta_name", "out")
+            break
+
     # 加载输入数据
     input_data = {}
     golden_path = op_dir / "acb_bundle" / "golden_data.npz"
     if golden_path.exists():
         data = np.load(golden_path)
         for k in data.files:
-            if k != "y":
+            # 修改：只过滤掉真正的输出字段，而不应硬编码过滤 "y"
+            if k != "y" and k != out_name:
                 input_data[k] = data[k]
+            # 兼容：如果 k 是 y 且 dfg 中标记 y 是输入，则保留
+            elif k == "y":
+                is_y_input = any(n.get("metadata", {}).get("meta_name") == "y" and n.get("metadata", {}).get("role") != "output" for n in dfg)
+                if is_y_input:
+                    input_data[k] = data[k]
     if not input_data:
         input_data = {"x": 1.5668}
 

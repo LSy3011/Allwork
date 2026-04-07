@@ -72,7 +72,15 @@ class StandardPipelineRunner:
 
         # --- Stage E: Simulation (仿真验证) ---
         golden_path = acb_path / "golden_data.npz"
-        save_dict = {"y": golden_y}
+        
+        # 查找输出节点的 meta_name
+        out_key = "y"
+        for node in dfg:
+            if node.metadata.get("role") == "output":
+                out_key = node.metadata.get("meta_name", "out")
+                break
+        
+        save_dict = {out_key: golden_y}
         for k, v in input_data.items(): save_dict[k] = v
         np.savez(golden_path, **save_dict)
         
@@ -191,9 +199,13 @@ class StandardPipelineRunner:
             a = node.metadata.get("addr")
             if b is not None and a is not None:
                 val = node.metadata.get("value")
-                if val is None: # 可能是输入
-                    role = node.metadata.get("role")
-                    if role == "operand_a": val = input_data.get("x")
+                if val is None: # 可能是外部输入变量
+                    var_name = node.metadata.get("meta_name")
+                    if var_name in input_data:
+                        val = input_data[var_name]
+                    else:
+                        # 兼容旧版本：有些节点可能没存 meta_name，回退到 role="operand_a" 找 "x"
+                        if node.metadata.get("role") == "operand_a": val = input_data.get("x")
                 
                 if val is not None:
                     v4 = [float(val)] * 4 if isinstance(val, (float, int)) else list(val)

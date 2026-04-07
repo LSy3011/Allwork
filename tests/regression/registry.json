@@ -10,9 +10,9 @@
     "unary/transcendentals": {
       "operators": {
         "sin": {"description": "9阶泰勒展开 sin(x)", "status": "ready"},
-        "cos": {"description": "cos(x) 泰勒展开", "status": "pending"},
+        "cos": {"description": "cos(x) 泰勒展开", "status": "ready"},
         "tan": {"description": "tan(x)", "status": "pending"},
-        "exp": {"description": "exp(x) 指数函数", "status": "pending"},
+        "exp": {"description": "exp(x) 指数函数", "status": "ready"},
         "log": {"description": "log(x) 自然对数", "status": "pending"},
         "sqrt": {"description": "sqrt(x) 平方根", "status": "pending"},
         "rsqrt": {"description": "rsqrt(x) 逆平方根", "status": "pending"},
@@ -27,23 +27,23 @@
     "unary/math": {
       "operators": {
         "abs": {"description": "abs(x) 绝对值", "status": "pending"},
-        "neg": {"description": "neg(x) 取反", "status": "pending"},
+        "neg": {"description": "neg(x) 取反", "status": "ready"},
         "ceil": {"description": "ceil(x) 向上取整", "status": "pending"},
         "floor": {"description": "floor(x) 向下取整", "status": "pending"},
         "round": {"description": "round(x) 四舍五入", "status": "pending"},
         "sign": {"description": "sign(x) 符号函数", "status": "pending"},
-        "square": {"description": "x^2 平方", "status": "pending"},
+        "square": {"description": "x^2 平方", "status": "ready"},
         "reciprocal": {"description": "1/x 倒数", "status": "pending"}
       }
     },
     "binary/math": {
       "operators": {
-        "add": {"description": "a + b", "status": "pending"},
-        "sub": {"description": "a - b", "status": "pending"},
-        "mul": {"description": "a * b", "status": "pending"},
-        "div": {"description": "a / b", "status": "pending"},
+        "add": {"description": "a + b", "status": "ready"},
+        "sub": {"description": "a - b", "status": "ready"},
+        "mul": {"description": "a * b", "status": "ready"},
+        "div": {"description": "a / b", "status": "ready"},
         "atan2": {"description": "atan2(y, x)", "status": "pending"},
-        "pow": {"description": "a^b 幂运算", "status": "pending"},
+        "pow": {"description": "a^b 幂运算", "status": "ready"},
         "fmod": {"description": "fmod(a, b) 浮点取余", "status": "pending"},
         "mod": {"description": "a % b 整数取模", "status": "pending"},
         "rem": {"description": "remainder(a, b)", "status": "pending"}
@@ -67,7 +67,7 @@
       "operators": {
         "relu": {"description": "ReLU 激活", "status": "pending"},
         "gelu": {"description": "GELU 激活", "status": "pending"},
-        "sigmoid": {"description": "Sigmoid 激活", "status": "pending"},
+        "sigmoid": {"description": "Sigmoid 激活", "status": "ready"},
         "tanh": {"description": "Tanh 激活", "status": "pending"},
         "swish": {"description": "Swish/SiLU 激活", "status": "pending"},
         "selu": {"description": "SELU 激活", "status": "pending"},

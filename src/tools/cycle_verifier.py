@@ -154,6 +154,13 @@ class CycleVerifier:
         with open(self.stage_b_file, 'r') as f:
             self.dfg = json.load(f)
 
+        # 识别输出名称
+        out_name = "out"
+        for n in self.dfg:
+            if n.get("metadata", {}).get("role") == "output":
+                out_name = n.get("metadata", {}).get("meta_name", "out")
+                break
+
         # 加载输入数据
         self.input_data = {}
         np_golden = self.op_dir / "acb_bundle" / "golden_data.npz"
@@ -161,8 +168,13 @@ class CycleVerifier:
             try:
                 data = np.load(np_golden)
                 for k in data.files:
-                    if k != "y":
+                    if k != "y" and k != out_name:
                         self.input_data[k] = data[k]
+                    elif k == "y":
+                        # 如果 y 确实是 DFG 里的输入角色，则保留
+                        is_y_input = any(n.get("metadata", {}).get("meta_name") == "y" and n.get("metadata", {}).get("role") != "output" for n in self.dfg)
+                        if is_y_input:
+                            self.input_data[k] = data[k]
             except Exception as e:
                 print(f"  ⚠️ 无法加载 {np_golden}: {e}")
 
