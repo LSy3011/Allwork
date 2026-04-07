@@ -46,9 +46,9 @@
 | 阶段 | 输入 | 输出 | 核心模块 | 验证项 |
 |------|------|------|----------|--------|
 | **A** | SymPy 表达式 | `stage_a_initial.json` | `src/frontend/compiler.py` | 拓扑连通性、数学正确性 |
-| **C** | DFG 初图 | `stage_c_synthesis.json` | `src/synthesis/backend.py` + `axioms.py` | 延迟约束、ALU Liveness |
-| **B** | 时序 DFG | `stage_b_mapped.json` | `src/orchestrator/colorer.py` + `memory_allocator.py` | Bank 冲突 ≥2 cycle、IQ ID |
-| **D** | 物理 DFG | `acb_bundle/*.hex` | `src/driver/emitter.py` + `packer.py` | 文件完整性、常量对齐、指令可解码 |
+| **C** | DFG 初图 | `stage_c_synthesis.json` | `src/synthesis/backend.py` + `axioms.py` | 延迟约束、ALU Liveness、Spill Reload 互斥 |
+| **B** | 时序 DFG | `stage_b_mapped.json` | `src/orchestrator/colorer.py` + `memory_allocator.py` | Bank 同拍冲突、IQ ID |
+| **D** | 物理 DFG | `acb_bundle/*.hex` | `src/driver/emitter.py` + `packer.py` | 文件完整性、常量对齐、指令可解码、max_cycles 自适应 |
 | **E** | Hex + 输入数据 | `sim.log` | `sim/smc_simulator/` | S0/S1 输入对比、Golden 对比 |
 
 ### 1.3 数据流与关键中间产物
@@ -331,14 +331,15 @@ print('Delays:', spec.delays)
 
 **常见根因：**
 - `axioms.py` 中遗漏了某类节点的延迟约束
-- ALU 只有一套物理寄存器，两次执行间隔内数据被覆写
-- IQ 深度不够 (max_cycles 不足)
+- ALU DR 寄存器在前次结果 RTOVR 搬走前被新计算覆写
+- 同 Spill 源的 Reload 在同拍发射导致 Bank 冲突 (需 `spill_reload_mutex` 公理)
+- RTOVR 数据可见延迟 = T+1，RAW 约束与影子绑定需统一
 
 **修复位置：** `src/synthesis/axioms.py` 或 `src/synthesis/backend.py`
 
 ### 4.4 Stage B 失败 — 物理分配问题
 
-**症状：** `Bank 0 时间冲突: X(T=9) & Y(T=10)` (间隔 < 2)
+**症状：** `Bank 0 时间冲突: X(T=9) & Y(T=9)` (同拍冲突)
 
 **排查：**
 ```bash
@@ -354,7 +355,8 @@ with open('build/operators/.../stage_b_mapped.json') as f:
 ```
 
 **常见根因：**
-- `BalancedBankColorer` 着色冲突 (同Bank间隔 < 2 cycles)
+- `BalancedBankColorer` 着色冲突 (同 Bank 同拍)
+- 同 Spill 源的多个 Reload 被漏保护 (需 `add_spill_reload_mutex_axiom`)
 - `MemoryAllocator` 地址碰撞
 - `iq_id` 被 pipeline_runner 覆盖 (参见 §6.1)
 
@@ -544,6 +546,40 @@ python3 tests/regression/run_regression.py --verify-only
 **约定：** Lane 0 = 128-bit 寄存器的 **最低 32 bits** = `hex_str[-8:]`  
 **错误写法：** `hex_str[:8]` (取的是最高位 Lane 3)  
 **影响：** 常量值对比全部错乱
+
+### 6.5 Bank 冲突间隔过严 Bug (V2.0 修复)
+
+**文件：** `src/synthesis/axioms.py` + `src/tools/standard_pipeline_runner.py`  
+**症状：** 高阶 Taylor 展开 (如 atan2 order≥3) SMT 合成成功但 Bank 验证失败  
+**根因：** Bank 冲突约束被设为 `|T_i - T_j| ≥ 2`，但硬件仅要求 `T_i ≠ T_j` (同拍互斥)  
+**修复：** `axioms.py` 中 `bank_gap` 改为 `!=`，`runner.py` 验证间隔改为 `== 0`
+
+### 6.6 Spill Reload 无 Bank 保护 Bug (V2.0 修复)
+
+**文件：** `src/synthesis/axioms.py`  
+**症状：** `x1_reload_24(T=38) & x1_reload_25(T=38)` Bank 冲突  
+**根因：** `add_bank_conflict_axiom` 仅对 `manual_bank` 生效，Spill/Reload 节点无 `manual_bank`  
+**修复：** 新增 `add_spill_reload_mutex_axiom`，对同 spill 源的 reload 强制 `T_i ≠ T_j`
+
+### 6.7 Latency 查询大小写 Bug (V2.0 修复)
+
+**文件：** `src/tools/standard_pipeline_runner.py`  
+**症状：** FPMUL/FPADD 延迟被 fallback 到 default=1 (实际应为 4)  
+**根因：** `dep.op_type.lower()` 查 YAML key (如 `"FPMUL"`)，大小写不匹配  
+**修复：** 使用归一化 `{k.upper(): v}` 映射
+
+### 6.8 RTOVR Transit 不一致 Bug (V2.0 修复)
+
+**文件：** `src/synthesis/backend.py`  
+**症状：** RAW 依赖给 RTOVR 的 transit=0，但影子绑定给了 >=T+1  
+**根因：** RTOVR 数据可见延迟硬件确认为 T+1，transit 应为 1  
+**修复：** 统一 RTOVR transit 为 1
+
+### 6.9 Emitter max_cycles 硬编码 Bug (V2.0 修复)
+
+**文件：** `src/driver/emitter.py`  
+**症状：** Order 7 排布需要 124 拍但 `DEFAULT_MAX_CYCLES=120`  
+**修复：** `max_cycles = max(DEFAULT, actual_max_t + 10)` 自动适配
 
 ---
 

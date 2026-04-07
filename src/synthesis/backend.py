@@ -99,15 +99,18 @@ class SMTSynthesizer:
                     dep_node = nodes_by_id[dep_id]
                     delay = self.norm_delays.get(dep_node.op_type.upper(), 1)
                     # 🛰️ [INDUSTRIAL ALIGNMENT] UR_WRITE 之后需 2 拍物理缓冲，防止总线竞争窗口引发的读取 0 合法性冲突
-                    transit = 2 if dep_node.op_type.upper() == "UR_WRITE" else (1 if dep_node.op_type.upper() != "RTOVR" else 0)
+                    # RTOVR 数据 T+1 可见，其他单元均需 transit=1
+                    transit = 2 if dep_node.op_type.upper() == "UR_WRITE" else 1
                     solver.add(t[op.trace_id] >= t[dep_id] + (delay - 1) + transit)
 
         # 4. 物理资源互斥与公理注入 (去硬编码版)
-        SynthesisAxioms.add_iq_mutex_axiom(solver, ops, t)
+        SynthesisAxioms.add_read_port_mutex_axiom(solver, ops, t, iq_vars)
+        SynthesisAxioms.add_iq_latch_protect_axiom(solver, ops, t, iq_vars)
         SynthesisAxioms.add_rtovr_crossbar_axiom(solver, ops, t, self.hw_spec)
         SynthesisAxioms.add_bank_conflict_axiom(solver, ops, t)
-        SynthesisAxioms.add_liveness_flush_axiom(solver, ops, t, iq_vars)
-        SynthesisAxioms.add_alu_liveness_axiom(solver, ops, t, iq_vars)
+        SynthesisAxioms.add_spill_reload_mutex_axiom(solver, ops, t)
+        SynthesisAxioms.add_alu_pipeline_axiom(solver, ops, t, self.hw_spec)
+        SynthesisAxioms.add_write_port_mutex_axiom(solver, ops, t, iq_vars)
 
         # 5. 影子绑定与同步
         for op in ops:
@@ -116,9 +119,9 @@ class SMTSynthesizer:
             
             if rtovr_deps and op.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE", "LOGIC"]:
                 for rd in rtovr_deps:
-                    # 🛸 [INDUSTRIAL ALIGNMENT] 强制数据-指令对齐
-                    # 修改：从 >= 1 改为 == 1，确保数据在插槽内不会因为排布过早而丢失
-                    solver.add(t[op.trace_id] == t[rd] + 1)
+                    # 🛸 [INDUSTRIAL ALIGNMENT] 强制数据-指令对位
+                    # 修改：从 == 改为 >=，物理松绑允许写操作在时间轴上自由平铺
+                    solver.add(t[op.trace_id] >= t[rd] + 1)
                     
                     # 🛸 物理插槽对齐 (Crucial for UR_WRITE)
                     # 如果是 UR_WRITE，必须强制将其前驱 RTOVR 的 Slot 设为与其物理 IQ 对应的位置

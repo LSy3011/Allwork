@@ -323,7 +323,7 @@ class StandardPipelineRunner:
             for i in range(len(nodes_in_bank)):
                 for j in range(i+1, len(nodes_in_bank)):
                     n1, n2 = nodes_in_bank[i], nodes_in_bank[j]
-                    if abs(n1.logic_cycle - n2.logic_cycle) < 2:
+                    if n1.logic_cycle == n2.logic_cycle:
                         raise ValueError(f"Stage C/B Violation: Time Collision in Bank {bid} "
                                          f"between {n1.trace_id}(T={n1.logic_cycle}) & {n2.trace_id}(T={n2.logic_cycle})")
 
@@ -332,12 +332,13 @@ class StandardPipelineRunner:
         nodes = {n.trace_id: n for n in dfg if hasattr(n, "logic_cycle")}
         
         # 1. Latency Contract Check
+        norm_delays = {k.upper(): v for k, v in self.spec.delays.items()}
         for node in dfg:
             if not hasattr(node, "logic_cycle"): continue
             for dep_id in node.metadata.get("depends_on", []):
                 if dep_id not in nodes: continue
                 dep = nodes[dep_id]
-                expected_latency = self.spec.delays.get(dep.op_type.lower(), 1)
+                expected_latency = norm_delays.get(dep.op_type.upper(), 1)
                 if node.logic_cycle < dep.logic_cycle + expected_latency:
                     if dep.op_type == "RTOVR" and node.logic_cycle >= dep.logic_cycle + 1: continue
                     raise ValueError(f"Stage C Violation: {node.trace_id}(T={node.logic_cycle}) < "
@@ -356,13 +357,18 @@ class StandardPipelineRunner:
                 t_prod = node.logic_cycle
                 consumers = [n for n in dfg if node.trace_id in n.metadata.get("depends_on", [])]
                 for cons in consumers:
+                    # 只有 RTOVR 是真正的消费者（搬运走结果）
+                    if cons.op_type != "RTOVR": continue
                     t_cons = getattr(cons, "logic_cycle", -1)
                     if t_cons > t_prod:
+                        lat = self.spec.delays.get(node.op_type.lower(), 4)
                         for exec_t, exec_id in alu_execs[node.op_type]:
-                            if t_prod < exec_t < t_cons and exec_id != node.trace_id:
+                            # 流水线对齐：只有当下一个指令的“写回时间”(exec_t + lat) 
+                            # 早于当前数据的“搬运完成时间”(t_cons) 时，才会发生覆写。
+                            if t_prod < exec_t and (exec_t + lat) <= t_cons and exec_id != node.trace_id:
                                 raise RuntimeError(f"FATAL Stage 2 Liveness Violation: \n"
                                                    f"Data from {node.trace_id}(T={t_prod}) -> {cons.trace_id}(T={t_cons}) "
-                                                   f"was OVERWRITTEN by {exec_id} running at T={exec_t}!")
+                                                   f"was OVERWRITTEN by {exec_id} (returns at T={exec_t + lat})!")
 
     def _generate_timeline_ascii(self, final_stream: List, path: Path):
         """生成文本版流水线图。"""

@@ -185,11 +185,14 @@ class LIRPacker:
             iq_init[name] = f"smc_0/{hex_file_name}" # 这里 Key 依然用原始 name 以匹配 SMC Core
 
         # 4. 导出 sim_config.json
+        # 自动适配仿真周期: 取 DEFAULT 与实际排布最大拍+余量 中的较大值
+        actual_max_t = max((s["t"] for stream in module_streams.values() for s in stream), default=0)
+        effective_max_cycles = max(DEFAULT_MAX_CYCLES, actual_max_t + 10)
         sim_conf = {
             "smc_id": 0,
             "iq_init": iq_init,
             "ur_init": {str(b): f"smc_0/ur_data/bank{b}.hex" for b in range(8)},
-            "max_cycles": DEFAULT_MAX_CYCLES,
+            "max_cycles": effective_max_cycles,
             "tensors": []
         }
         
