@@ -126,17 +126,32 @@ class GraphCompiler:
                 self.mir_env[sym] = current
                 return
                 
-        # 匹配【幂次运算 (展开为乘法)】 -> FPMUL 级联
+        # 匹配【幂次运算 (映射为乘法或倒数泰勒展开)】
         if isinstance(expr, sp.Pow):
             base, exp = expr.args
-            if isinstance(exp, sp.Integer) and exp > 0:
-                current = self._get_op(base)
-                for i in range(1, int(exp)):
-                    r0 = self._route(current, PS.FPMUL_S0)
-                    r1 = self._route(self._get_op(base), PS.FPMUL_S1)
-                    current = self.b.make_op("FPMUL", f"{sym}_pw{i}", RT.FPMUL, [r0, r1])
-                self.mir_env[sym] = current
-                return
+            if isinstance(exp, sp.Integer):
+                 exp_val = int(exp)
+                 if exp_val > 0:
+                     # 级联 FPMUL
+                     current = self._get_op(base)
+                     for i in range(1, exp_val):
+                         r0 = self._route(current, PS.FPMUL_S0)
+                         r1 = self._route(self._get_op(base), PS.FPMUL_S1)
+                         current = self.b.make_op("FPMUL", f"{sym}_pw{i}", RT.FPMUL, [r0, r1])
+                     self.mir_env[sym] = current
+                     return
+                 elif exp_val == -1:
+                     # 匹配【倒数 1/x】 -> 转为 5 阶泰勒展开: 1 - dx + dx^2 - dx^3 + dx^4 - dx^5
+                     # 采用更紧凑的 Horner 形式: 1 - dx(1 - dx(1 - dx(1 - dx(1 - dx))))
+                     # 或者简单迭代: recip = 1.0; for i in 5: recip = 1.0 - dx * recip
+                     dx = base - 1.0
+                     recip = sp.Float(1.0)
+                     for _ in range(5):
+                         recip = 1.0 - dx * recip
+                     
+                     # 强制下沉求值
+                     self.mir_env[sym] = self._get_op(recip)
+                     return
 
         # 匹配【标量加法与向量逐元素加法】 -> FPADD 级联
         if isinstance(expr, sp.Add):
@@ -189,9 +204,9 @@ class GraphCompiler:
                 r0_sel = self._route(a, PS.LOGIC_S0)
                 r1_sel = self._route(b, PS.LOGIC_S1)
                 
-                # SELECT_LE (Less than or Equal) if we want min
+                # SELECT_LS (Less Than) for min: if a < b return a else b
                 self.mir_env[sym] = self.b.make_op("LOGIC", str(sym), RT.LOGIC, [r0_sel, r1_sel, st_wire], 
-                                                   OP_TYPE="SELECT_LE", VALID=1, comment=f"MIN({args[0]}, {args[1]})")
+                                                   OP_TYPE="SELECT_LS", VALID=1, comment=f"MIN({args[0]}, {args[1]})")
                 return
 
         # 匹配【绝对值】 -> Max(x, -x)
