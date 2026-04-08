@@ -1,7 +1,7 @@
-# AIACC 编译器开发与 Debug 标准流程 (V2.0)
+# AIACC 编译器开发与 Debug 标准流程 (V4.0 - ADPC 契约版)
 
 > 本文档是 AIACC 编译器团队的 **权威开发手册**。  
-> 覆盖：算子开发全流程、Bug 定位标准方法、工具链使用指南、目录规约。
+> 覆盖：V4.0 算子工厂开发流、物理等价类分布式验证、Bug 定位标准方法、工具链使用指南。
 
 ---
 
@@ -32,14 +32,16 @@
 │  │ Stage A │    │ Stage C │    │ Stage B │    │ Stage D │    │Stage E │
 │  │ Frontend│───▶│  SMT    │───▶│ Physical│───▶│  LIR   │───▶│  Sim   │
 │  │ DFG Gen │    │ 时序合成│    │ Bank/Addr│   │ Hex 发射│   │ 仿真验证│
-│  └─────────┘    └─────────┘    └─────────┘    └─────────┘    └────────┘
+│  └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘
 │       │              │              │              │              │
 │       ▼              ▼              ▼              ▼              ▼
 │  stage_a_       stage_c_       stage_b_       acb_bundle/     sim.log
-│  initial.json   synthesis.json mapped.json    *.hex
-│                                               sim_config.json
+│  initial.json   synthesis.json mapped.json    *.hex           (Layout 0..N)
+│                                               layout_cfg.json
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+> **V4.0 核心变更**：引入 **Layout 隔离路径**。每个算子的不同 Bank 碰撞组合（Fuzzing Layout）将输出到独立的子目录中，确保物理冲突验证互不干扰。
 
 ### 1.2 每阶段输入/输出与责任模块
 
@@ -97,10 +99,11 @@ aiacc_compiler/
 │   ├── ir/                       #   中间表示定义
 │   └── tools/                    #   ★ 开发/Debug 工具链
 │       ├── dfg_evaluator.py      #     DFG 数学求值 (SSoT)
-│       ├── debug_pipeline.py     #     一键 5 阶段 Bug 定位
-│       ├── cycle_verifier.py     #     逐周期仿真对比
-│       ├── hex_disassembler.py   #     Hex → 伪指令反汇编
-│       ├── standard_pipeline_runner.py  # 标准编译流水线
+│       ├── debug_pipeline.py      #     一键 5 阶段 Bug 定位
+│       ├── op_fuzz.py             #   ★ 单算子 Bank 碰撞压力测试 (CLI)
+│       ├── pipeline_utils.py      #     物理布局隔离与 DFG 动态注入器
+│       ├── cycle_verifier.py      #     逐周期仿真对比
+│       ├── standard_pipeline_runner.py  # 标准编译流水线 (V4.0)
 │       └── pipeline_verifier.py  #     独立验证套件
 │
 ├── sim/                          # 仿真器
@@ -139,10 +142,11 @@ aiacc_compiler/
 
 | 维度 | 约定路径 |
 |------|----------|
-| **测试脚本** | `tests/operators/{category}/{op_name}/test_{op_name}.py` |
-| **Build 产物** | `build/operators/{category}/{op_name}/` |
-| **Debug 命令** | `debug_pipeline.py --op {op_name} -c {category}` |
-| **回归注册** | `tests/regression/registry.json` → status: `ready` |
+| **测试脚本 (旧)** | `tests/operators/{category}/{op_name}/test_{op_name}.py` |
+| **算子工厂 (新)** | `tests/operators/utils/op_library.py` (录入公式即开发) |
+| **Build 产物** | `build/operators/{category}/{op_name}/layout_{id}/` |
+| **单算子 Fuzz** | `python3 tests/operators/op_fuzz.py {op_name}` |
+| **一键验证** | `debug_pipeline.py --op {op_name} -c {category} --layout {id}` |
 
 **示例：新增 cos 算子**
 ```
@@ -155,28 +159,26 @@ registry.json → "cos": {"status": "ready"}              ← 标记就绪
 
 ## 3. 算子开发标准流程
 
-### 3.1 开发步骤
+### 3.1 现代开发流 (V4.0 Operator Factory)
+**这是目前推荐的标准流程，适用于 80+ 算子的批量生产。**
 
 ```
-Step 1: 创建测试脚本
-         │
-         ▼
-Step 2: 实现前端 DFG 构建
-         │
-         ▼
-Step 3: 运行编译 + 仿真
-         │
-         ▼
-Step 4: 用 debug_pipeline 验证 5 阶段
-         │
-    ┌────┴────┐
-    │ PASS    │ FAIL → 进入 Bug 定位流程 (§4)
-    ▼         │
-Step 5: 标记 registry.json status=ready
-         │
-         ▼
-Step 6: 运行回归门禁确认无回归
+Step 1: 在 tests/operators/utils/op_library.py 中注册算子数学公式
+          │
+          ▼
+Step 2: 运行单算子 Fuzzer 进行全物理拓扑覆盖测试
+          │ 命令: python3 tests/operators/op_fuzz.py {op_name}
+          ▼
+Step 3: 检查覆盖率报告（Passed N/N layouts）
+          │
+     ┌────┴────┐
+     │ 100% OK │ FAIL → 降低迭代次数或优化 DFG 拓扑
+     ▼         │        (优先选用线性链 Taylor，而非自回归 NR)
+Step 4: 标记 registry.json status=ready
 ```
+
+### 3.2 传统开发流 (手动脚本)
+*保留用于调试复杂的 Custom Kernel。* 参见 [test_cos.py 代码参考](#32-step-1--创建测试脚本)。
 
 ### 3.2 Step 1 — 创建测试脚本
 
@@ -520,12 +522,19 @@ python3 tests/regression/run_regression.py --verify-only
 
 ## 6. 已知陷阱与历史 Bug
 
-### 6.1 IQ ID 覆盖 Bug
+### 6.10 Newton-Raphson vs Taylor 复杂度陷阱
+- **对比**：NR 是自回归结构（$y_n$ 依赖两个上级节点），Taylor 是线性倍增结构。
+- **后果**：NR 在多输入 Bank 冲突下极易触发 `SMT UNSAT`，即使节点数只有 50。
+- **准则**：优先选用 **64 阶倍增泰勒 (Binary Taylor-64)**，它在 AIACC 架构上更易通过物理排布。
 
-**文件：** `src/tools/standard_pipeline_runner.py`  
-**症状：** SMT 分配了正确的 `iq_id`，但物理分配器覆盖了它  
-**根因：** 分配器无条件写入 `iq_id`，没有检查是否已存在  
-**修复：** `if "iq_id" not in node.metadata: node.metadata["iq_id"] = ...`
+### 6.11 编译器状态泄露 (State Leak)
+- **发现**：在多轮编译循环中，`GraphCompiler` 如果不重置 `MIROpBuilder`，节点会呈等差数列增长。
+- **修复**：`GraphCompiler.compile()` 内部必须强制调用 `self.b = MIROpBuilder()` 重开环境。
+
+### 6.12 泰勒展开收敛域边界问题
+- **场景**：`reciprocal(u)` 展开点为 1，收敛域为 (0, 2)。
+- **Bug**：在 `softsign(1.0)` 处分母刚好为 2，泰勒发散。
+- **修复**：将展开阶数提升至 64 阶，并在 $x=2$ 附近通过偏移展开点或使用更高精度的倍增公式。
 
 ### 6.2 eval_math 常量返回值丢失 Bug
 

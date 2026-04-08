@@ -21,10 +21,11 @@ class StandardPipelineRunner:
         self.spec = HardwareSpec.load(self.hw_config)
         self.build_root.mkdir(parents=True, exist_ok=True)
 
-    def run_full_pipeline(self, op_name: str, get_dfg_fn, input_data: Dict[str, Any], golden_y: np.ndarray):
+    def run_full_pipeline(self, op_name: str, get_dfg_fn, input_data: Dict[str, Any], golden_y: np.ndarray, category: str = "standard", layout_id: int = None):
         print(f"\n🚀 [PIPELINE] Starting standardized flow for: {op_name}")
-        op_dir = self.build_root / op_name
-        op_dir.mkdir(parents=True, exist_ok=True)
+        
+        from tools.pipeline_utils import setup_isolated_build_dir
+        op_dir = setup_isolated_build_dir(self.build_root, category, op_name, layout_id)
 
         # --- Stage A: MIR DFG (初图) ---
         dfg = get_dfg_fn()

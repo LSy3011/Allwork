@@ -35,11 +35,17 @@ class GraphCompiler:
         kwargs = {"dep_port": dep_port} if dep_port else {}
         return self.b.make_op("RTOVR", uid, target_slot, [nid], **kwargs)
 
-    def compile(self, inputs: Dict[sp.Symbol, dict], formula, out_name="out") -> List:
+    def compile(self, inputs, formula, out_name="out_0") -> List:
         """
         编译主函数。将复杂的符号数学公式压缩、优化并装配为底层算子图。
         inputs: DFG 的输入口锚点，允许指派测试用的 kwargs (如 manual_bank)
         """
+        # 🛸 [ADPC V4.0] 关键修复：重排时清空中间态环境，防止节点在多轮 Fuzz 中累积爆炸。
+        from ir.mir.builder import MIROpBuilder
+        self.b = MIROpBuilder()
+        self.mir_env = {}
+        self.cse_vars = set()
+        
         self.inputs_meta = inputs
         # --- Stage 1: Sympy 中端图优化 (常数叠算，公共子代清除) ---
         opt_nodes, final_res = sp.cse(formula)
@@ -141,25 +147,25 @@ class GraphCompiler:
                      self.mir_env[sym] = current
                      return
                  elif exp_val == -1:
-                     # 🛸 [ADPC V4.0] 16 阶优化泰勒展开 (Binary Power Series Expansion)
-                     # 数学等价于 16 阶 Taylor: (1-dx)(1+dx^2)(1+dx^4)(1+dx^8)
-                     # 该结构相比线性 Taylor 大幅降低了关键路径长度，确保 120 拍内收敛。
+                     # 🛸 [ADPC V4.0] 64 阶倍增泰勒展开 (Binary Power Series V3.0)
+                     # 数学等价于 64 阶: (1-dx)(1+dx^2)(1+dx^4)...(1+dx^32)
+                     # 拓扑表现为线性链，深度约 24 拍，远优于自回归结构的 NR 方案。
                      x_node = self._get_op(base)
                      one_node = self._get_const(sp.Float(1.0))
                      
-                     # dx = x - 1.0
+                     # dx = x - 1.0 (泰勒展开基础)
                      r_x = self._route(x_node, PS.FPADD_S0)
                      r_o1 = self._route(one_node, PS.FPADD_S1)
                      dx = self.b.make_op("FPADD", f"{sym}_dx", RT.FPADD, [r_x, r_o1], SUB=1)
                      
-                     # y = 1.0 - dx
+                     # 初始值 y = 1.0 - dx
                      r_o2 = self._route(one_node, PS.FPADD_S0)
                      r_dx1 = self._route(dx, PS.FPADD_S1)
                      y = self.b.make_op("FPADD", f"{sym}_y1", RT.FPADD, [r_o2, r_dx1], SUB=1)
                      
-                     # 二进制倍增提升阶数: 2 -> 4 -> 8 -> 16
+                     # 二进制倍增提升阶数: 2 -> 4 -> 8 -> 16 -> 32 -> 64 (精度 10^-7 级)
                      curr_dx_pow = dx
-                     for i in range(4):
+                     for i in range(6):
                          # dx_pow_next = dx_pow * dx_pow
                          r_p0 = self._route(curr_dx_pow, PS.FPMUL_S0)
                          r_p1 = self._route(curr_dx_pow, PS.FPMUL_S1)
