@@ -158,107 +158,62 @@ registry.json → "cos": {"status": "ready"}              ← 标记就绪
 
 ---
 
-## 3. 算子开发标准流程
+## 3. 算子标准化开发流程 (V4.0 Factory Standard)
 
-### 3.1 现代开发流 (V4.0 Operator Factory)
-**这是目前推荐的标准流程，适用于 80+ 算子的批量生产。**
+### 3.1 开发步骤 (录入即验证)
+在新窗口或新算子开发时，彻底告别手动编写 `test_*.py` 脚本：
 
 ```
-Step 1: 在 tests/operators/utils/op_library.py 中注册算子数学公式
-          │
-          ▼
-Step 2: 运行单算子 Fuzzer 进行全物理拓扑覆盖测试
-          │ 命令: python3 tests/operators/op_fuzz.py {op_name}
-          ▼
-Step 3: 检查覆盖率报告（Passed N/N layouts）
-          │
-     ┌────┴────┐
-     │ 100% OK │ FAIL → 降低迭代次数或优化 DFG 拓扑
-     ▼         │        (优先选用线性链 Taylor，而非自回归 NR)
-Step 4: 标记 registry.json status=ready
+Step 1: 注册数学定义 
+        └─ 修改 tests/operators/utils/op_library.py，填入公式与 Golden 函数
+
+Step 2: 触发全物理覆盖压力测试 (Fuzzing)
+        └─ 执行 python3 tests/operators/op_fuzz.py {op_name}
+
+Step 3: 检查覆盖率报告
+        └─ 确保所有 Layout 分支 (Collide/Separate) 及其精度均通过
 ```
 
-### 3.2 传统开发流 (手动脚本)
-*保留用于调试复杂的 Custom Kernel。* 参见 [test_cos.py 代码参考](#32-step-1--创建测试脚本)。
+### 3.2 路径隔离规约 (Path Isolation)
+所有 Factory 测试产物将按 Layout ID 自动隔离，格式如下：
+`build/operators/fuzz_diagnostics/{op_name}/layout_{N}/`
 
-### 3.2 Step 1 — 创建测试脚本
+每一路 Layout 包含完整的 Stage A-E 产物，方便对特定物理碰撞场景进行回溯。
 
-在约定路径创建测试文件：
+### 3.3 传统开发 (Legacy Support)
+仅在需要开发极其复杂的 **Custom Kernel**（手动拼物理路由）时使用手动脚本，常规算子严禁新建 `test_*.py`。
 
-```python
-# tests/operators/unary/transcendentals/cos/test_cos.py
-import sys
-import numpy as np
-from pathlib import Path
-import sympy as sp
+---
 
-ws = Path(__file__).resolve().parents[5]
-sys.path.insert(0, str(ws / "src"))
+## 4. Bug 定位标准方法 (Diagnostics)
 
-from tools.standard_pipeline_runner import StandardPipelineRunner
-from frontend import GraphCompiler
+### 4.1 定位决策树
+运行 `op_fuzz.py` 失败后，根据首个报错 Layout 进入诊断流：
 
-
-def get_frontend_dfg():
-    compiler = GraphCompiler()
-    x = sp.Symbol('x')
-    # cos(x) ≈ 1 - x²/2 + x⁴/24 - x⁶/720
-    formula = 1.0 - x**2 * (0.5 - x**2 * (0.0416666667 - x**2 * 0.001388889))
-    inputs_meta = {x: {"manual_bank": 2, "role": "operand_a"}}
-    return compiler.compile(inputs_meta, formula, out_name="y")
-
-
-def test_cos():
-    runner = StandardPipelineRunner(
-        hw_config="hw_config",
-        build_root="build/operators/unary/transcendentals"  # ← 约定路径
-    )
-    sys.path.insert(0, str(ws / "tests" / "operators"))
-    from utils.data_generator import ArithTestDataGenerator
-
-    gen_data = ArithTestDataGenerator.generate("cos", mode="fuzz", size=4)
-    test_x = gen_data["ch_0"]
-
-    success = runner.run_full_pipeline(
-        op_name="cos",          # ← Build 子目录名
-        get_dfg_fn=get_frontend_dfg,
-        input_data={"x": test_x},
-        golden_y=np.cos(test_x)
-    )
-    sys.exit(0 if success else 1)
-
-if __name__ == "__main__":
-    test_cos()
 ```
-
-### 3.3 Step 2 — 运行编译
-
-```bash
-python3 tests/operators/unary/transcendentals/cos/test_cos.py
-```
-
-### 3.4 Step 3 — 一键验证
-
-```bash
-python3 src/tools/debug_pipeline.py --op cos -c unary/transcendentals
-```
-
-### 3.5 Step 4 — 注册到回归
-
-编辑 `tests/regression/registry.json`：
-```json
-"cos": {"description": "cos(x) 泰勒展开", "status": "ready"}
-```
-
-### 3.6 Step 5 — 确认无回归
-
-```bash
-python3 tests/regression/run_regression.py
+Layout N 失败
+  │
+  ▼
+运行一键验证命令
+python3 src/tools/debug_pipeline.py --op {op_name} -c fuzz_diagnostics --layout {N}
+  │
+  ├─ Stage A/C 失败 ──▶ 检查 DFG 拓扑 (Taylor 阶数是否导致爆炸)
+  ├─ Stage B 失败 ────▶ 检查 Bank 碰撞 (Bank 0 是否过度拥堵)
+  └─ Stage E 失败 ────▶ 检查数值精度 (64阶泰勒是否覆盖收敛域)
 ```
 
 ---
 
-## 4. Bug 定位标准方法
+## 5. 工具链速查表 (Toolbox V4.0)
+
+### 5.1 核心命令
+| 功能 | 命令 | 适用场景 |
+|------|------|----------|
+| **全案压力测试** | `python3 tests/operators/op_fuzz.py {op}` | 算子准入必测 (All Banks) |
+| **单路 Layout 诊断** | `debug_pipeline.py --op {op} -c fuzz_diag --layout {n}` | 物理冲突详细追踪 |
+| **逐周期精度审计** | `cycle_verifier.py --dir build/.../layout_{n}` | 计算漂移排查 |
+| **物理 Hex 反汇编** | `hex_disassembler.py --dir build/.../layout_{n} --compare` | LIR 编解码对齐 |
+| **全量回归门禁** | `python3 tests/regression/run_regression.py` | 代码入库前置条件 |
 
 ### 4.1 定位决策树
 
