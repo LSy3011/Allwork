@@ -20,7 +20,8 @@
         "acos": {"description": "arccos(x)", "status": "ready"},
         "atan": {"description": "arctan(x)", "status": "ready"},
         "sinh": {"description": "sinh(x) 双曲正弦", "status": "ready"},
-        "cosh": {"description": "cosh(x) 双曲余弦", "status": "ready"}
+        "cosh": {"description": "cosh(x) 双曲余弦", "status": "ready"},
+        "erf": {"description": "erf(x) 7阶泰勒展开", "status": "ready"}
       }
     },
     "unary/math": {
@@ -71,7 +72,13 @@
         "swish": {"description": "Swish/SiLU (Sigmoid 近似)", "status": "ready"},
         "selu": {"description": "SELU 激活", "status": "ready"},
         "elu": {"description": "ELU 激活", "status": "ready"},
-        "leaky_relu": {"description": "Leaky ReLU 激活", "status": "ready"}
+        "leaky_relu": {"description": "Leaky ReLU 激活", "status": "ready"},
+        "softplus": {"description": "log(1 + exp(x)) 泰勒展开", "status": "ready"},
+        "celu": {"description": "Max/Min 组合泰勒激活", "status": "ready"},
+        "log_sigmoid": {"description": "-log(1 + exp(-x)) 泰勒展开", "status": "ready"},
+        "softsign": {"description": "x / (1 + |x|) 组合算子", "status": "ready"},
+        "hard_sigmoid": {"description": "max(0, min(1, x/6 + 0.5))", "status": "ready"},
+        "hard_tanh": {"description": "max(-1, min(1, x))", "status": "ready"}
       }
     },
     "normalization": {
