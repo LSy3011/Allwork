@@ -602,10 +602,13 @@ python3 tests/regression/run_regression.py --verify-only
 **修复：** 统一 RTOVR transit 为 1
 
 ### 6.9 Emitter max_cycles 硬编码 Bug (V2.0 修复)
+### 6.13 Stage B/C 逻辑倒置风险 (V4.1 同步)
+- **背景**：早期代码曾尝试将物理分配（B）前置于时序合成（C），导致 SMT 求解难度剧增。
+- **现行标准**：**C (时序) -> B (物理)**。代码注释已于 2026-04-08 全面校准，严禁反向调用。
 
-**文件：** `src/driver/emitter.py`  
-**症状：** Order 7 排布需要 124 拍但 `DEFAULT_MAX_CYCLES=120`  
-**修复：** `max_cycles = max(DEFAULT, actual_max_t + 10)` 自动适配
+### 6.14 常量池冗余节点溢出 (V4.1 优化)
+- **原因**：重复调用 `_get_const()` 会产生大量相同的 `UR_READ` 节点，撑爆 SMT 搜索空间。
+- **修复**：后端已引入 `const_pool` 缓存，所有数值相同的常量在 DFG 层强制合并为单一节点。
 
 ---
 

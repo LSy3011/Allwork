@@ -15,27 +15,18 @@ def setup_isolated_build_dir(base_root, op_category, op_name, layout_id=None):
 
 def apply_bank_overrides(dfg, bank_map):
     """
-    🛸 [ADPC V4.0] 动态物理绑定工具
-    支持 MIRNode 对象列表或单纯的 dict。
-    bank_map: {"x": 0, "y": 1, "constants": 0}
+    👽 [ADPC V4.0] 物理劫持器：在 SMT 综合前，将 DFG 中的逻辑节点强行绑定到物理 Bank。
     """
-    nodes = dfg if isinstance(dfg, list) else dfg.get("nodes", {}).values()
-    
-    for node in nodes:
-        # 兼容性处理：MIRNode 对象使用 metadata 字段，dict 格式使用 get()
-        if hasattr(node, "metadata"):
-            meta = node.metadata
-        else:
-            meta = node.get("metadata", {})
-            
-        role = meta.get("role", "")
-        meta_name = meta.get("meta_name")
+    for node in dfg:
+        # 🛸 隐藏 Bug 修复：处理 MIROp 对象和原始 Dict 的兼容性
+        metadata = node.metadata if hasattr(node, "metadata") else node.get("metadata", {})
+        actor_name = metadata.get("meta_name") or metadata.get("role")
         
-        if meta_name in bank_map:
-            meta["manual_bank"] = bank_map[meta_name]
-        elif role == "constant" and "constants" in bank_map:
-            meta["manual_bank"] = bank_map["constants"]
-            
+        if actor_name in bank_map:
+            metadata["manual_bank"] = bank_map[actor_name]
+        elif "constants" in bank_map and "cinl" in str(node if not hasattr(node, "trace_id") else node.trace_id):
+            # 将所有常量重定向到指定的常量池 Bank
+            metadata["manual_bank"] = bank_map["constants"]
     return dfg
 
 def save_layout_metadata(build_path, bank_map):

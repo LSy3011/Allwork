@@ -45,6 +45,8 @@ class GraphCompiler:
         self.b = MIROpBuilder()
         self.mir_env = {}
         self.cse_vars = set()
+        # 🛸 V4.0 常量池缓存：避免重复生成相同数值的 UR_READ 节点
+        self.const_pool = {} 
         
         self.inputs_meta = inputs
         # --- Stage 1: Sympy 中端图优化 (常数叠算，公共子代清除) ---
@@ -87,7 +89,7 @@ class GraphCompiler:
         # 标量常量内联
         if isinstance(expr, (sp.Float, sp.Integer, sp.Rational)):
             val = float(expr)
-            op = self.b.make_op("UR_READ", f"c_{sym}", RT.UR_READ, [], is_const=True, value=val, role="constant")
+            op = self._get_const(val)
             self.mir_env[sym] = op
             return
 
@@ -252,9 +254,9 @@ class GraphCompiler:
         # 匹配【符号函数】 -> sign(x) = SELECT_GT(1.0, SELECT_LS(-1.0, 0.0))
         if isinstance(expr, sp.sign):
              x = self._get_op(expr.args[0])
-             one = self._get_const(1.0, is_int=False)
-             neg_one = self._get_const(-1.0, is_int=False)
-             zero = self._get_const(0.0, is_int=False)
+             one = self._get_const(1.0)
+             neg_one = self._get_const(-1.0)
+             zero = self._get_const(0.0)
              
              # 1. cmp1 = x - 0.0 (判断正负)
              r0_cmp1 = self._route(x, PS.FPADD_S0)
@@ -330,8 +332,8 @@ class GraphCompiler:
                                   UPDATE_ST=1, SUB=1, comment=f"CMP {expr}")
              
              st_wire = self._route(cmp, PS.LOGIC_ST, dep_port="ST")
-             one = self._get_const(1.0, is_int=False)
-             zero = self._get_const(0.0, is_int=False)
+             one = self._get_const(1.0)
+             zero = self._get_const(0.0)
              op_type = "SELECT_GT" 
              r0_sel = self._route(one, PS.LOGIC_S0)
              r1_sel = self._route(zero, PS.LOGIC_S1)
@@ -420,13 +422,17 @@ class GraphCompiler:
         self._lower_expr(inline_sym, arg)
         return self.mir_env[inline_sym]
 
-    def _get_const(self, expr, is_int=False):
-        """常数匿名补丁"""
-        val = int(expr) if is_int else float(expr)
-        self.inl_cnt += 1
-        new_id = f"cinl_{str(val).replace('.', '_')}_{self.inl_cnt}"[:25]
-        op = self.b.make_op("UR_READ", new_id, RT.UR_READ, [], is_const=True, value=val, is_int=is_int, role="constant")
-        return op
+    def _get_const(self, val: sp.Float):
+        # 👽 冗余清理：通过缓存机制确保每个唯一数值在图中仅存在一个逻辑源
+        val_f = float(val)
+        if val_f in self.const_pool:
+            return self.const_pool[val_f]
+            
+        nid = f"cinl_{len(self.const_pool)}_{val_f}".replace(".", "_").replace("-", "n")
+        metadata = self.inputs_meta.get("constants", {})
+        node = self.b.make_op("UR_READ", nid, RT.UR_READ, role="constant", meta_name="constants", **metadata)
+        self.const_pool[val_f] = node
+        return node
         
     def _get_input(self, sym, is_int=False):
         """为输入张量产生一个严格贴近使用时间的全新读取操作，绕开物理引脚 Liveness 覆盖"""

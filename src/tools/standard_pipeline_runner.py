@@ -33,10 +33,10 @@ class StandardPipelineRunner:
         self._dump_dfg(dfg, op_dir / "stage_a_initial.json")
         print(f"  [A] MIR DFG initial graph generated & Math Parity verified.")
 
-        # --- Stage C (现移至 B 阶段): SMT Synthesis (解耦时序合成) ---
+        # --- Stage C: SMT Synthesis (时序合成) ---
         synthesis_res = SMTSynthesizer(self.spec).solve(dfg)
         if not synthesis_res:
-            raise RuntimeError(f"❌ Stage C(B) Failed: SMT UNSAT for {op_name}")
+            raise RuntimeError(f"❌ Stage C Failed: SMT UNSAT for {op_name}")
             
         from orchestrator.stitcher import HSTSStitcher
         stitcher = HSTSStitcher()
@@ -45,18 +45,18 @@ class StandardPipelineRunner:
         
         # 将时序信息填回 DFG 以备后验与分配
         for node in dfg:
-            if node.trace_id in synthesis_res:
+            if hasattr(node, "trace_id") and node.trace_id in synthesis_res:
                 node.logic_cycle = synthesis_res[node.trace_id]
         
         self._verify_stage_c(dfg)
         self._dump_dfg(dfg, op_dir / "stage_c_synthesis.json")
-        print(f"  [B/C] SMT synthesis completed. (Max Cycle: {max(synthesis_res.values())})")
+        print(f"  [C] SMT synthesis completed. (Max Cycle: {max(synthesis_res.values())})")
 
-        # --- Stage B (现移至 C 阶段): Bank & Address Allocation (后置预染色物理分配) ---
+        # --- Stage B: Physical Bank & Address Allocation (物理资源分配) ---
         dfg = self._perform_physical_allocation(dfg, input_data, op_dir)
         self._verify_stage_b(dfg)
         self._dump_dfg(dfg, op_dir / "stage_b_mapped.json")
-        print(f"  [C/B] Physical bank/addr allocation completed and true-conflict-free.")
+        print(f"  [B] Physical bank/addr allocation completed and true-conflict-free.")
 
         # --- Stage D: LIR Emission (指令打包) ---
         acb_path = op_dir / "acb_bundle"
