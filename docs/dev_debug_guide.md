@@ -523,6 +523,67 @@ python3 tests/regression/run_regression.py --verify-only
 
 ## 6. 已知陷阱与历史 Bug
 
+### 6.1 IQ ID 覆盖 Bug
+
+**文件：** `src/tools/standard_pipeline_runner.py`  
+**症状：** SMT 分配了正确的 `iq_id`，但物理分配器覆盖了它  
+**根因：** 分配器无条件写入 `iq_id`，没有检查是否已存在  
+**修复：** `if "iq_id" not in node.metadata: node.metadata["iq_id"] = ...`
+
+### 6.2 eval_math 常量返回值丢失 Bug
+
+**文件：** `src/tools/cycle_verifier.py` (已修复，迁移到 `dfg_evaluator.py`)  
+**症状：** 所有常量节点求值结果为 `0.0`  
+**根因：** `UR_READ` 常量分支缺少 `return val`，控制流落到函数末尾被覆盖为 `0.0`  
+**教训：** 每个分支都必须显式 `val_map[nid] = val; return val`
+
+### 6.3 FPADD 缺少仿真日志
+
+**文件：** `sim/smc_simulator/units/fp_add_unit.py`  
+**症状：** `cycle_verifier` 报告 "sim.log 无物理回执"  
+**根因：** FPMUL 有 `[MUL-EXEC]` 日志但 FPADD 没有  
+**修复：** 在 `evaluate()` 方法中添加 `print(f">>> [ADD-EXEC] Cyc:{cyc} S0:{s0_hex} S1:{s1_hex} R:{result_hex}")`
+
+### 6.4 Hex Lane 取位方向
+
+**约定：** Lane 0 = 128-bit 寄存器的 **最低 32 bits** = `hex_str[-8:]`  
+**错误写法：** `hex_str[:8]` (取的是最高位 Lane 3)  
+**影响：** 常量值对比全部错乱
+
+### 6.5 Bank 冲突间隔过严 Bug (V2.0 修复)
+
+**文件：** `src/synthesis/axioms.py` + `src/tools/standard_pipeline_runner.py`  
+**症状：** 高阶 Taylor 展开 (如 atan2 order≥3) SMT 合成成功但 Bank 验证失败  
+**根因：** Bank 冲突约束被设为 `|T_i - T_j| ≥ 2`，但硬件仅要求 `T_i ≠ T_j` (同拍互斥)  
+**修复：** `axioms.py` 中 `bank_gap` 改为 `!=`，`runner.py` 验证间隔改为 `== 0`
+
+### 6.6 Spill Reload 无 Bank 保护 Bug (V2.0 修复)
+
+**文件：** `src/synthesis/axioms.py`  
+**症状：** `x1_reload_24(T=38) & x1_reload_25(T=38)` Bank 冲突  
+**根因：** `add_bank_conflict_axiom` 仅对 `manual_bank` 生效，Spill/Reload 节点无 `manual_bank`  
+**修复：** 新增 `add_spill_reload_mutex_axiom`，对同 spill 源的 reload 强制 `T_i ≠ T_j`
+
+### 6.7 Latency 查询大小写 Bug (V2.0 修复)
+
+**文件：** `src/tools/standard_pipeline_runner.py`  
+**症状：** FPMUL/FPADD 延迟被 fallback 到 default=1 (实际应为 4)  
+**根因：** `dep.op_type.lower()` 查 YAML key (如 `"FPMUL"`)，大小写`不匹配`  
+**修复：** 使用归一化 `{k.upper(): v}` 映射
+
+### 6.8 RTOVR Transit 不一致 Bug (V2.0 修复)
+
+**文件：** `src/synthesis/backend.py`  
+**症状：** RAW 依赖给 RTOVR 的 transit=0，但影子绑定给了 >=T+1  
+**根因：** RTOVR 数据可见延迟硬件确认为 T+1，transit 应为 1  
+**修复：** 统一 RTOVR transit 为 1
+
+### 6.9 Emitter max_cycles 硬编码 Bug (V2.0 修复)
+
+**文件：** `src/driver/emitter.py`  
+**症状：** Order 7 排布需要 124 拍但 `DEFAULT_MAX_CYCLES=120`  
+**修复：** `max_cycles = max(DEFAULT, actual_max_t + 10)` 自动适配
+
 ### 6.10 Newton-Raphson vs Taylor 复杂度陷阱
 - **对比**：NR 是自回归结构（$y_n$ 依赖两个上级节点），Taylor 是线性倍增结构。
 - **后果**：NR 在多输入 Bank 冲突下极易触发 `SMT UNSAT`，即使节点数只有 50。
