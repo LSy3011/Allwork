@@ -35,12 +35,8 @@ def test_softsign():
     fx = np.array([-0.8, -0.2, 0.2, 0.8], dtype=np.float32)
     input_data = {"x": fx}
     
-    # Golden matching the DFG's auto-lowered reciprocal
-    # 1/u approx (5th order): 1 - du + du^2 - du^3 + du^4 - du^5
-    abs_x = np.abs(fx)
-    du = abs_x # (1+abs_x) - 1.0
-    recip = 1.0 - du * (1.0 - du * (1.0 - du * (1.0 - du * (1.0 - du))))
-    golden_y = fx * recip
+    # Golden: 使用真实数学公式验证编译器的高精度 NR 展开
+    golden_y = fx / (1.0 + np.abs(fx))
 
     success = runner.run_full_pipeline(
         op_name="softsign",

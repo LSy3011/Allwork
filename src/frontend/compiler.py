@@ -141,16 +141,41 @@ class GraphCompiler:
                      self.mir_env[sym] = current
                      return
                  elif exp_val == -1:
-                     # 匹配【倒数 1/x】 -> 转为 5 阶泰勒展开: 1 - dx + dx^2 - dx^3 + dx^4 - dx^5
-                     # 采用更紧凑的 Horner 形式: 1 - dx(1 - dx(1 - dx(1 - dx(1 - dx))))
-                     # 或者简单迭代: recip = 1.0; for i in 5: recip = 1.0 - dx * recip
-                     dx = base - 1.0
-                     recip = sp.Float(1.0)
-                     for _ in range(5):
-                         recip = 1.0 - dx * recip
+                     # 🛸 [ADPC V4.0] 16 阶优化泰勒展开 (Binary Power Series Expansion)
+                     # 数学等价于 16 阶 Taylor: (1-dx)(1+dx^2)(1+dx^4)(1+dx^8)
+                     # 该结构相比线性 Taylor 大幅降低了关键路径长度，确保 120 拍内收敛。
+                     x_node = self._get_op(base)
+                     one_node = self._get_const(sp.Float(1.0))
                      
-                     # 强制下沉求值
-                     self.mir_env[sym] = self._get_op(recip)
+                     # dx = x - 1.0
+                     r_x = self._route(x_node, PS.FPADD_S0)
+                     r_o1 = self._route(one_node, PS.FPADD_S1)
+                     dx = self.b.make_op("FPADD", f"{sym}_dx", RT.FPADD, [r_x, r_o1], SUB=1)
+                     
+                     # y = 1.0 - dx
+                     r_o2 = self._route(one_node, PS.FPADD_S0)
+                     r_dx1 = self._route(dx, PS.FPADD_S1)
+                     y = self.b.make_op("FPADD", f"{sym}_y1", RT.FPADD, [r_o2, r_dx1], SUB=1)
+                     
+                     # 二进制倍增提升阶数: 2 -> 4 -> 8 -> 16
+                     curr_dx_pow = dx
+                     for i in range(4):
+                         # dx_pow_next = dx_pow * dx_pow
+                         r_p0 = self._route(curr_dx_pow, PS.FPMUL_S0)
+                         r_p1 = self._route(curr_dx_pow, PS.FPMUL_S1)
+                         curr_dx_pow = self.b.make_op("FPMUL", f"{sym}_p{i}", RT.FPMUL, [r_p0, r_p1])
+                         
+                         # term = 1.0 + dx_pow_next
+                         r_o = self._route(one_node, PS.FPADD_S0)
+                         r_p = self._route(curr_dx_pow, PS.FPADD_S1)
+                         term = self.b.make_op("FPADD", f"{sym}_t{i}", RT.FPADD, [r_o, r_p])
+                         
+                         # y_next = y * term
+                         r_y = self._route(y, PS.FPMUL_S0)
+                         r_t = self._route(term, PS.FPMUL_S1)
+                         y = self.b.make_op("FPMUL", f"{sym}_res{i}", RT.FPMUL, [r_y, r_t])
+                     
+                     self.mir_env[sym] = y
                      return
 
         # 匹配【标量加法与向量逐元素加法】 -> FPADD 级联

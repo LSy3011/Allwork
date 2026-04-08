@@ -278,13 +278,17 @@ def check_stage_e(op_dir, val_map):
     except Exception as e:
         r.fail(f"加载物理验证器失败: {e}")
 
-    return r
-
-    # Golden 对比
-    if "PASSED" in open(sim_log_path).read() or "Verified successfully" in open(sim_log_path).read():
-        pass
+    # 🛸 [BUG-FIX] 恢复被 return 截断的 Golden 对比逻辑
+    sim_log_path = op_dir / "sim.log"
+    if sim_log_path.exists():
+        with open(sim_log_path) as f:
+            log_content = f.read()
+            if "PASSED" in log_content or "Verified successfully" in log_content:
+                pass
+            else:
+                r.fail("Golden 对比未通过 (Max Diff 校验失败)")
     else:
-        r.fail("Golden 对比未通过或未执行")
+        r.fail("sim.log 不存在，无法进行 Golden 校验")
 
     return r
 
