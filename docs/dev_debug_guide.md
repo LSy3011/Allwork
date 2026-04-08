@@ -102,6 +102,7 @@ aiacc_compiler/
 │       ├── debug_pipeline.py      #     一键 5 阶段 Bug 定位
 │       ├── op_fuzz.py             #   ★ 单算子 Bank 碰撞压力测试 (CLI)
 │       ├── pipeline_utils.py      #     物理布局隔离与 DFG 动态注入器
+│       ├── hex_disassembler.py    #     Hex → 伪指令反汇编
 │       ├── cycle_verifier.py      #     逐周期仿真对比
 │       ├── standard_pipeline_runner.py  # 标准编译流水线 (V4.0)
 │       └── pipeline_verifier.py  #     独立验证套件
