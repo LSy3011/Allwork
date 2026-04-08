@@ -1,375 +1,375 @@
 {
-  "timestamp": "2026-04-08T09:28:42.961451",
+  "timestamp": "2026-04-08T10:01:13.321949",
   "total": 52,
   "active": 52,
   "passed": 52,
   "failed": 0,
   "skipped": 0,
-  "duration": 8.409699201583862,
+  "duration": 83.78034090995789,
   "results": [
     {
       "op": "sin",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.1670234203338623
+      "duration": 1.0570769309997559
     },
     {
       "op": "cos",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.32650232315063477
+      "duration": 2.138092041015625
     },
     {
       "op": "tan",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.4861724376678467
+      "duration": 3.8456368446350098
     },
     {
       "op": "exp",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.644411563873291
+      "duration": 4.990056753158569
     },
     {
       "op": "log",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.8062801361083984
+      "duration": 6.109535455703735
     },
     {
       "op": "sqrt",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 0.9748110771179199
+      "duration": 7.17266583442688
     },
     {
       "op": "rsqrt",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 1.1387827396392822
+      "duration": 8.191069841384888
     },
     {
       "op": "asin",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 1.3022704124450684
+      "duration": 9.990847110748291
     },
     {
       "op": "acos",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 1.460925817489624
+      "duration": 13.437755346298218
     },
     {
       "op": "atan",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 1.629638671875
+      "duration": 15.266343593597412
     },
     {
       "op": "sinh",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 1.7830405235290527
+      "duration": 16.968117237091064
     },
     {
       "op": "cosh",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 1.9382691383361816
+      "duration": 18.784178018569946
     },
     {
       "op": "erf",
       "category": "unary/transcendentals",
       "compile": true,
       "verify": true,
-      "duration": 2.092674493789673
+      "duration": 20.965077877044678
     },
     {
       "op": "abs",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 2.2682456970214844
+      "duration": 21.926390886306763
     },
     {
       "op": "neg",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 2.408757448196411
+      "duration": 22.828853845596313
     },
     {
       "op": "ceil",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 2.5722455978393555
+      "duration": 23.784271717071533
     },
     {
       "op": "floor",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 2.749788761138916
+      "duration": 24.729390144348145
     },
     {
       "op": "round",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 2.922734022140503
+      "duration": 25.691306114196777
     },
     {
       "op": "sign",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.0878779888153076
+      "duration": 26.62841248512268
     },
     {
       "op": "square",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.222128391265869
+      "duration": 27.550854682922363
     },
     {
       "op": "reciprocal",
       "category": "unary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.3851306438446045
+      "duration": 28.56010937690735
     },
     {
       "op": "add",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.5199174880981445
+      "duration": 29.465718984603882
     },
     {
       "op": "sub",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.6775124073028564
+      "duration": 30.411930799484253
     },
     {
       "op": "mul",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.8128607273101807
+      "duration": 31.324068307876587
     },
     {
       "op": "div",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 3.981062650680542
+      "duration": 33.021509647369385
     },
     {
       "op": "atan2",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 4.153711795806885
+      "duration": 42.913018226623535
     },
     {
       "op": "pow",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 4.326382398605347
+      "duration": 45.95666027069092
     },
     {
       "op": "fmod",
       "category": "binary/math",
       "compile": true,
       "verify": true,
-      "duration": 4.518847465515137
+      "duration": 47.976566314697266
     },
     {
       "op": "gt",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 4.681116342544556
+      "duration": 48.92744541168213
     },
     {
       "op": "ge",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 4.835198879241943
+      "duration": 49.858121395111084
     },
     {
       "op": "lt",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 4.997095346450806
+      "duration": 50.807474851608276
     },
     {
       "op": "le",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 5.1541972160339355
+      "duration": 51.748249530792236
     },
     {
       "op": "eq",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 5.310223579406738
+      "duration": 52.69904351234436
     },
     {
       "op": "ne",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 5.463221549987793
+      "duration": 53.65135169029236
     },
     {
       "op": "and",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 5.601153135299683
+      "duration": 54.557111978530884
     },
     {
       "op": "or",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 5.746679782867432
+      "duration": 55.472357511520386
     },
     {
       "op": "xor",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 5.880847930908203
+      "duration": 56.37789821624756
     },
     {
       "op": "not",
       "category": "binary/logical",
       "compile": true,
       "verify": true,
-      "duration": 6.040010690689087
+      "duration": 57.303220987319946
     },
     {
       "op": "relu",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 6.190906286239624
+      "duration": 58.225316524505615
     },
     {
       "op": "gelu",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 6.375707149505615
+      "duration": 59.368096113204956
     },
     {
       "op": "sigmoid",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 6.544166564941406
+      "duration": 60.35358214378357
     },
     {
       "op": "tanh",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 6.698903799057007
+      "duration": 62.16365313529968
     },
     {
       "op": "swish",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 6.871134042739868
+      "duration": 63.15072822570801
     },
     {
       "op": "selu",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 7.042607307434082
+      "duration": 66.27791547775269
     },
     {
       "op": "elu",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 7.21784234046936
+      "duration": 69.39810967445374
     },
     {
       "op": "leaky_relu",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 7.380615949630737
+      "duration": 70.35057878494263
     },
     {
       "op": "softplus",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 7.55814790725708
+      "duration": 73.45528936386108
     },
     {
       "op": "celu",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 7.7333104610443115
+      "duration": 77.70830774307251
     },
     {
       "op": "log_sigmoid",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 7.910957098007202
+      "duration": 80.78126192092896
     },
     {
       "op": "softsign",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 8.079687595367432
+      "duration": 81.84776067733765
     },
     {
       "op": "hard_sigmoid",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 8.257522821426392
+      "duration": 82.83793830871582
     },
     {
       "op": "hard_tanh",
       "category": "activation",
       "compile": true,
       "verify": true,
-      "duration": 8.409699201583862
+      "duration": 83.78034090995789
     }
   ]
 }
