@@ -88,7 +88,14 @@ class IQUnit(Component):
                 
                 if hembed > 0:
                     self.loop_states[hembed]["max"] = loops_val
-                    self.loop_states[hembed]["inc"] = current_inc
+                    # 🛸 关键修复：外层循环 (Level 1) 必须从专用位域 INC_EMBED 提取步长
+                    if hembed == 1:
+                        off_inc_em = self.decoder._layout['INC_EMBED']['offset']
+                        raw_inc_em = (raw_base >> off_inc_em) & 0x3F
+                        l1_inc = raw_inc_em if raw_inc_em < 32 else raw_inc_em - 64
+                        self.loop_states[hembed]["inc"] = l1_inc
+                    else:
+                        self.loop_states[hembed]["inc"] = current_inc
                     self.loop_states[hembed]["cnt"] = 0
                     self.loop_start_pcs[hembed] = self.pc + 1
                     self._next_pc = self.pc + 1

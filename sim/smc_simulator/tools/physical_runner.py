@@ -154,8 +154,11 @@ def run_physical_verification(case_dir: str):
         
         # 🛸 ADPC-ALIGN: 支持边界值测试中的 NaN 对比。
         # 只有当 sim_np 有 NaN 但 ref 没有时，才考虑为“内存污染”。
-        mask_sim_nan = np.isnan(sim_np)
-        mask_ref_nan = np.isnan(ref)
+        sim_flat_ar = sim_np.flatten()
+        ref_flat = ref.flatten()
+        
+        mask_sim_nan = np.isnan(sim_flat_ar)
+        mask_ref_nan = np.isnan(ref_flat)
         
         if np.any(mask_sim_nan & (~mask_ref_nan)):
              print(f"FAILED {name}: Unexpected NaN detected! (Poisoned Read)")
@@ -165,8 +168,8 @@ def run_physical_verification(case_dir: str):
         # Mathematical tolerance check
         atol = 5e-3 # Global tolerance
         passed = True
-        if not np.allclose(sim_np, ref, atol=atol, equal_nan=True):
-            max_err = np.max(np.abs(sim_np - ref))
+        if not np.allclose(sim_flat_ar, ref_flat, atol=atol, equal_nan=True):
+            max_err = np.max(np.abs(sim_flat_ar - ref_flat))
             print(f"FAILED {name}: Max Difference = {max_err}")
             all_passed = False
             passed = False

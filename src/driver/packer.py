@@ -11,7 +11,7 @@ class BitPacker:
     @staticmethod
     def pack_capsule(iq_name: str, iq_conf: Any, payload: int, loops: int = 0, dly: int = 0, 
                      inc: int = 0, embed: int = 0, jump: int = 0, embed_end: int = 0, 
-                     hw_spec: Any = None, valid: int = 1) -> int:
+                     hw_spec: Any = None, valid: int = 1, level: int = 0) -> int:
         header = 0
         
         # 🛸 物理对齐：位宽决议中心
@@ -23,10 +23,11 @@ class BitPacker:
             iq_header = hw_spec.system_core.get("iq_header", [])
             curr = 0
             # 这里的输入变量需要映射到 Header 字段
+            # embed 映射为 INC_EMBED (Level 1 增量), level 映射为 EMBED_LOOPS (层级标签)
             val_map = {
                 "INC_EMBED": embed, "INC": inc, "DLY": dly, 
                 "COND": 0, "LOOPS": loops, "EMBED_END": embed_end, 
-                "EMBED_LOOPS": 0, "JUMP": jump, "VLD": valid
+                "EMBED_LOOPS": level, "JUMP": jump, "VLD": valid
             }
             for item in iq_header:
                 f_name = item.get("field")
@@ -42,7 +43,8 @@ class BitPacker:
             # COND Placeholder [13:19]
             header |= ((loops & 0x3FF) << 20)      # [20:29]
             header |= ((embed_end & 0x3F) << 30)   # [30:35]
-            # EMBED_LOOPS Placeholder [36:38]
+            # EMBED_LOOPS [36:38]
+            header |= ((level & 0x7) << 36)
             header |= ((jump & 1) << 39)           # [39]
             header |= (valid << 40)                 # [40] VLD
 

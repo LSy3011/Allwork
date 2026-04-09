@@ -131,7 +131,16 @@ class LIRPacker:
             module_streams.setdefault(name, []).append({
                 "t": op.metadata["global_t"], 
                 "payload": payload,
-                "iq_conf": self.hw_spec.iqs[lookup]
+                "iq_conf": self.hw_spec.iqs[lookup],
+                "loops": op.metadata.get("loops", 0),
+                "inner_loops": op.metadata.get("inner_loops", 0),
+                "outer_loops": op.metadata.get("outer_loops", 0),
+                "outer_inc": op.metadata.get("outer_inc", 0),
+                "level": op.metadata.get("level", 0),
+                "embed": op.metadata.get("embed", 0),
+                "embed_end": op.metadata.get("embed_end", 0),
+                "inc": op.metadata.get("inc", 0),
+                "jump": op.metadata.get("jump", 0)
             })
 
         print(f"[EMIT-SUMMARY] Collected Streams: {list(module_streams.keys())}")
@@ -157,6 +166,7 @@ class LIRPacker:
                     loops=cmd["loops"], dly=cmd["dly"],
                     inc=cmd.get("inc", 0), 
                     embed=cmd.get("embed", 0), 
+                    level=cmd.get("level", 0),
                     jump=cmd.get("jump", 0),
                     embed_end=cmd.get("embed_end", 0),
                     hw_spec=self.hw_spec,

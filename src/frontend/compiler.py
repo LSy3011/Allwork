@@ -35,6 +35,53 @@ class GraphCompiler:
         kwargs = {"dep_port": dep_port} if dep_port else {}
         return self.b.make_op("RTOVR", uid, target_slot, [nid], **kwargs)
 
+    def compile_tensor(self, inputs, formula, shape: List[int], out_name="out_0") -> List:
+        """
+        张量加速编译：支持多维嵌套循环 (N-D Nesting)。
+        基于 ISA V5 协议，目前支持最高 2 级硬件加速 (Level 0 Pulse, Level 1 Loop)。
+        """
+        # 1. 自动计算硬件迭代次数 (SIMD-4)
+        flat_size = 1
+        for s in shape: flat_size *= s
+        
+        if flat_size % 4 != 0:
+             raise ValueError(f"Tensor size {flat_size} must be 4-aligned for SIMD-4")
+        
+        simd_blocks = flat_size // 4
+        
+        # 判定循环维度：若为多维 (如 [H, W]), W 为内层，H 为外层
+        # 对于 [4, 16] -> inner=4 blocks (16/4), outer=4
+        if len(shape) >= 2:
+            inner_blocks = shape[-1] // 4
+            outer_loops = shape[-2]
+            # 这里的协议：Level 0 为内层，Level 1 为外层
+            self.loop_context = {
+                "inner_loops": inner_blocks - 1,
+                "outer_loops": outer_loops - 1,
+                "inner_inc": 1,
+                "outer_inc": inner_blocks # 外层回跳时的基址偏移
+            }
+        else:
+            self.loop_context = {
+                "inner_loops": simd_blocks - 1,
+                "outer_loops": 0,
+                "inner_inc": 1,
+                "outer_inc": 0
+            }
+        
+        # 3. 调用单点编译生成 DFG 内核
+        dfg = self.compile(inputs, formula, out_name)
+        
+        # 4. 后处理：注入 EMBED/LOOPS/EMBED_END 物理标记
+        # 🛸 V5.1 升级：全节点标记逻辑，由 Compactor 自动处理各 IQ 的 Header/Footer 缝合
+        for op in dfg:
+            op.metadata["shape"] = shape
+            op.metadata["inner_loops"] = self.loop_context["inner_loops"]
+            op.metadata["outer_loops"] = self.loop_context.get("outer_loops", 0)
+            op.metadata["outer_inc"] = self.loop_context.get("outer_inc", 0)
+                
+        return dfg
+
     def compile(self, inputs, formula, out_name="out_0") -> List:
         """
         编译主函数。将复杂的符号数学公式压缩、优化并装配为底层算子图。
@@ -62,7 +109,10 @@ class GraphCompiler:
             # 突破点: 拥有超过1个下游子代的特征向量，必须转储(Spilled)出被覆写的 ALU FIFO
             write_slot = self.slot_map["UR_WRITE"][(1 + i) % 4]
             routed_res = self._route(self.mir_env[sym], write_slot)
-            self.b.make_op("UR_WRITE", f"spill_{sym}", RT.UR_WRITE, [routed_res], role="intermediate", meta_name=str(sym))
+            kwargs = {"role": "intermediate", "meta_name": str(sym)}
+            if hasattr(self, "loop_context"):
+                kwargs["inc"] = self.loop_context["inner_inc"]
+            self.b.make_op("UR_WRITE", f"spill_{sym}", RT.UR_WRITE, [routed_res], **kwargs)
             
         # --- Stage 2.3: 终极连线并汇出至输出寄存器 ---
         for i, res_expr in enumerate(final_res):
@@ -75,15 +125,18 @@ class GraphCompiler:
             # 自动挑选可用的写出端口
             write_slot = self.slot_map["UR_WRITE"][i % 4]
             routed_res = self._route(self.mir_env[res_sym], write_slot)
-            self.b.make_op("UR_WRITE", f"out_obj_{i}", RT.UR_WRITE, [routed_res], role="output", meta_name=out_name)
+            kwargs = {"role": "output", "meta_name": out_name}
+            if hasattr(self, "loop_context"):
+                kwargs["inc"] = self.loop_context["inner_inc"]
+            self.b.make_op("UR_WRITE", f"out_obj_{i}", RT.UR_WRITE, [routed_res], **kwargs)
             
         return self.b.get_dfg()
 
     def _lower_expr(self, sym, expr):
         """AST 硬件特征探测匹配中心。"""
-        # 直接符号传承
+        # 直接符号传承 (需通过 _get_op 兼容输入与 CSE 变量)
         if isinstance(expr, sp.Symbol):
-            self.mir_env[sym] = self.mir_env[expr]
+            self.mir_env[sym] = self._get_op(expr)
             return
             
         # 标量常量内联
@@ -402,8 +455,14 @@ class GraphCompiler:
             
     def _get_op(self, arg, is_int=False):
         """安全的取值助手"""
+        # 🛸 兼容性修复：支持将 SymPy Symbol 转换为字符串匹配 inputs_meta
+        sym_key = str(arg) if isinstance(arg, sp.Symbol) else arg
+        
+        # 🛸 兼容性修复：支持 Symbol 和 str 作为输入 key
         if arg in self.inputs_meta:
             return self._get_input(arg, is_int=is_int)
+        if isinstance(arg, sp.Symbol) and str(arg) in self.inputs_meta:
+            return self._get_input(str(arg), is_int=is_int)
             
         if arg in self.cse_vars:
             # 读取被释放到 SRAM 的长期活状态值
@@ -413,10 +472,15 @@ class GraphCompiler:
             return self.b.make_op("UR_READ", new_id, RT.UR_READ, [f"spill_{arg}"], meta_name=str(arg), role="intermediate")
             
         if arg in self.mir_env: return self.mir_env[arg]
-        if isinstance(arg, (sp.Float, sp.Integer, sp.Rational)):
-            return self._get_const(arg, is_int=is_int)
         
-        # 递归下沉剩余的 inline 表达式
+        # 🛸 关键修复：防止符号类型的递归死循环
+        if isinstance(arg, sp.Symbol):
+            raise NameError(f"Unbound identifier: {arg}. 符号既未在输入 meta 中定义，也未在 CSE 环境中命中。")
+
+        if isinstance(arg, (sp.Float, sp.Integer, sp.Rational)):
+            return self._get_const(arg)
+        
+        # 递归下沉剩余的 inline 表达式 (如 a*b 之类的子图)
         self.inl_cnt += 1
         inline_sym = sp.Symbol(f"inl_{self.inl_cnt}")
         self._lower_expr(inline_sym, arg)
@@ -429,7 +493,12 @@ class GraphCompiler:
             return self.const_pool[val_f]
             
         nid = f"cinl_{len(self.const_pool)}_{val_f}".replace(".", "_").replace("-", "n")
-        metadata = self.inputs_meta.get("constants", {})
+        metadata = self.inputs_meta.get("constants", {}).copy()
+        
+        # 🛸 关键优化：常量读取通常设置 INC=0，因为所有循环迭代共用同一个常量地址
+        if hasattr(self, "loop_context"):
+            metadata["inc"] = 0 
+            
         node = self.b.make_op("UR_READ", nid, RT.UR_READ, role="constant", meta_name="constants", **metadata)
         self.const_pool[val_f] = node
         return node
@@ -440,4 +509,9 @@ class GraphCompiler:
         new_id = f"{sym}_read_{self.inl_cnt}"
         kwargs = self.inputs_meta[sym].copy()
         kwargs["is_int"] = is_int # 注入类型偏好
+        
+        # 🛰️ 关键协议：在 Tensor 模式下，输入读取自动开启地址增量
+        if hasattr(self, "loop_context"):
+            kwargs["inc"] = self.loop_context["inner_inc"]
+            
         return self.b.make_op("UR_READ", new_id, RT.UR_READ, [], meta_name=str(sym), **kwargs)

@@ -134,7 +134,7 @@ class StandardPipelineRunner:
                 t = SimpleNamespace(name=node.trace_id, size=1, manual_bank=mb, start_t=0, end_t=1000)
                 tensors.append(t)
                 node_to_tensor[node.trace_id] = t
-            elif node.metadata.get("role") == "operand_a" or node.metadata.get("role") == "operand_b":
+            elif m_type == "UR_READ" and not node.metadata.get("is_const"):
                 t = SimpleNamespace(name=node.trace_id, size=1, manual_bank=mb, start_t=0, end_t=1000)
                 tensors.append(t)
                 node_to_tensor[node.trace_id] = t
@@ -209,20 +209,22 @@ class StandardPipelineRunner:
                         if node.metadata.get("role") == "operand_a": val = input_data.get("x")
                 
                 if val is not None:
-                    # Preserve the original type for bit-accurate simulation
-                    # Supporting both native Python types and numpy types
-                    if isinstance(val, (float, int, np.floating, np.integer)):
-                        v4 = [val] * 4
-                    elif hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
-                        v4 = list(val)
+                    # 🛸 关键修复：支持张量连续地址注入 (SIMD-4 对齐)
+                    if hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
+                        flat_val = list(val)
+                        if len(flat_val) % 4 != 0:
+                             flat_val += [0.0] * (4 - (len(flat_val) % 4))
+                        for i in range(0, len(flat_val), 4):
+                            if a + i // 4 < 256:
+                                banks[b][a + i // 4] = flat_val[i:i+4]
                     else:
-                        v4 = [val] * 4
-                    banks[b][a] = v4
+                        banks[b][a] = [val] * 4
                 
                 # 建立 Tensor 角色映射
                 name = node.metadata.get("meta_name", node.trace_id)
                 role = node.metadata.get("role", "internal") # 默认设为 internal
-                t_meta.append({"name": name, "bank": b, "addr": a, "offset": a, "shape": [1, 4], "role": role})
+                shape = node.metadata.get("shape", [1, 4])
+                t_meta.append({"name": name, "bank": b, "addr": a, "offset": a, "shape": shape, "role": role})
         
         class Proxy: pass
         p = Proxy()
@@ -234,7 +236,7 @@ class StandardPipelineRunner:
             t_obj = Proxy()
             # 设置缺省值防止 AttributeError
             t_obj.role = "internal"
-            t_obj.shape = [1, 4]
+            t_obj.shape = m.get("shape", [1, 4])
             for k, v in m.items(): setattr(t_obj, k, v)
             p.tensors[name] = t_obj
         

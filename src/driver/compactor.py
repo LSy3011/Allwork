@@ -93,13 +93,13 @@ class Compactor:
         """与 V5/V6/V7 逻辑一致。兼容 tuple 和 dict 输入。"""
         if not stream: return []
         
-        # 归一化：兼容 tuple (t, payload, flag) 和 dict {"t":, "payload":} 两种格式
+        # 归一化：全量保留 dict 信息，不再裁剪为 tuple
         normalized = []
         for item in stream:
             if isinstance(item, dict):
-                normalized.append((item["t"], item["payload"], False))
-            else:
                 normalized.append(item)
+            else:
+                normalized.append({"t": item[0], "payload": item[1], "valid": 1})
         stream = normalized
         
         res = []
@@ -108,55 +108,81 @@ class Compactor:
         max_loops = (1 << iq_conf.BITS_LOOPS) - 1 if iq_conf.EN_LOOPS else 0
         
         while i < len(stream):
-            t_curr, p_curr, _ = stream[i]
+            curr_item = stream[i]
+            t_curr = curr_item["t"]
+            p_curr = curr_item["payload"]
             
             # --- 🛸 核心修复：物理气泡注入 (Gap Filling) ---
-            # 如果 SMT 算出的点火时间 t_curr 超过了预期时间，说明中间有气泡。
-            # 💡 优化：采用 NOP + LOOPS 字段进行极致压缩。
             while next_expected_t < t_curr:
                 gap = t_curr - next_expected_t
-                # loops = count - 1
                 curr_loops = min(gap, max_loops + 1) - 1
                 res.append({
                     "t": next_expected_t, 
                     "payload": 0, 
                     "loops": curr_loops, "dly": 0, "inc": 0, 
                     "embed": 0, "embed_end": 0,
-                    "valid": 0  # 明确标记为 NOP
+                    "valid": 0
                 })
                 next_expected_t += (curr_loops + 1)
             
             loops, stride = 0, 0
-            if iq_conf.EN_INC and i + 1 < len(stream):
-                t_next, p_next, _ = stream[i+1]
+            # 👽 显式优先原则：如果指令本身已经自带了循环属性，则优先采用
+            if curr_item.get("loops", 0) > 0 or curr_item.get("embed", 0) > 0 or curr_item.get("level", 0) > 0:
+                loops = curr_item.get("loops", 0)
+                stride = curr_item.get("inc", 0)
+            elif iq_conf.EN_INC and i + 1 < len(stream):
+                t_next, p_next = stream[i+1]["t"], stream[i+1]["payload"]
                 if t_next == t_curr + 1:
                     stride = p_next - p_curr
                     if abs(stride) < (1 << (iq_conf.BITS_INC - 1)):
                         j = i + 1
                         while j < len(stream) and loops < max_loops:
-                            t_j, p_j, _ = stream[j]
+                            t_j, p_j = stream[j]["t"], stream[j]["payload"]
                             if t_j == t_curr + (j - i) and p_j == p_curr + stride * (j - i):
                                 loops += 1; j += 1
                             else: break
             
+            # 兜底：如果没手动指定也没探测到 stride，尝试普通 loops 探测
             if loops == 0 and iq_conf.EN_LOOPS:
                 j = i + 1
                 while j < len(stream) and loops < max_loops:
-                    t_j, p_j, _ = stream[j]
-                    if t_j == t_curr + (j - i) and p_j == p_curr:
+                    if stream[j]["t"] == t_curr + (j - i) and stream[j]["payload"] == p_curr:
                         loops += 1; j += 1
                     else: break
             
+            # 🛸 V5.2 极致升级：自适应 IQ 级循环缝合 (Automated IQ Loop Stitching)
+            # 逻辑：对于任何 IQ 序列，若元数据中带有指定的 outer_loops，则在起点插入 Header，在终点插入 Footer。
+            
+            # 1. 起点：插入针对外层循环 (Level 1) 的 Header
+            if i == 0 and curr_item.get("outer_loops", 0) > 0:
+                header = {
+                    "t": t_curr, "payload": 0,
+                    "loops": curr_item.get("outer_loops"),
+                    "dly": 0, "inc": 0,
+                    "embed": curr_item.get("outer_inc", 0), # INC_EMBED
+                    "level": 1, 
+                    "embed_end": 0, "valid": 1
+                }
+                res.append(header)
+            
+            # 2. 生成 Body (带内层 loop)
+            # 计算是否为当前 IQ 序列的最后一个 folded packet
+            is_last = (i + loops + 1 == len(stream))
+            
             cmd = {
                 "t": t_curr, "payload": p_curr, 
-                "loops": loops, "dly": 0, "inc": stride, 
-                "embed": 0, "embed_end": 0,
-                "valid": 1 # 物理点火
+                "loops": loops or curr_item.get("inner_loops", 0), 
+                "dly": curr_item.get("dly", 0), 
+                "inc": stride or curr_item.get("inc", 0), 
+                "embed": 0, "level": 0,
+                "embed_end": 1 if (is_last and curr_item.get("outer_loops", 0) > 0) else 0,
+                "valid": curr_item.get("valid", 1)
             }
-            i += (loops + 1)
-            # 物理时间轴推进包含循环占据的周期
-            next_expected_t = t_curr + (loops + 1)
             res.append(cmd)
+            
+            i += (loops + 1)
+            next_expected_t = t_curr + (loops + 1)
+            
             
         print(f"[COMPA-DEBUG] Stream len={len(stream)} -> Pass1 folded len={len(res)}")
         return res
