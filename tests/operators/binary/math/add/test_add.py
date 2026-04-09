@@ -33,7 +33,7 @@ def test_add():
 
     runner = StandardPipelineRunner(
         hw_config="hw_config",
-        build_root="build/operators/binary/math"
+        build_root="build/operators"
     )
 
     sys.path.insert(0, str(ws / "tests" / "operators"))
@@ -49,7 +49,8 @@ def test_add():
         op_name="add",
         get_dfg_fn=get_frontend_dfg,
         input_data=input_data,
-        golden_y=golden_y
+        golden_y=golden_y,
+        category="binary/math/add"
     )
 
     if success:

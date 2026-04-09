@@ -34,16 +34,16 @@ def test_tensor_add_looping():
     import numpy as np
     golden_y = np.array([3.0]*16)
     
-    runner = StandardPipelineRunner()
+    runner = StandardPipelineRunner(build_root="build/operators")
     success = runner.run_full_pipeline(
         op_name="tensor_loop_test",
         get_dfg_fn=get_dfg_fn,
         input_data=input_data,
         golden_y=golden_y,
-        category="operators/binary/math/add"
+        category="binary/math/add"
     )
     
-    case_dir = Path("build/standard/operators/binary/math/add/tensor_loop_test")
+    case_dir = Path("build/operators/binary/math/add/tensor_loop_test")
     
     if success:
         print("\n" + "="*50)
