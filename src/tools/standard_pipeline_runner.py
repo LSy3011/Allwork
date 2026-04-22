@@ -34,9 +34,12 @@ class StandardPipelineRunner:
         print(f"  [A] MIR DFG initial graph generated & Math Parity verified.")
 
         # --- Stage C: SMT Synthesis (时序合成) ---
-        synthesis_res = SMTSynthesizer(self.spec).solve(dfg)
-        if not synthesis_res:
+        smt_result = SMTSynthesizer(self.spec).solve(dfg)
+        if not smt_result:
             raise RuntimeError(f"❌ Stage C Failed: SMT UNSAT for {op_name}")
+
+        synthesis_res = smt_result["schedule"]  # 向后兼容：保留 schedule 变量名
+        II            = smt_result["II"]
             
         from orchestrator.stitcher import HSTSStitcher
         stitcher = HSTSStitcher()
@@ -50,7 +53,7 @@ class StandardPipelineRunner:
         
         self._verify_stage_c(dfg)
         self._dump_dfg(dfg, op_dir / "stage_c_synthesis.json")
-        print(f"  [C] SMT synthesis completed. (Max Cycle: {max(synthesis_res.values())})")
+        print(f"  [C] SMT synthesis completed. (Max Cycle: {max(synthesis_res.values())}, II={II})")
 
         # --- Stage B: Physical Bank & Address Allocation (物理资源分配) ---
         dfg = self._perform_physical_allocation(dfg, input_data, op_dir)

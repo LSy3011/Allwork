@@ -1,8 +1,9 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import z3
 from ir.mir.mir_op import MIROp
 from synthesis.axioms import SynthesisAxioms
 from driver.hw_resource import ResourceType
+from core.ii_analyzer import IIAnalyzer
 
 class SMTSynthesizer:
     """
@@ -47,7 +48,7 @@ class SMTSynthesizer:
             
         return res_map
 
-    def solve(self, ops: List[MIROp], strategy: str = "balanced", **kwargs) -> Dict[str, int]:
+    def solve(self, ops: List[MIROp], strategy: str = "balanced", **kwargs) -> Dict:
         print(f"[SMT-DEBUG] Solving for {len(ops)} nodes")
         solver = z3.Optimize()
         
@@ -150,6 +151,11 @@ class SMTSynthesizer:
                                 # 强制对齐 (UR_W1 (ID 36) -> Slot 36)
                                 dep_node.metadata["slot_id"] = assigned_iq
 
-            return {op_id: m[t[op_id]].as_long() for op_id in t}
+            schedule = {op_id: m[t[op_id]].as_long() for op_id in t}
+
+            # 🛸 [V5.1] 计算理论 II 并随结果返回
+            II = IIAnalyzer(self.hw_spec).compute(ops)
+
+            return {"schedule": schedule, "II": II}
         
         return None

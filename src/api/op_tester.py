@@ -135,7 +135,8 @@ class OperatorPhysicalTester:
             print(f"✅ [ORCHESTRATOR] Tensor-Coherent alignment completed for {len(t_proxies)} logical tensors.")
             # --- [INDUSTRIAL ORCHESTRATION CHAIN END] ---
 
-            res = SMTSynthesizer(self.spec).solve(dfg_ops, strategy=strategy)
+            smt_result = SMTSynthesizer(self.spec).solve(dfg_ops, strategy=strategy)
+            res = smt_result["schedule"] if smt_result else None  # 兼容旧调用
             
             dfg_dump = []
             for node in dfg_ops:
@@ -147,10 +148,17 @@ class OperatorPhysicalTester:
             with open(stages["p1"] / "dfg_final.json", "w") as f:
                 json.dump(dfg_dump, f, indent=2)
             
+            # 输出节点的 trace_id 白名单 → 统一归一为 "y"
+            _OUTPUT_IDS = {"out", "y_out", "sin_out", "cos_out", "exp_out",
+                           "result", "output", "res_out", "final_out"}
+            _OUTPUT_ROLE = lambda n: n.get("metadata", {}).get("role") == "output"
+
             def get_phys_key(nid):
                 if not nid: return "unknown"
                 k = re.sub(r'(_re|_rd|_in)\d*$', '', nid)
                 if k.startswith("w_"): k = k[2:]
+                # 归一化输出节点 trace_id → 'y'
+                if k in _OUTPUT_IDS: return "y"
                 if k.startswith("y") or k == "w_y": return "y"
                 if k.startswith("x") or k == "w_x": return "x"
                 return k
@@ -200,6 +208,7 @@ class OperatorPhysicalTester:
             
             tensors_meta = []
             for name, (b, a) in phys_mapping.items():
+                # 'y' 是归一化输出 key，role = output；其他均为 input
                 role = "output" if name == "y" else "input"
                 tensors_meta.append({"name": name, "bank": b, "addr": a, "offset": a, "shape": [1, 4], "role": role})
 

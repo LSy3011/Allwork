@@ -153,15 +153,24 @@ class Compactor:
             # 🛸 V5.2 极致升级：自适应 IQ 级循环缝合 (Automated IQ Loop Stitching)
             # 逻辑：对于任何 IQ 序列，若元数据中带有指定的 outer_loops，则在起点插入 Header，在终点插入 Footer。
             
-            # 1. 起点：插入针对外层循环 (Level 1) 的 Header
+            # 1. 起点：插入针对外层循环 (Level 1) 的 LOOP_HDR
+            # 硬件 Header 字段映射（来自 hw_spec iq_header 规格）:
+            #   INC_EMBED ← embed=0   (无嵌套基准增量)
+            #   INC       ← inc=outer_inc  (地址步进)
+            #   DLY       ← dly=0
+            #   LOOPS     ← loops=outer_loops
+            #   EMBED_LOOPS ← level=1  (Loop 控制器层级)
+            #   VLD=0 → 纯控制指令，硬件不执行为实际 UR_READ
             if i == 0 and curr_item.get("outer_loops", 0) > 0:
                 header = {
                     "t": t_curr, "payload": 0,
                     "loops": curr_item.get("outer_loops"),
-                    "dly": 0, "inc": 0,
-                    "embed": curr_item.get("outer_inc", 0), # INC_EMBED
-                    "level": 1, 
-                    "embed_end": 0, "valid": 1
+                    "dly": 0,
+                    "inc":   curr_item.get("outer_inc", 0),  # → INC 字段
+                    "embed": 0,                              # → INC_EMBED=0
+                    "level": 1,                              # → EMBED_LOOPS=1
+                    "embed_end": 0,
+                    "valid": 0,   # 🛸 关键：VLD=0 → 纯控制，不执行为真实读写
                 }
                 res.append(header)
             
