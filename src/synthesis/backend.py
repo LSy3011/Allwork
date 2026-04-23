@@ -222,6 +222,22 @@ class SMTSynthesizer:
                     # [A2] 上界应为 II - 1，因为数据在第 II 拍会被下一迭代覆盖
                     solver.add(t[op.trace_id] <= t[rd] + max(1, II - 1))
 
+        # ── 7. 对称性破缺 (Symmetry Breaking) ─────────────────────────────
+        # 对于相同类型的资源，如果在同一个 Slot 发射，强制其物理编号有序
+        res_groups: Dict[str, List[MIROp]] = {}
+        for op in ops:
+            if op.trace_id in iq_vars:
+                rtype = str(op.op_type).upper()
+                res_groups.setdefault(rtype, []).append(op)
+        
+        for rtype, g_ops in res_groups.items():
+            # 按 trace_id 排序以获得稳定约束
+            sorted_ops = sorted(g_ops, key=lambda x: x.trace_id)
+            for i in range(len(sorted_ops) - 1):
+                o1, o2 = sorted_ops[i], sorted_ops[i+1]
+                solver.add(z3.Implies(s[o1.trace_id] == s[o2.trace_id],
+                                     iq_vars[o1.trace_id] < iq_vars[o2.trace_id]))
+
         # ── 求解 ────────────────────────────────────────────────────────
         if solver.check() != z3.sat:
             return None
@@ -252,36 +268,53 @@ class TimingVerifier:
 
     def verify(self, ops: List[MIROp], schedule: Dict[str, int], II: int):
         nodes = {op.trace_id: op for op in ops}
+        slot_iq_usage: set = set()    # (slot, iq_id)
+        slot_bank_usage: set = set()  # (slot, bank_id)
         
         for op in ops:
             t_p = schedule[op.trace_id]
+            s_p = t_p % II
             lat = self.spec.delays.get(op.op_type.upper(), 1)
             
-            # 1. 检查所有后继消费者
+            # 1. 资源互斥验证 (Physical Unit Mutex)
+            iq_id = op.metadata.get("iq_id")
+            if iq_id is not None:
+                usage_key = (s_p, iq_id)
+                if usage_key in slot_iq_usage:
+                    raise RuntimeError(f"[Verifier] Resource Conflict: IQ {iq_id} used multiple times "
+                                     f"in slot {s_p}")
+                slot_iq_usage.add(usage_key)
+
+            # 2. Bank 互斥验证 (Storage Bank Mutex)
+            bank_id = op.metadata.get("manual_bank")
+            if bank_id is not None:
+                bank_key = (s_p, bank_id)
+                if bank_key in slot_bank_usage:
+                    raise RuntimeError(f"[Verifier] Bank Conflict: Bank {bank_id} accessed multiple times "
+                                     f"in slot {s_p}")
+                slot_bank_usage.add(bank_key)
+
+            # 3. RAW 依赖与存活窗口验证
             consumers = [o for o in ops if op.trace_id in o.metadata.get("depends_on", [])]
             for cons in consumers:
                 t_c = schedule[cons.trace_id]
-                
-                # RAW 因果性 (Lower Bound)
                 if t_c < t_p + lat:
                     raise RuntimeError(f"[Verifier] RAW Violation: {op.trace_id} -> {cons.trace_id} "
                                      f"(t_p={t_p}, t_c={t_c}, lat={lat})")
                 
-                # [H1] 动态锁存窗口 (Upper Bound)
-                # 数据必须在被下一迭代覆盖前读取
+                # 数据存活窗口 [lat, lat + II - 1]
                 if t_c >= t_p + lat + II:
-                    raise RuntimeError(f"[Verifier] Latch Overwrite: {op.trace_id} result expired "
-                                     f"before {cons.trace_id} read it (II={II})")
+                    raise RuntimeError(f"[Verifier] Latch Overwrite: {op.trace_id} expired "
+                                     f"before {cons.trace_id} read (II={II})")
 
-            # 2. 影子绑定特殊检查 (RTOVR -> ALU)
+            # 4. 影子绑定验证 (RTOVR -> ALU)
             if op.op_type.upper() == "RTOVR":
                 alu_cons = [o for o in consumers if o.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE"]]
                 for alu in alu_cons:
                     t_alu = schedule[alu.trace_id]
-                    # [A2] 允许的窗口是 [1, max(1, II-1)]
                     upper_bound = max(1, II - 1)
                     if not (1 <= t_alu - t_p <= upper_bound):
-                        raise RuntimeError(f"[Verifier] Shadow Binding Error: {op.trace_id} -> {alu.trace_id} "
+                        raise RuntimeError(f"[Verifier] Shadow Binding Violation: {op.trace_id} -> {alu.trace_id} "
                                          f"interval {t_alu-t_p} not in [1, {upper_bound}]")
         
-        print("[Verifier] All timing constraints verified (Bit-Perfect Ready).")
+        print(f"[Verifier] Passed! II={II}, Nodes={len(ops)}, Conflicts=0. Bit-Perfect Ready.")
