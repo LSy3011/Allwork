@@ -1,0 +1,62 @@
+"""
+sim/tests/helpers.py
+====================
+测试共享工具：MockSpec、MIROp 工厂。
+所有 Group 均从此处导入，避免重复代码。
+"""
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+
+from ir.mir.mir_op import MIROp
+
+
+class MockSpec:
+    """
+    轻量 HardwareSpec Mock。
+    仅提供 IIAnalyzer / SynthesisAxioms 所需的最小接口。
+    """
+    def __init__(self, instances: dict, delays: dict,
+                 read_ports: int = 4, write_ports: int = 4,
+                 iq_registry: dict = None):
+        self.delays = delays
+        self._instances = instances
+        self._read_ports = read_ports
+        self._write_ports = write_ports
+        self._registry = iq_registry or {"UR_READ": 30, "UR_WRITE": 35}
+        self.config = {
+            "iq_registry": self._registry,
+            "resource_constraints": {
+                "unit_instances": instances,
+                "total_read_ports": read_ports,
+                "total_write_ports": write_ports,
+            },
+        }
+
+    def get_iq_ids(self, unit_type: str):
+        key = unit_type.upper()
+        registry = self._registry
+        instances = self._instances
+        if key == "UR_READ":
+            base = registry.get("UR_READ", 30)
+            return [base + i for i in range(self._read_ports)]
+        if key == "UR_WRITE":
+            base = registry.get("UR_WRITE", 35)
+            return [base + i for i in range(self._write_ports)]
+        if key in instances:
+            base = registry.get(key, 0)
+            return [base + i for i in range(instances[key])]
+        return []
+
+
+def make_op(op_type: str, trace_id: str,
+            bank_id=None, deps=None, iq_id=None) -> MIROp:
+    """MIROp 工厂，简化测试构造。"""
+    meta = {}
+    if deps:
+        meta["depends_on"] = deps
+    if bank_id is not None:
+        meta["manual_bank"] = bank_id
+    if iq_id is not None:
+        meta["iq_id"] = iq_id
+    return MIROp(op_type=op_type, logic_cycle=0,
+                 trace_id=trace_id, metadata=meta)

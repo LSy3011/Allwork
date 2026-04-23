@@ -100,29 +100,39 @@ class IIAnalyzer:
             usage[key] = usage.get(key, 0) + 1
 
         II_res = 1
+        bank_usage: Dict[int, int] = {}
+        for op in ops:
+            bid = op.metadata.get("manual_bank")
+            if bid is not None:
+                bank_usage[bid] = bank_usage.get(bid, 0) + 1
+
         breakdown = {}
         for res, count in usage.items():
             inst = self.instances.get(res, 1)
             lat  = self.latency.get(res, 1)
 
-            # 资源约束 II：至少需要 ceil(count/inst) 拍才能调度完所有使用
-            raw_II = math.ceil(count / inst)
-
-            # 向上对齐到延迟粒度（硬件流水线写回对齐约束）
-            # 例如 FPMUL latency=4，raw_II=3 → 需要向上取到 4 的倍数边界
-            aligned_II = math.ceil(raw_II / lat) * lat if raw_II > 0 else 0
+            # 资源约束 II（标准模调度公式）：
+            #   II_res = ceil(usage_count / hw_instances)
+            ii_for_res = math.ceil(count / inst)
 
             breakdown[res] = {
                 "count": count, "instances": inst,
-                "latency": lat, "raw_II": raw_II, "aligned_II": aligned_II
+                "latency": lat, "II_res": ii_for_res,
             }
-            II_res = max(II_res, aligned_II)
+            II_res = max(II_res, ii_for_res)
+
+        # Bank 冲突下界：每个 Bank 每拍只能访问一次
+        II_bank = max(bank_usage.values()) if bank_usage else 1
+        II_res = max(II_res, II_bank)
 
         # 打印分析报告
         print(f"[II-ANALYSIS] Resource breakdown:")
         for res, d in breakdown.items():
             print(f"  {res:15s}: count={d['count']}, inst={d['instances']}, "
-                  f"lat={d['latency']} → raw_II={d['raw_II']}, aligned_II={d['aligned_II']}")
-        print(f"[II-ANALYSIS] Theoretical II = {II_res} cycles")
+                  f"lat={d['latency']} → II_res={d['II_res']}")
+        if bank_usage:
+            max_b = max(bank_usage, key=bank_usage.get)
+            print(f"  BANK-CONFLICT  : max_access={bank_usage[max_b]} (Bank {max_b}) → II_bank={II_bank}")
+        print(f"[II-ANALYSIS] Theoretical MII = {II_res} cycles")
 
         return II_res
