@@ -55,29 +55,47 @@ class SMIEncoderTruth:
             u_name = unit_map[op.trace_id]
             unit_instructions.setdefault(u_name, []).append(op)
         
-        # 2. 计算 INC (Stride * II)
-        # 如果 II=6, Stride=1, 则 INC=6
         dynamic_inc = base_stride * self.ii
         
-        # 3. 排序并输出
+        # 2. 按单元输出序列
         for u_name in sorted(unit_instructions.keys()):
+            display_name = u_name.replace("-", "_")
             sorted_ops = sorted(unit_instructions[u_name], key=lambda x: schedule[x.trace_id])
             
-            for i, op in enumerate(sorted_ops):
-                h = SMIHeader()
-                h.vld = 1
-                h.loops = loop_count - 1
-                h.dly = schedule[op.trace_id]  # 来自 SMT 调度的绝对时刻
-                h.inc = dynamic_inc if not op.metadata.get("is_invariant") else 0
+            # --- [插入 Header 控制行: EMBED=1] ---
+            h_header = SMIHeader(vld=1, embed=1, loops=loop_count - 1)
+            lines.append(f"{display_name}[HDR]  : {h_header.to_string()} | BODY:[LOOP_HEADER_CONFIG]")
+            
+            # --- [插入 Body 执行块: 强制长度等于 II] ---
+            for s in range(self.ii):
+                # 寻找该 Slot (s) 是否有对应的操作
+                target_op = None
+                for op in sorted_ops:
+                    if (schedule[op.trace_id] % self.ii) == s:
+                        target_op = op
+                        break
                 
-                # 标记物理终结点
-                if op.op_type == "UR_WRITE" or (u_name == "rtovr_1" and i == len(sorted_ops)-1):
+                h = SMIHeader()
+                h.loops = 0 # 循环由 Header (EMBED=1) 控制，此处设为 0
+                h.embed = 0
+                
+                # 标记物理终结点 (在 Block 的最后一拍)
+                if s == self.ii - 1:
                     h.embed_end = 1
                 
-                body = self.get_body_string(op.op_type, op.trace_id)
-                display_name = u_name.replace("-", "_")
-                idx_str = f"[{i}]" if len(sorted_ops) > 1 else ""
+                if target_op:
+                    h.vld = 1
+                    h.dly = schedule[target_op.trace_id]
+                    h.inc = base_stride if not target_op.metadata.get("is_invariant") else 0
+                    body = self.get_body_string(target_op.op_type, target_op.trace_id)
+                    label = f"Op: {target_op.trace_id:<8}"
+                else:
+                    h.vld = 0 # NOP
+                    h.dly = 0
+                    h.inc = 0
+                    body = "BODY:[NOP]"
+                    label = "NOP"
                 
-                lines.append(f"{display_name}{idx_str:<5}: {h.to_string()} | {body}")
+                lines.append(f"{display_name}[{s}]  : {h.to_string()} | {body} /* {label} */")
         
         return "\n".join(lines)
