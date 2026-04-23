@@ -361,6 +361,11 @@ class SynthesisAxioms:
             return  # 标准流水线架构无需此约束
 
         for op in ops:
+            # [算法优化] 如果算子是循环不变量 (Loop Invariant)，则不受 II 覆盖限制
+            # 因为即使下一迭代覆盖了该 Buffer，写入的值也是一样的，不破坏数据一致性。
+            if op.metadata.get("is_invariant", False):
+                continue
+
             consumers = [
                 o for o in ops if op.trace_id in o.metadata.get("depends_on", [])
             ]

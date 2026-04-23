@@ -338,7 +338,9 @@ class TimingVerifier:
                     raise RuntimeError(f"[Verifier] RAW Violation: {op.trace_id} -> {cons.trace_id} "
                                      f"(t_p={t_p}, t_c={t_c}, lat={lat})")
                 
-                if t_c >= t_p + lat + II:
+                # 数据存活窗口 [lat, lat + II - 1]
+                # [算法优化] 如果 Producer 是循环不变量，则不触发此报错
+                if not op.metadata.get("is_invariant", False) and t_c >= t_p + lat + II:
                     raise RuntimeError(f"[Verifier] Latch Overwrite: {op.trace_id} expired "
                                      f"before {cons.trace_id} read (II={II})")
 
