@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set, Tuple
 import copy
 import z3
 from ir.mir.mir_op import MIROp
@@ -261,40 +261,76 @@ class TimingVerifier:
     """
     后验验证器：不使用 SMT，基于物理规则二次检查调度结果。
     这是最后的防线，拦截任何可能的 SMT 建模漏洞。
+    支持 Spec-Driven 动态扩展。
     """
     def __init__(self, spec: HardwareSpec):
         self.spec = spec
         self.delays = spec.delays
+        # 动态加载硬件限额
+        self.constraints = spec.config.get("resource_constraints", {})
+        self.unit_limits = self.constraints.get("unit_instances", {})
+        self.max_reads = self.constraints.get("total_read_ports", 4)
+        self.max_writes = self.constraints.get("total_write_ports", 4)
 
     def verify(self, ops: List[MIROp], schedule: Dict[str, int], II: int):
         nodes = {op.trace_id: op for op in ops}
-        slot_iq_usage: set = set()    # (slot, iq_id)
-        slot_bank_usage: set = set()  # (slot, bank_id)
         
+        # 每一拍的资源统计矩阵
+        # slot -> { resource_type: count }
+        slot_res_usage: Dict[int, Dict[str, int]] = {}
+        # slot -> set of iq_id (物理 ID 唯一性)
+        slot_physical_registry: Dict[int, Set[int]] = {}
+        # (slot, bank_id) -> trace_id
+        bank_occupancy: Dict[Tuple[int, int], str] = {}
+
         for op in ops:
             t_p = schedule[op.trace_id]
             s_p = t_p % II
-            lat = self.spec.delays.get(op.op_type.upper(), 1)
-            
-            # 1. 资源互斥验证 (Physical Unit Mutex)
+            res_type = op.op_type.upper()
+            lat = self.spec.delays.get(res_type, 1)
+
+            # 初始化该槽位的统计
+            slot_res_usage.setdefault(s_p, {})
+            slot_physical_registry.setdefault(s_p, set())
+
+            # --- 1. 资源类限额动态验证 ---
+            if res_type in self.unit_limits:
+                slot_res_usage[s_p][res_type] = slot_res_usage[s_p].get(res_type, 0) + 1
+                limit = self.unit_limits[res_type]
+                if slot_res_usage[s_p][res_type] > limit:
+                    raise RuntimeError(f"[Verifier] Resource Exhausted: {res_type} count "
+                                     f"{slot_res_usage[s_p][res_type]} > limit {limit} at slot {s_p}")
+
+            # --- 2. 物理 IQ ID 唯一性验证 ---
             iq_id = op.metadata.get("iq_id")
             if iq_id is not None:
-                usage_key = (s_p, iq_id)
-                if usage_key in slot_iq_usage:
-                    raise RuntimeError(f"[Verifier] Resource Conflict: IQ {iq_id} used multiple times "
-                                     f"in slot {s_p}")
-                slot_iq_usage.add(usage_key)
+                if iq_id in slot_physical_registry[s_p]:
+                    raise RuntimeError(f"[Verifier] Physical ID Conflict: IQ {iq_id} "
+                                     f"doubly assigned at slot {s_p}")
+                slot_physical_registry[s_p].add(iq_id)
 
-            # 2. Bank 互斥验证 (Storage Bank Mutex)
+            # --- 3. Bank 互斥验证 ---
             bank_id = op.metadata.get("manual_bank")
             if bank_id is not None:
                 bank_key = (s_p, bank_id)
-                if bank_key in slot_bank_usage:
-                    raise RuntimeError(f"[Verifier] Bank Conflict: Bank {bank_id} accessed multiple times "
-                                     f"in slot {s_p}")
-                slot_bank_usage.add(bank_key)
+                if bank_key in bank_occupancy:
+                    prev_id = bank_occupancy[bank_key]
+                    raise RuntimeError(f"[Verifier] Bank Conflict: Bank {bank_id} "
+                                     f"contested by {prev_id} and {op.trace_id} at slot {s_p}")
+                bank_occupancy[bank_key] = op.trace_id
 
-            # 3. RAW 依赖与存活窗口验证
+            # --- 4. 端口带宽验证 ---
+            if res_type == "UR_READ":
+                slot_res_usage[s_p]["READ_BUS"] = slot_res_usage[s_p].get("READ_BUS", 0) + 1
+                if slot_res_usage[s_p]["READ_BUS"] > self.max_reads:
+                    raise RuntimeError(f"[Verifier] Read Bandwidth Error: slot {s_p} exceeds {self.max_reads}")
+
+            if res_type == "UR_WRITE":
+                slot_res_usage[s_p]["WRITE_BUS"] = slot_res_usage[s_p].get("WRITE_BUS", 0) + 1
+                if slot_res_usage[s_p]["WRITE_BUS"] > self.max_writes:
+                    raise RuntimeError(f"[Verifier] Write Bandwidth Error: slot {s_p} exceeds {self.max_writes}")
+
+            # --- 5. 依赖验证 (RAW & Shadow Binding) ---
             consumers = [o for o in ops if op.trace_id in o.metadata.get("depends_on", [])]
             for cons in consumers:
                 t_c = schedule[cons.trace_id]
@@ -302,13 +338,11 @@ class TimingVerifier:
                     raise RuntimeError(f"[Verifier] RAW Violation: {op.trace_id} -> {cons.trace_id} "
                                      f"(t_p={t_p}, t_c={t_c}, lat={lat})")
                 
-                # 数据存活窗口 [lat, lat + II - 1]
                 if t_c >= t_p + lat + II:
                     raise RuntimeError(f"[Verifier] Latch Overwrite: {op.trace_id} expired "
                                      f"before {cons.trace_id} read (II={II})")
 
-            # 4. 影子绑定验证 (RTOVR -> ALU)
-            if op.op_type.upper() == "RTOVR":
+            if res_type == "RTOVR":
                 alu_cons = [o for o in consumers if o.op_type.upper() in ["FPMUL", "FPADD", "UR_WRITE"]]
                 for alu in alu_cons:
                     t_alu = schedule[alu.trace_id]
