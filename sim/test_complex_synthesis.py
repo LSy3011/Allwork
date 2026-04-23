@@ -11,6 +11,34 @@ from tests.helpers import MockSpec, make_op
 from synthesis.backend import SMTSynthesizer
 from core.ii_analyzer import IIAnalyzer
 
+def print_pipeline_timeline(ops, schedule, II, max_cycles=30):
+    """
+    可视化模调度流水线时序图
+    """
+    print(f"\n{'='*25} 物理时序图 (II={II}) {'='*25}")
+    total_cycles = max(schedule.values()) + 1
+    display_cycles = min(total_cycles + II * 2, max_cycles)
+    
+    header = "Cycle | "
+    for iter_id in range(3): # 展示3个迭代
+        header += f"Iter {iter_id:<20} | "
+    print(header)
+    print("-" * len(header))
+
+    for c in range(display_cycles):
+        row = f"{c:<5} | "
+        for iter_id in range(3):
+            current_ops = []
+            for op_id, t_base in schedule.items():
+                if t_base + iter_id * II == c:
+                    current_ops.append(op_id)
+            
+            cell = ",".join(current_ops)
+            row += f"{cell:<20} | "
+        print(row)
+    print("=" * 80)
+
+
 def test_horner_pipeline():
     """
     [Complex-1] Horner 链: y = a + x * (b + x * (c + x * d))
@@ -142,6 +170,10 @@ def test_taylor_sin_9th():
     synth = SMTSynthesizer(spec)
     mii = IIAnalyzer(spec).compute(ops)
     result = synth.solve(ops, MII=mii, MAX_II=30)
+    
+    if result:
+        print_pipeline_timeline(ops, result["schedule"], result["II"], max_cycles=40)
+        
     assert result["II"] == mii, f"九阶泰勒展开应达到 MII={mii}，实际={result['II']}"
 
 if __name__ == "__main__":
