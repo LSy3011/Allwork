@@ -388,6 +388,41 @@ class SynthesisAxioms:
             )
 
     # ------------------------------------------------------------------
+    # 影子绑定公理 (RTOVR -> ALU)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def add_shadow_binding_axiom(
+        solver,
+        ops: List[MIROp],
+        t_vars: Dict[str, z3.ArithRef],
+        II: int
+    ):
+        """
+        影子绑定公理：
+        在无输出 FIFO 的架构下，RTOVR 选通信号与 ALU 消费之间的距离必须在 [1, II-1] 拍内。
+        """
+        nodes_by_id = {op.trace_id: op for op in ops}
+        for op in ops:
+            rtovr_deps = [
+                d for d in op.metadata.get("depends_on", [])
+                if d in nodes_by_id and nodes_by_id[d].op_type == "RTOVR"
+            ]
+            # 只有特定的算理单元受此影子约束
+            if rtovr_deps and op.op_type.upper() in [
+                "FPMUL", "FPADD", "UR_WRITE", "LOGIC",
+                "FPTOINT", "INTTOFP", "SHIFTUP", "SHIFTDN", "INTADD"
+            ]:
+                for rd in rtovr_deps:
+                    label = f"shadow_{rd}_{op.trace_id}"
+                    # 1 <= delta <= II-1
+                    SynthesisAxioms._add_constraint(
+                        solver, t_vars[op.trace_id] >= t_vars[rd] + 1, f"{label}_lower"
+                    )
+                    SynthesisAxioms._add_constraint(
+                        solver, t_vars[op.trace_id] <= t_vars[rd] + max(1, II - 1), f"{label}_upper"
+                    )
+
+    # ------------------------------------------------------------------
     # 优化目标（仅供外部工具使用，内部不再调用）
     # ------------------------------------------------------------------
     @staticmethod
@@ -398,3 +433,4 @@ class SynthesisAxioms:
             for t in t_vars.values():
                 solver.add(max_t >= t)
             solver.minimize(max_t)
+

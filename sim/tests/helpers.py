@@ -23,6 +23,11 @@ class MockSpec:
         self._read_ports = read_ports
         self._write_ports = write_ports
         self._registry = iq_registry or {"UR_READ": 30, "UR_WRITE": 35}
+        # 自动为 Mock 的单元分配基准 ID (100, 200, 300...)
+        if iq_registry is None:
+            for i, u_type in enumerate(instances.keys()):
+                if u_type not in self._registry:
+                    self._registry[u_type] = (i + 1) * 100
         self.config = {
             "iq_registry": self._registry,
             "resource_constraints": {
@@ -46,6 +51,21 @@ class MockSpec:
             base = registry.get(key, 0)
             return [base + i for i in range(instances[key])]
         return []
+
+    def get_iq_name(self, iq_id: int) -> str:
+        """Mock 版反向寻址"""
+        registry = self._registry
+        base_r = registry.get("UR_READ", 30)
+        base_w = registry.get("UR_WRITE", 35)
+        if base_r <= iq_id < base_r + self._read_ports: return f"ur-r{iq_id - base_r}"
+        if base_w <= iq_id < base_w + self._write_ports: return f"ur-w{iq_id - base_w}"
+        
+        for u_type, base_id in registry.items():
+            count = self._instances.get(u_type, 0)
+            if base_id <= iq_id < base_id + count:
+                idx = iq_id - base_id
+                return f"{u_type.lower()}-{idx}"
+        return f"unit-{iq_id}"
 
 
 def make_op(op_type: str, trace_id: str,
