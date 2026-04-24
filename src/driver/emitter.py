@@ -113,3 +113,45 @@ class LIRPacker:
                 "name": t_name, "bank": t_obj.bank, "addr": t_obj.offset,
                 "shape": t_obj.shape, "role": t_obj.role
             })
+
+    def dump_verbose(self, instructions: List[PhysicalInstruction]):
+        print("\n" + "="*40 + " TRUTH-ALIGNED MICRO-INSTRUCTION DUMP " + "="*40)
+        
+        # 1. 确保按单元和绝对时间排序
+        instructions.sort(key=lambda x: (x.iq_name, x.abs_t))
+        
+        last_iq = None
+        for p_instr in instructions:
+            if p_instr.iq_name != last_iq:
+                print(f"\n--- Unit: {p_instr.iq_name.upper()} ---")
+                last_iq = p_instr.iq_name
+            
+            # A. 构造标签
+            if p_instr.stage == "INIT":
+                tag = "[INIT]"
+            elif p_instr.stage == "HDR":
+                tag = "[HDR] "
+            else:
+                tag = f"[{p_instr.local_id}]  "
+            
+            # B. 格式化 Header
+            h = p_instr.header
+            header_str = f"VLD:{h.vld}|EMB:{h.embed}|E_END:{h.embed_end}|LOOP:{h.loops}|INC:{h.inc}"
+            
+            # C. 格式化 Body
+            if p_instr.header.vld == 0 and p_instr.stage != "INIT":
+                body_str = "NOP"
+            else:
+                body_parts = []
+                for k, v in p_instr.payload.items():
+                    if k.isupper() and k not in ["IQ_ID", "GLOBAL_T"]:
+                        body_parts.append(f"{k}:{v}")
+                body_str = "|".join(body_parts) if body_parts else "NOP"
+            
+            # D. 打印整行
+            comment = f"/* {p_instr.comment} */" if p_instr.comment else ""
+            trace = f"/* Op: {p_instr.trace_id} */" if p_instr.trace_id else ""
+            
+            print(f"{p_instr.iq_name:<15}{tag} : HEAD:[{header_str}] | BODY:[{body_str}] {trace} {comment}")
+        
+        print("\n" + "="*118)

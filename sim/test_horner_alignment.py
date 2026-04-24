@@ -3,21 +3,27 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from synthesis.ucode_solver import UCodeSynthesizer
-from synthesis.encoder import SMIEncoderTruth
 from api.hw_spec import HardwareSpec
-from tests.helpers import make_op, MockSpec
+from tests.helpers import make_op
 from sim.test_complex_synthesis import print_pipeline_timeline
 
+# 🛸 [NEW] 导入物理驱动层组件
+from driver.assembler import PhysicalAssembler
+from driver.emitter import LIRPacker
+
 def test_horner_3rd_alignment():
-    print("\n" + "="*20 + " 3rd-Order Horner Chain Alignment Test (with RTOVR) " + "="*20)
+    print("\n" + "="*20 + " 3rd-Order Horner Chain Alignment Test (Physical Backend) " + "="*20)
     
-    # 1. 资源：充分的 RTOVR 实例
-    spec = MockSpec(
-        instances={"FPMUL": 1, "FPADD": 1, "UR_READ": 4, "UR_WRITE": 4, "RTOVR": 16},
-        delays={"FPMUL": 4, "FPADD": 4, "UR_READ": 1, "UR_WRITE": 1, "RTOVR": 1}
-    )
+    # 1. 资源：加载真实的硬件规格
+    spec = HardwareSpec.load("hw_config")
     
-    # 2. 构造 DFG: 每阶独立读取 x 以避免跨迭代覆盖
+    print("\n[SPEC CHECK] Resource Mapping Audit:")
+    for res in ["FPMUL", "FPADD", "UR_READ", "UR_WRITE", "RTOVR"]:
+        ids = spec.get_iq_ids(res)
+        delay = spec.delays.get(res, "?")
+        print(f"  - {res:<10} : IDs={ids}, Delay={delay}")
+    
+    # 2. 构造 DFG
     ops = [
         # Stage 1: c3*x1 + c2
         make_op("UR_READ", "rd_x1"),
@@ -46,7 +52,7 @@ def test_horner_3rd_alignment():
         make_op("UR_WRITE", "wr_y", deps=["rt_a3"])
     ]
     
-    # 3. 调度
+    # 3. 调度 (SMT Solving)
     synth = UCodeSynthesizer(spec)
     result = synth.solve_with_units(ops, MII=3, MAX_II=10)
     
@@ -55,16 +61,25 @@ def test_horner_3rd_alignment():
         return
 
     schedule = result["schedule"]
-    unit_map = result["unit_assignments"]
     II = result["II"]
 
-    # 4. 输出物理时序图
+    # 🛸 [NEW] 4. 对接物理后端：元数据注入
+    for op in ops:
+        op.metadata["global_t"] = schedule[op.trace_id]
+        # 注意：iq_id 已经在 solve_with_units 过程中被回填到 op.metadata 中了
+        pass
+
+    # 🛸 [NEW] 5. 物理装配 (Assembling)
+    assembler = PhysicalAssembler(spec)
+    physical_instrs = assembler.assemble(ops, II=II)
+
+    # 🛸 [NEW] 6. 调试输出：解析字段确认
+    packer = LIRPacker("hw_config")
+    packer.dump_verbose(physical_instrs)
+    
+    # 7. 输出物理时序图 (Legacy Support)
     print_pipeline_timeline(ops, schedule, II)
     
-    # 5. 输出 TRUTH-ALIGNED MICRO-INSTRUCTION DUMP
-    encoder = SMIEncoderTruth(ii=II)
-    dump_str = encoder.dump_truth_aligned(ops, schedule, unit_map, loop_count=20, base_stride=1)
-    print("\n" + dump_str)
     print("\n" + "="*80)
 
 if __name__ == "__main__":

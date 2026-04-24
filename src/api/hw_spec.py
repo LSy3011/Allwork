@@ -50,6 +50,7 @@ class HardwareSpec(BaseModel):
     iqs: Dict[str, IQConfig]
     delays: Dict[str, int]
     system_core: Optional[Dict[str, Any]] = None
+    rtovr_config: Dict[str, Any] = {}
 
     @classmethod
     def load(cls, config_dir: str):
@@ -76,7 +77,8 @@ class HardwareSpec(BaseModel):
             "modules": load_yaml("modules.yaml")["modules"],
             "iqs": load_yaml("iq_config.yaml")["iq_config"],
             "delays": load_yaml("pipeline_delays.yaml")["pipeline_delays"],
-            "system_core": master_data["system_core"] if master_data else load_yaml("specs/system/system_core.yaml")
+            "system_core": master_data["system_core"] if master_data else load_yaml("specs/system/system_core.yaml"),
+            "rtovr_config": load_yaml("rtovr_config.yaml").get("rtovr_connectivity", {})
         }
         
         # 2. 深度加载每个模块的详细物理规格 (Specs Override Modules)
@@ -108,12 +110,14 @@ class HardwareSpec(BaseModel):
 
         return cls(**spec_data)
 
-        return cls(**spec_data)
-
     @property
     def config(self):
-        """兼容层：将 system_core 暴露为 config 字典"""
-        return self.system_core if self.system_core else {}
+        """兼容层：将 system_core 暴露为 config 字典，支持多层级穿透。"""
+        if not self.system_core: return {}
+        # 🛸 [FIX] 如果 system_core 内部还包了一层 system_core (某些 YAML 解析行为)
+        if "system_core" in self.system_core:
+            return self.system_core["system_core"]
+        return self.system_core
 
     def get_iq_ids(self, unit_type: str) -> List[int]:
         """
@@ -140,34 +144,51 @@ class HardwareSpec(BaseModel):
         
         return []
 
-    def get_iq_name(self, iq_id: int) -> str:
+    def get_iq_name(self, iq_id: int, unit_type: str = None) -> str:
         """
-        反向寻址：根据物理 IQ ID 获取其实例化名称 (用于生成的 HEX 文件名)。
+        反向寻址：强制使用 get_iq_ids 进行双向对齐，确保 100% 正确。
         """
-        # 1. 探测 UR 端口 (动态回溯)
-        registry = self.config.get("iq_registry", {})
-        base_r = registry.get("UR_READ", 30)
-        base_w = registry.get("UR_WRITE", 35)
-        
-        if base_r <= iq_id < base_r + 4: return f"ur-r{iq_id - base_r}"
-        if base_w <= iq_id < base_w + 4: return f"ur-w{iq_id - base_w}"
-        
-        # 2. 探测 ALU 端口
-        instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
-        
-        for u_type, base_id in registry.items():
-            count = instances.get(u_type, 0)
-            if base_id <= iq_id < base_id + count:
-                idx = iq_id - base_id
-                u_u = u_type.upper()
-                # 👽 [SMC KERNEL ALIGN] 
-                # 计算单元：纯小写 (由 ParallelKernel.__init__ 控制)
+        # 1. 如果提供了 unit_type，优先在其范围内查找
+        if unit_type:
+            ids = self.get_iq_ids(unit_type)
+            if iq_id in ids:
+                idx = iq_id - ids[0]
+                u_u = unit_type.upper()
                 if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT", 
                            "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16"]:
                     return u_u.lower()
-                else:
-                    # 路由/访存单元：带索引 (由 ParallelKernel._init_iqs 控制)
-                    p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
-                    return f"{p_name}-{idx}"
+                p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
+                return f"{p_name}-{idx}"
 
-        return "unknown"
+        # 2. 全局扫描
+        registry = self.config.get("iq_registry", {})
+        for u_type in registry.keys():
+            ids = self.get_iq_ids(u_type)
+            if iq_id in ids:
+                idx = iq_id - ids[0]
+                u_u = u_type.upper()
+                if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT", 
+                           "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16"]:
+                    return u_u.lower()
+                p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
+                return f"{p_name}-{idx}"
+
+        return f"{unit_type.lower()}_unknown" if unit_type else "unknown"
+
+    def get_dvr_map(self) -> Dict[str, Dict[str, int]]:
+        """从 rtovr_config 解析物理槽位绑定表"""
+        raw_dvr = self.rtovr_config.get("producers_dvr", {})
+        dvr_map = {}
+        for slot_id, label in raw_dvr.items():
+            parts = label.split('_')
+            if len(parts) < 2: continue
+            # 🛸 [NEW] 鲁棒解析：支持 UR_WRITE_0_D 这种命名
+            port = parts[-1]
+            if len(parts) >= 3 and parts[-2].isdigit():
+                unit = "_".join(parts[:-2])
+            else:
+                unit = "_".join(parts[:-1])
+                
+            if unit not in dvr_map: dvr_map[unit] = {}
+            dvr_map[unit][port] = slot_id
+        return dvr_map

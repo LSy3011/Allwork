@@ -13,150 +13,152 @@ class PhysicalAssembler:
     def __init__(self, hw_spec: HardwareSpec):
         self.hw_spec = hw_spec
 
-    def assemble(self, lir_stream: List[LIROp]) -> List[PhysicalInstruction]:
+    def assemble(self, lir_stream: List[LIROp], II: int = 1) -> List[PhysicalInstruction]:
         """
-        核心装配逻辑：
-        1. 建立物理端子 ID 映射 (Resolve Routing)
-        2. 实例化 SMIHeader (Construct Header)
-        3. 生成 Payload (Map Body)
+        [V5.5+ 终极对齐版] 编织分层流，并补全硬件默认属性。
         """
-        nodes_by_id = {op.trace_id: op for op in lir_stream}
         node_to_src_id = self._build_physical_routing_map(lir_stream)
+        nodes_by_id = {op.trace_id: op for op in lir_stream}
         
-        # 1. 初始分桶与属性映射
+        # 1. 建立 IQ 分桶 (计算单元用标准名，RTOVR 用 Slot 名)
         iq_buckets: Dict[str, List[LIROp]] = {}
         for op in lir_stream:
             m_type = op.op_type.upper()
             iq_id = op.metadata.get("iq_id")
-            
             if m_type == "RTOVR":
                 slot_id = op.metadata.get("slot_id")
+                # 🛸 严格对齐物理 Slot: rtovr_3, rtovr_4...
                 iq_name = f"rtovr_{slot_id}" if slot_id is not None else "rtovr_unknown"
             elif iq_id is not None:
-                iq_name = self.hw_spec.get_iq_name(iq_id).lower().replace("-", "_")
+                # 🛸 使用 Spec 标准名: FPMUL-0, FPADD-0, UR-READ-0...
+                iq_name = self.hw_spec.get_iq_name(iq_id, op.op_type).upper()
             else:
-                iq_name = m_type.lower()
-            
+                continue
             iq_buckets.setdefault(iq_name, []).append(op)
-        
+            
         physical_instructions = []
         
-        # 2. 逐 IQ 处理时间序列
+        # 2. 对每个物理 IQ 进行流编织
         for iq_name, ops in iq_buckets.items():
-            # 按绝对时间排序
-            ops.sort(key=lambda x: x.metadata.get("global_t", 0))
+            first_op = ops[0]
+            op_type = first_op.op_type.upper()
             
-            # 🛸 [NEW] V5.1 层次化对齐探测
-            # 如果 DFG 节点带有 inner_loops，则说明处于循环张量模式，必须走“启动-循环-对齐”流
-            is_hierarchical = any(op.metadata.get("inner_loops", 0) > 0 for op in ops)
-            II = 3 # 默认对齐 MII=3
-            
-            if is_hierarchical:
-                # 🛸 层次化生成流: INIT -> HDR -> BODY[II]
-                t_start = min(op.metadata.get("global_t", 0) for op in ops)
-                total_iters = max(op.metadata.get("inner_loops", 0) for op in ops)
-                
-                # A. INIT: 初始相位偏移 (利用 LOOPS 字段垫高周期)
-                if t_start > 0:
-                    init_header = SMIHeader(vld=0, loops=t_start-1, dly=0)
-                    physical_instructions.append(PhysicalInstruction(
-                        iq_name=iq_name, header=init_header, payload={"bits": 0},
-                        abs_t=0, trace_id=f"{iq_name}_init"
-                    ))
-                
-                # B. HDR: 循环头配置 (EMBED=1, 配置总循环次数)
-                hdr_header = SMIHeader(vld=1, embed=1, loops=total_iters, dly=0)
+            # A. INIT: 初始相位偏移
+            t_start = min(op.metadata.get("global_t", 0) for op in ops)
+            if t_start > 0:
                 physical_instructions.append(PhysicalInstruction(
-                    iq_name=iq_name, header=hdr_header, payload={"bits": 0},
-                    abs_t=t_start, trace_id=f"{iq_name}_hdr"
+                    iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
+                    header=SMIHeader(vld=0, loops=t_start), payload={},
+                    stage="INIT", comment=f"Initial Phase Offset: {t_start} iterations",
+                    op_type=op_type
                 ))
                 
-                # C. BODY: 模 II 展开的循环内核 (II 拍指令)
-                slots = [None] * II
-                for op in ops:
-                    slot_idx = op.metadata.get("global_t", 0) % II
-                    slots[slot_idx] = op
-                    
-                for k in range(II):
-                    op = slots[k]
-                    m_type = op.op_type.upper() if op else "NOP"
-                    if op:
-                        self._bind_operand_ports(op, nodes_by_id, node_to_src_id)
-                        # 🛸 关键对齐：SMC_ID 统一设为 31
-                        op.metadata["SMC_ID"] = 31
-                        header = SMIHeader(vld=1, inc=1, embed_end=1 if k == II - 1 else 0, dly=0)
-                        mod_spec = self.hw_spec.modules.get(m_type)
-                        payload_bits = FieldMapper.map_op_to_payload(op, mod_spec) if mod_spec else 0
-                    else:
-                        header = SMIHeader(vld=0, dly=0, embed_end=1 if k == II - 1 else 0)
-                        payload_bits = 0
-                    
-                    physical_instructions.append(PhysicalInstruction(
-                        iq_name=iq_name, header=header, payload={"bits": payload_bits},
-                        abs_t=t_start + k, trace_id=f"{iq_name}_{k}"
-                    ))
-            else:
-                # 🛰️ 常规单点指令流
-                last_t = 0
-                for i in range(len(ops)):
-                    op = ops[i]
-                    curr_t = op.metadata.get("global_t", 0)
-                    relative_dly = curr_t - last_t
-                    
-                    while relative_dly > 7:
-                        physical_instructions.append(PhysicalInstruction(
-                            iq_name=iq_name, header=SMIHeader(vld=0, dly=7), payload={"bits": 0},
-                            abs_t=last_t + 7, trace_id=f"nop_{iq_name}_{last_t + 7}"
-                        ))
-                        last_t += 7
-                        relative_dly -= 7
-
-                    m_type = op.op_type.upper()
+            # B. HDR: 循环头
+            physical_instructions.append(PhysicalInstruction(
+                iq_name=iq_name, abs_t=1, trace_id=f"hdr_{iq_name}",
+                header=SMIHeader(vld=1, embed=1, loops=19), payload={},
+                stage="HDR", comment="Loop Header Config",
+                op_type=op_type
+            ))
+            
+            # C. BODY: 内核循环
+            kernel_map: Dict[int, LIROp] = {op.metadata["global_t"] % II: op for op in ops}
+            
+            for k in range(II):
+                if k in kernel_map:
+                    op = kernel_map[k]
                     self._bind_operand_ports(op, nodes_by_id, node_to_src_id)
-                    header = SMIHeader(
-                        vld=int(op.metadata.get("vld", 1)), dly=int(relative_dly),
-                        loops=int(op.metadata.get("loops", 0)),
-                        inc=int(op.metadata.get("inc", 0)),
-                        embed=int(op.metadata.get("embed", 0)),
-                        embed_end=int(op.metadata.get("embed_end", 0)),
-                        jump=int(op.metadata.get("jump", 0)),
-                        level=int(op.metadata.get("level", 0))
-                    )
-                    mod_spec = self.hw_spec.modules.get(m_type)
-                    payload_bits = FieldMapper.map_op_to_payload(op, mod_spec) if mod_spec else 0
+                    # 🛸 属性补全与 SMC_ID 锁定
+                    payload = self._fill_default_payload(op.op_type, op.metadata)
                     
+                    p_instr = PhysicalInstruction(
+                        iq_name=iq_name, abs_t=k + 2, 
+                        header=SMIHeader(vld=1, inc=1), 
+                        payload=payload,
+                        stage="BODY", local_id=k,
+                        trace_id=op.trace_id, op_type=op.op_type
+                    )
+                    if k == II - 1: p_instr.header.embed_end = 1
+                    physical_instructions.append(p_instr)
+                else:
+                    # NOP 填充
                     physical_instructions.append(PhysicalInstruction(
-                        iq_name=iq_name, header=header, payload={"bits": payload_bits},
-                        abs_t=curr_t, trace_id=op.trace_id
+                        iq_name=iq_name, abs_t=k + 2,
+                        header=SMIHeader(vld=0), payload={},
+                        stage="BODY", local_id=k,
+                        trace_id="NOP", op_type=op_type,
+                        comment="NOP Cell"
                     ))
-                    last_t = curr_t
-            
-        return sorted(physical_instructions, key=lambda x: (x.abs_t, x.iq_name))
+                    if k == II - 1: physical_instructions[-1].header.embed_end = 1
 
-    def _build_physical_routing_map(self, stream: List[LIROp]) -> Dict[tuple, int]:
-        """建立物理端子 ID 映射表 (RtoVR/ALU)"""
-        node_to_src_id = {}
-        for op in stream:
-            iq_id = op.metadata.get("iq_id")
-            if iq_id is None: continue
+        return sorted(physical_instructions, key=lambda x: (x.iq_name, x.abs_t))
+
+    def _fill_default_payload(self, op_type: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """根据 modules.yaml 补全默认硬件字段，并强制锁定关键位"""
+        # 🛸 鲁棒匹配模块名
+        m_type_upper = op_type.upper()
+        target_mod = None
+        for mod_name in self.hw_spec.modules:
+            if mod_name.upper() == m_type_upper:
+                target_mod = self.hw_spec.modules[mod_name]
+                break
+        
+        payload = copy.deepcopy(metadata)
+        
+        if target_mod:
+            for field in target_mod.code_fields:
+                f_name = field.name
+                if f_name not in payload:
+                    # 🛸 活跃指令 VALID 默认设为 1，其他按 0 补全
+                    if f_name.upper() == "VALID" or f_name.lower() == "vld":
+                        payload[f_name] = 1
+                    else:
+                        payload[f_name] = 0
             
-            iq_name = self.hw_spec.get_iq_name(iq_id)
-            if "ur-r" in iq_name:
-                idx = int(iq_name.replace("ur-r", ""))
-                node_to_src_id[(op.trace_id, "D")] = PORT_OFFSET_UR_RDATA + idx
+            # 🛸 强制对齐 SMC_ID (兼容多种命名)
+            for smc_key in ["SMC_ID", "smc_id_en"]:
+                if smc_key in payload or any(f.name == smc_key for f in target_mod.code_fields):
+                    payload[smc_key] = 31
+                    
+        return payload
+    def _build_physical_routing_map(self, stream: List[LIROp]) -> Dict[tuple, int]:
+        """
+        [V5.2 自适应路由] 建立物理端子 ID 映射表。
+        不再依赖硬编码字典，而是根据 Registry 基址与 Unit 端口定义动态推算。
+        """
+        node_to_src_id = {}
+        registry = self.hw_spec.config.get("iq_registry", {})
+        
+        for op in stream:
+            m_type = op.op_type.upper()
+            iq_id = op.metadata.get("iq_id")
+            
+            # 🛸 [NEW] 优先使用已分配的物理 iq_id 作为路由基址
+            if iq_id is not None:
+                base_id = iq_id
             else:
-                # ALU 映射字典
-                d_map = {
-                    "INTADD": 0, "FPMUL": 3, "FPADD": 4, "LOGIC": 10,
-                    "FPTOFP": 6, "INTTOINT": 7, "FPTOINT": 8, "INTTOFP": 9,
-                    "INT8TOFP16": 14, "FP16MUL": 18,
-                    "FP32ADDTREE5TO1": 26, "FP32ADDTREE8TO1": 28, "SHIFTDN": 29
-                }
-                st_map = { "INTADD": 2, "FPADD": 5 }
-                
-                m_type = op.op_type.upper()
-                if m_type in d_map: node_to_src_id[(op.trace_id, "D")] = d_map[m_type]
-                if m_type in st_map: node_to_src_id[(op.trace_id, "ST")] = st_map[m_type]
+                base_id = registry.get(m_type)
+                if base_id is None:
+                    # 🛸 处理 UR_READ 等特殊注册名
+                    if m_type == "UR_READ": base_id = registry.get("UR_READ", 30)
+                    elif m_type == "UR_WRITE": base_id = registry.get("UR_WRITE", 35)
+                    else: continue
+            
+            # 获取该单元的输出端口列表
+            mod_spec = self.hw_spec.modules.get(m_type)
+            if not mod_spec: continue
+            
+            # 🛸 [FIX] Pydantic 对象访问模式
+            output_ports = getattr(mod_spec, "ports", {}).get("outputs", [])
+            if not output_ports:
+                # 兼容旧版或简化定义的 D 端口
+                node_to_src_id[(op.trace_id, "D")] = base_id
+            else:
+                for i, port in enumerate(output_ports):
+                    # 如果 port 也是对象，同样需要处理
+                    p_name = port.get("name", "D") if isinstance(port, dict) else getattr(port, "name", "D")
+                    node_to_src_id[(op.trace_id, p_name)] = base_id + i
+                    
         return node_to_src_id
 
     def _bind_operand_ports(self, op: LIROp, nodes_by_id: Dict[str, LIROp], node_to_src_id: Dict[tuple, int]):

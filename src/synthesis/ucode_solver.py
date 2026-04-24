@@ -75,6 +75,38 @@ class UCodeSynthesizer(SMTSynthesizer):
                     solver.add(z3.Implies(u_vars[op_i.trace_id] == u_vars[op_j.trace_id],
                                          t_vars[op_i.trace_id] % II != t_vars[op_j.trace_id] % II))
 
+        # 🛸 [NEW] V5.5 RtoVR 强绑定约束 (Physical Slot Binding)
+        # 动态从 rtovr_config.yaml 加载映射表
+        DVR_MAP = self.hw_spec.get_dvr_map()
+        
+        registry = self.hw_spec.config.get("iq_registry", {})
+        base_rt = registry.get("RTOVR", 100)
+
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                # 寻找这个 RtoVR 的消费者
+                consumer = None
+                port_idx = 0
+                for c_node in ops:
+                    deps = c_node.metadata.get("depends_on", [])
+                    if op.trace_id in deps:
+                        consumer = c_node
+                        port_idx = deps.index(op.trace_id)
+                        break
+                
+                if consumer:
+                    c_type = consumer.op_type.upper()
+                    if "WRITE" in c_type: # 适配 UR_WRITE
+                        port_name = "D"
+                    else:
+                        port_name = f"S{port_idx}"
+                    
+                    if c_type in DVR_MAP and port_name in DVR_MAP[c_type]:
+                        target_slot = DVR_MAP[c_type][port_name]
+                        # 🛸 强制绑定到物理槽位
+                        solver.add(u_vars[op.trace_id] == base_rt + target_slot)
+                        print(f"[SMT-FIX] Binding {op.trace_id} -> {consumer.trace_id}:{port_name} (Slot {target_slot})")
+
         if solver.check() != z3.sat:
             return None
 
@@ -83,15 +115,16 @@ class UCodeSynthesizer(SMTSynthesizer):
         
         unit_assignments = {}
         for op in ops:
-            u_val = model.eval(u_vars[op.trace_id]).as_long()
-            # 获取该资源类型的物理 ID 列表
-            res_type = self._get_resource_type(op.op_type)
-            valid_iqs = self.res_to_iqs.get(res_type, [])
+            u_id = model.eval(u_vars[op.trace_id]).as_long()
+            iq_name = self.hw_spec.get_iq_name(u_id, op.op_type)
+            unit_assignments[op.trace_id] = iq_name
             
-            if u_val < len(valid_iqs):
-                iq_id_actual = valid_iqs[u_val]
-                unit_assignments[op.trace_id] = self.hw_spec.get_iq_name(iq_id_actual)
-            else:
-                unit_assignments[op.trace_id] = f"{res_type.lower()}-{u_val}"
+            # 🛸 [FIX] 直接回填物理 ID 到元数据
+            op.metadata["iq_id"] = u_id
+            if op.op_type.upper() == "RTOVR":
+                # 计算局部槽位 ID (用于 PhysicalAssembler 的分桶)
+                registry = self.hw_spec.config.get("iq_registry", {})
+                base_rt = registry.get("RTOVR", 100)
+                op.metadata["slot_id"] = u_id - base_rt
             
         return schedule, unit_assignments

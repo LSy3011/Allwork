@@ -42,10 +42,11 @@ system_core:
       FP32ADDTREE8TO1: 1
       SHIFTUP: 1
       SHIFTDN: 1
+      RTOVR: 64
   iq_registry:
     UR_READ: 30
     UR_WRITE: 35
-    RTOVR: 0
+    RTOVR: 100
     INTADD: 0
     FPMUL: 3
     FPADD: 4

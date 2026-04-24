@@ -31,6 +31,8 @@ resource_constraints:
     FPADD: 1
     INTADD: 1
     LOGIC: 1
+    # 路由/数据交换单元
+    RTOVR: 64
     # 转换单元
     FPTOFP: 1
     FPTOINT: 1
@@ -49,7 +51,7 @@ resource_constraints:
 iq_registry:
   UR_READ: 30
   UR_WRITE: 35
-  RTOVR: 0
+  RTOVR: 100
   INTADD: 0
   FPMUL: 3
   FPADD: 4

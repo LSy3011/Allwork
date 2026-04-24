@@ -45,6 +45,12 @@ class PhysicalInstruction:
     payload: Dict[str, Any] # 模块特定字段 (Body)
     abs_t: int             # 绝对调度拍数 (用于后端排序)
     trace_id: str = ""     # 用于调试溯源
+    
+    # 🛸 [NEW] V5.0 分层调度元数据
+    stage: str = "BODY"    # "INIT" | "HDR" | "BODY"
+    comment: str = ""
+    local_id: int = 0      # 在 II 周期内的索引 (0, 1, 2...)
+    op_type: str = ""      # 原始算子类型
 
 class LIROp(IRNode):
     """

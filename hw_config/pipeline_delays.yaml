@@ -1,7 +1,7 @@
 pipeline_delays:
   UR_READ:             1    # UR读延迟
   UR_WRITE:            1    # UR写延迟
-  RtoVR:               1    # RtoVR搬运延迟
+  RTOVR:               1    # RtoVR搬运延迟
   FPADD:               4    # 浮点加法延迟
   FPMUL:               4    # 浮点乘法延迟
   INTADD:              1    # 整数加法延迟
