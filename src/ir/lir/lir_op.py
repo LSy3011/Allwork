@@ -1,40 +1,62 @@
 from typing import List, Dict, Tuple, Optional, Any
+from dataclasses import dataclass, field
 import struct
 from ..base import IRNode
 
+@dataclass
+class SMIHeader:
+    """
+    SMI_IQ 41-bit 共有 Header 物理模型。
+    对应硬件 IQ 控制位域。
+    """
+    vld: int = 1
+    jump: int = 0
+    embed: int = 0
+    embed_end: int = 0
+    loops: int = 0
+    cond: int = 0
+    dly: int = 0
+    inc: int = 0
+    inc_embed: int = 0
+    level: int = 0
+
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            "valid": self.vld,
+            "jump": self.jump,
+            "embed": self.embed,
+            "embed_end": self.embed_end,
+            "loops": self.loops,
+            "cond": self.cond,
+            "dly": self.dly,
+            "inc": self.inc,
+            "inc_embed": self.inc_embed,
+            "level": self.level
+        }
+
+@dataclass
+class PhysicalInstruction:
+    """
+    准发射状态的物理指令对象。
+    合并了 DFG 的静态 Body 和 SMT 的动态 Header。
+    """
+    iq_name: str           # 目标物理 IQ 名称 (如 'logic_0', 'rtovr_0')
+    header: SMIHeader      # 41-bit 控制头
+    payload: Dict[str, Any] # 模块特定字段 (Body)
+    abs_t: int             # 绝对调度拍数 (用于后端排序)
+    trace_id: str = ""     # 用于调试溯源
+
 class LIROp(IRNode):
     """
-    LIR (Low-level IR): 物理指令层。
-    1 LIR 节点 = 1条 41-bit 物理微指令包。
+    LIR (Low-level IR): 物理算子层。
+    在重构过渡期，它作为 DFG 节点与物理指令之间的桥梁。
     """
-    def __init__(self, abs_cycle: int, iq_id: int, 
-                 vld: bool = True, loops: int = 1, dly: int = 0, inc: int = 0, 
-                 code: int = 0, trace_id: str = ""):
+    def __init__(self, op_type: str, trace_id: str = ""):
         super().__init__(trace_id=trace_id)
-        self.abs_cycle = abs_cycle
-        self.iq_id = iq_id
-        self.vld = vld
-        self.loops = loops
-        self.dly = dly
-        self.inc = inc
-        self.code = code  # 模块特定的 micro-code bits
+        self.op_type = op_type
+        self.metadata: Dict[str, Any] = {}
         
-    def encode_41bit(self) -> bytes:
-        """
-        暂时返回 6 字节二进制（48 bits 补 0），后续对齐 41-bit 精确布局。
-        
-        [Preamble(vld, loops, dly, inc)][Micro-code bits]
-        """
-        raw = 0
-        raw |= (1 if self.vld else 0) << 40
-        raw |= (self.loops & 0xFF) << 32
-        raw |= (self.dly & 0xF) << 28
-        raw |= (self.inc & 0xF) << 24
-        raw |= (self.code & 0xFFFFFF) # 暂时占位 24-bit
-        
-        # 使用 big-endian 导出 6 字节 (需精确对齐硬件字节序)
-        return struct.pack(">Q", raw)[-6:] # 取最后 6 字节
-
     def __repr__(self):
-        return (f"LIROp(T={self.abs_cycle} IQ={self.iq_id} "
-                f"vld={self.vld} loops={self.loops} dly={self.dly} inc={self.inc} code=0x{self.code:0X})")
+        t = self.metadata.get("global_t", "?")
+        iq = self.metadata.get("iq_id", "?")
+        return f"LIROp(ID={self.trace_id} Type={self.op_type} T={t} IQ={iq})"

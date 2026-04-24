@@ -11,7 +11,8 @@ class BitPacker:
     @staticmethod
     def pack_capsule(iq_name: str, iq_conf: Any, payload: int, loops: int = 0, dly: int = 0, 
                      inc: int = 0, embed: int = 0, jump: int = 0, embed_end: int = 0, 
-                     hw_spec: Any = None, valid: int = 1, level: int = 0) -> int:
+                     hw_spec: Any = None, valid: int = 1, level: int = 0, 
+                     cond: int = 0, inc_embed: int = 0) -> int:
         header = 0
         
         # 🛸 物理对齐：位宽决议中心
@@ -25,8 +26,9 @@ class BitPacker:
             # 这里的输入变量需要映射到 Header 字段
             # embed 映射为 INC_EMBED (Level 1 增量), level 映射为 EMBED_LOOPS (层级标签)
             val_map = {
-                "INC_EMBED": embed, "INC": inc, "DLY": dly, 
-                "COND": 0, "LOOPS": loops, "EMBED_END": embed_end, 
+                "INC_EMBED": inc_embed or embed, # 兼容性处理
+                "INC": inc, "DLY": dly, 
+                "COND": cond, "LOOPS": loops, "EMBED_END": embed_end, 
                 "EMBED_LOOPS": level, "JUMP": jump, "VLD": valid
             }
             for item in iq_header:

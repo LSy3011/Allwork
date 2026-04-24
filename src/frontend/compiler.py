@@ -499,7 +499,9 @@ class GraphCompiler:
         if hasattr(self, "loop_context"):
             metadata["inc"] = 0 
             
-        node = self.b.make_op("UR_READ", nid, RT.UR_READ, role="constant", meta_name="constants", **metadata)
+        # 🛸 关键修复：防止重复传递 meta_name
+        m_name = metadata.pop("meta_name", "constants")
+        node = self.b.make_op("UR_READ", nid, RT.UR_READ, role="constant", meta_name=m_name, **metadata)
         self.const_pool[val_f] = node
         return node
         
@@ -514,4 +516,6 @@ class GraphCompiler:
         if hasattr(self, "loop_context"):
             kwargs["inc"] = self.loop_context["inner_inc"]
             
-        return self.b.make_op("UR_READ", new_id, RT.UR_READ, [], meta_name=str(sym), **kwargs)
+        # 🛸 关键修复：防止重复传递 meta_name
+        m_name = kwargs.pop("meta_name", str(sym))
+        return self.b.make_op("UR_READ", new_id, RT.UR_READ, [], meta_name=m_name, **kwargs)

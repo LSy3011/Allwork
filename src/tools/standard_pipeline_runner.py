@@ -67,8 +67,13 @@ class StandardPipelineRunner:
         
         program = self._prepare_simulation_memory(dfg, input_data)
         
+        # 🛸 [NEW] Physical Assembly Phase
+        from driver.assembler import PhysicalAssembler
+        assembler = PhysicalAssembler(self.spec)
+        physical_instructions = assembler.assemble(final_stream)
+        
         packer = LIRPacker(self.hw_config)
-        packer.emit_from_stream(final_stream, str(acb_path), program=program)
+        packer.emit_from_instructions(physical_instructions, str(acb_path), program=program)
         
         self._generate_timeline_ascii(final_stream, op_dir / "timeline_ascii.txt")
         self._verify_stage_d(acb_path, final_stream)
