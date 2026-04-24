@@ -13,9 +13,10 @@ class PhysicalAssembler:
     def __init__(self, hw_spec: HardwareSpec):
         self.hw_spec = hw_spec
 
-    def assemble(self, lir_stream: List[LIROp], II: int = 1) -> List[PhysicalInstruction]:
+    def assemble(self, lir_stream: List[LIROp], II: int = 1, num_iterations: int = 1) -> List[PhysicalInstruction]:
         """
         [V5.5+ 终极对齐版] 编织分层流，并补全硬件默认属性。
+        :param num_iterations: 硬件循环迭代次数 (自适应)
         """
         node_to_src_id = self._build_physical_routing_map(lir_stream)
         nodes_by_id = {op.trace_id: op for op in lir_stream}
@@ -53,11 +54,11 @@ class PhysicalAssembler:
                     op_type=op_type
                 ))
                 
-            # B. HDR: 循环头
+            # B. HDR: 循环头 (自适应 num_iterations)
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=1, trace_id=f"hdr_{iq_name}",
-                header=SMIHeader(vld=1, embed=1, loops=19), payload={},
-                stage="HDR", comment="Loop Header Config",
+                header=SMIHeader(vld=1, embed=1, loops=num_iterations), payload={},
+                stage="HDR", comment=f"Loop Header Config (Iter={num_iterations})",
                 op_type=op_type
             ))
             

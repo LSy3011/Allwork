@@ -71,7 +71,7 @@ def test_horner_3rd_alignment():
 
     # 🛸 [NEW] 5. 物理装配 (Assembling)
     assembler = PhysicalAssembler(spec)
-    physical_instrs = assembler.assemble(ops, II=II)
+    physical_instrs = assembler.assemble(ops, II=II, num_iterations=127)
 
     # 🛸 [NEW] 6. 调试输出：解析字段确认
     packer = LIRPacker("hw_config")
