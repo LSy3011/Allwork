@@ -46,52 +46,90 @@ class PhysicalAssembler:
             # 按绝对时间排序
             ops.sort(key=lambda x: x.metadata.get("global_t", 0))
             
-            last_t = 0 # 追踪上一条指令的发射时间
-            for i in range(len(ops)):
-                op = ops[i]
-                curr_t = op.metadata.get("global_t", 0)
+            # 🛸 [NEW] V5.1 层次化对齐探测
+            # 如果 DFG 节点带有 inner_loops，则说明处于循环张量模式，必须走“启动-循环-对齐”流
+            is_hierarchical = any(op.metadata.get("inner_loops", 0) > 0 for op in ops)
+            II = 3 # 默认对齐 MII=3
+            
+            if is_hierarchical:
+                # 🛸 层次化生成流: INIT -> HDR -> BODY[II]
+                t_start = min(op.metadata.get("global_t", 0) for op in ops)
+                total_iters = max(op.metadata.get("inner_loops", 0) for op in ops)
                 
-                # 🛸 关键协议对齐：
-                # 1. 第一条指令的 DLY (在指令 0 之前的等待) 实际上是靠指令 0 的 DLY 字段定义的
-                #    注意：在硬件实现中，IQ 链表头的 DLY 代表“发射前等待”。
-                # 2. 这里的逻辑需要极其精确：
-                #    Instr 0 (at T0) -> DLY 应为 T0
-                #    Instr 1 (at T1) -> Instr 0 的 DLY 应改为 T1 - T0 ? 
-                #    不对，旧版逻辑是：
-                #    stream[0].dly = T0
-                #    stream[1].dly = T1 - T0
-                #    这意味着指令 i 的 DLY 字段控制的是“发射指令 i 之前”的等待时间。
+                # A. INIT: 初始相位偏移 (利用 LOOPS 字段垫高周期)
+                if t_start > 0:
+                    init_header = SMIHeader(vld=0, loops=t_start-1, dly=0)
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, header=init_header, payload={"bits": 0},
+                        abs_t=0, trace_id=f"{iq_name}_init"
+                    ))
                 
-                relative_dly = curr_t - last_t
-                last_t = curr_t
+                # B. HDR: 循环头配置 (EMBED=1, 配置总循环次数)
+                hdr_header = SMIHeader(vld=1, embed=1, loops=total_iters, dly=0)
+                physical_instructions.append(PhysicalInstruction(
+                    iq_name=iq_name, header=hdr_header, payload={"bits": 0},
+                    abs_t=t_start, trace_id=f"{iq_name}_hdr"
+                ))
                 
-                print(f"[ASSEMBLER-DEBUG] IQ:{iq_name} | Op:{op.trace_id} | AbsT:{curr_t} | DLY:{relative_dly}")
-                
-                m_type = op.op_type.upper()
-                self._bind_operand_ports(op, nodes_by_id, node_to_src_id)
+                # C. BODY: 模 II 展开的循环内核 (II 拍指令)
+                slots = [None] * II
+                for op in ops:
+                    slot_idx = op.metadata.get("global_t", 0) % II
+                    slots[slot_idx] = op
+                    
+                for k in range(II):
+                    op = slots[k]
+                    m_type = op.op_type.upper() if op else "NOP"
+                    if op:
+                        self._bind_operand_ports(op, nodes_by_id, node_to_src_id)
+                        # 🛸 关键对齐：SMC_ID 统一设为 31
+                        op.metadata["SMC_ID"] = 31
+                        header = SMIHeader(vld=1, inc=1, embed_end=1 if k == II - 1 else 0, dly=0)
+                        mod_spec = self.hw_spec.modules.get(m_type)
+                        payload_bits = FieldMapper.map_op_to_payload(op, mod_spec) if mod_spec else 0
+                    else:
+                        header = SMIHeader(vld=0, dly=0, embed_end=1 if k == II - 1 else 0)
+                        payload_bits = 0
+                    
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, header=header, payload={"bits": payload_bits},
+                        abs_t=t_start + k, trace_id=f"{iq_name}_{k}"
+                    ))
+            else:
+                # 🛰️ 常规单点指令流
+                last_t = 0
+                for i in range(len(ops)):
+                    op = ops[i]
+                    curr_t = op.metadata.get("global_t", 0)
+                    relative_dly = curr_t - last_t
+                    
+                    while relative_dly > 7:
+                        physical_instructions.append(PhysicalInstruction(
+                            iq_name=iq_name, header=SMIHeader(vld=0, dly=7), payload={"bits": 0},
+                            abs_t=last_t + 7, trace_id=f"nop_{iq_name}_{last_t + 7}"
+                        ))
+                        last_t += 7
+                        relative_dly -= 7
 
-                header = SMIHeader(
-                    vld=int(op.metadata.get("vld", 1)),
-                    dly=int(relative_dly),
-                    loops=int(op.metadata.get("loops", 0)),
-                    inc=int(op.metadata.get("inc", 0)),
-                    embed=int(op.metadata.get("embed", 0)),
-                    embed_end=int(op.metadata.get("embed_end", 0)),
-                    jump=int(op.metadata.get("jump", 0)),
-                    level=int(op.metadata.get("level", 0))
-                )
-
-                mod_spec = self.hw_spec.modules.get(m_type)
-                payload_bits = FieldMapper.map_op_to_payload(op, mod_spec) if mod_spec else 0
-                
-                instr = PhysicalInstruction(
-                    iq_name=iq_name,
-                    header=header,
-                    payload={"bits": payload_bits},
-                    abs_t=curr_t,
-                    trace_id=op.trace_id
-                )
-                physical_instructions.append(instr)
+                    m_type = op.op_type.upper()
+                    self._bind_operand_ports(op, nodes_by_id, node_to_src_id)
+                    header = SMIHeader(
+                        vld=int(op.metadata.get("vld", 1)), dly=int(relative_dly),
+                        loops=int(op.metadata.get("loops", 0)),
+                        inc=int(op.metadata.get("inc", 0)),
+                        embed=int(op.metadata.get("embed", 0)),
+                        embed_end=int(op.metadata.get("embed_end", 0)),
+                        jump=int(op.metadata.get("jump", 0)),
+                        level=int(op.metadata.get("level", 0))
+                    )
+                    mod_spec = self.hw_spec.modules.get(m_type)
+                    payload_bits = FieldMapper.map_op_to_payload(op, mod_spec) if mod_spec else 0
+                    
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, header=header, payload={"bits": payload_bits},
+                        abs_t=curr_t, trace_id=op.trace_id
+                    ))
+                    last_t = curr_t
             
         return sorted(physical_instructions, key=lambda x: (x.abs_t, x.iq_name))
 

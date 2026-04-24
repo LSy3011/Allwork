@@ -50,8 +50,18 @@ class BitPacker:
             header |= ((jump & 1) << 39)           # [39]
             header |= (valid << 40)                 # [40] VLD
 
-        # 🛰️ 物理封裝：Header 在 Payload 的高位 (LSB-First Logic)
-        return (header << bits_code) | (payload & ((1 << bits_code) - 1))
+        # 🛰️ 物理封装：统一 ISA 空间合并 (Unified ISA Space Merging)
+        # 修正 V5.0 严重 Bug：不再级联 (Concat)，而是根据 Offset 覆盖/合并。
+        # Header 已经在 bits [0:40] 中根据规格对齐，Payload (CODE) 默认在 LSB [0:bits_code-1]。
+        
+        # 1. 提取 Payload 掩码，防止溢出干扰 Header 高位字段 (如 VLD/JUMP)
+        mask = (1 << bits_code) - 1
+        safe_payload = payload & mask
+        
+        # 2. 合并逻辑：由于 V5 ISA 的 Payload 区域与 INC/DLY/LOOPS 等字段存在物理复用 (Reuse)，
+        # 我们采用 OR 逻辑。在编译器上层，如果启用了 CODE，通常会保证 INC/DLY 字段为 0 以免干扰。
+        # 最终指令宽度保持在 41-bit (或由硬件参数定义的 BITS_HEADER 宽度)。
+        return (header | safe_payload)
 
     @staticmethod
     def pack_to_bytes(val: int, total_bits: int) -> bytes:

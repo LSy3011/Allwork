@@ -30,7 +30,7 @@ class SMIEncoderTruth:
     def __init__(self, ii: int):
         self.ii = ii
 
-    def get_body_string(self, op_type: str, trace_id: str) -> str:
+    def get_body_string(self, op_type: str, trace_id: str, ops: List, unit_map: Dict) -> str:
         """根据算子类型生成 Mock 的 BODY 字段"""
         op_type = op_type.upper()
         if "FPADD" in op_type:
@@ -38,11 +38,24 @@ class SMIEncoderTruth:
         if "FPMUL" in op_type:
             return "BODY:[SRC_PREC:1|DST_PREC:1|SMC_ID_EN:31]"
         if "RTOVR" in op_type:
-            return "BODY:[SEL:3]" # 默认 Mock SEL:3
+            # 🛸 动态解析：查找该 RTOVR 的前驱算子所在的物理单元
+            this_op = next((o for o in ops if o.trace_id == trace_id), None)
+            if this_op:
+                deps = this_op.metadata.get("depends_on", [])
+                if deps:
+                    producer_id = deps[0]
+                    p_unit = unit_map.get(producer_id, "unknown")
+                    # 假设端口映射：FPMUL -> 31, FPADD -> 32, UR_READ -> 33
+                    if "FPMUL" in p_unit.upper(): sel = 31
+                    elif "FPADD" in p_unit.upper(): sel = 32
+                    elif "UR_READ" in p_unit.upper(): sel = 33
+                    else: sel = 0
+                    return f"BODY:[SEL:{sel}]"
+            return "BODY:[SEL:3]" # Fallback
         if "UR_READ" in op_type:
             return f"BODY:[BANK:0|ADDR:0|SMC_ID_EN:31]"
         if "UR_WRITE" in op_type:
-            return f"BODY:[BANK:3|ADDR:0|WBE:0|SMC_ID_EN:31]"
+            return f"BODY:[BANK:3|ADDR:0|WBE:ffff|SMC_ID_EN:31]"
         return "BODY:[RAW_CODE:0]"
 
     def dump_truth_aligned(self, ops: List, schedule: Dict[str, int], 
@@ -60,7 +73,15 @@ class SMIEncoderTruth:
         # 2. 按单元输出序列
         for u_name in sorted(unit_instructions.keys()):
             display_name = u_name.replace("-", "_")
-            sorted_ops = sorted(unit_instructions[u_name], key=lambda x: schedule[x.trace_id])
+            ops_in_unit = unit_instructions[u_name]
+            
+            # 🛸 关键优化：计算该单元的最小迭代偏移 (k_min)
+            # 我们通过在循环前插入一个 NOP + loops 来实现“初始相位对齐”
+            k_min = min(schedule[op.trace_id] // self.ii for op in ops_in_unit)
+            
+            if k_min > 0:
+                h_init = SMIHeader(vld=0, loops=(k_min * self.ii) - 1)
+                lines.append(f"{display_name}[INIT] : {h_init.to_string()} | BODY:[NOP] /* Initial Phase Offset: {k_min} iterations */")
             
             # --- [插入 Header 控制行: EMBED=1] ---
             h_header = SMIHeader(vld=1, embed=1, loops=loop_count - 1)
@@ -70,27 +91,28 @@ class SMIEncoderTruth:
             for s in range(self.ii):
                 # 寻找该 Slot (s) 是否有对应的操作
                 target_op = None
-                for op in sorted_ops:
+                for op in ops_in_unit:
                     if (schedule[op.trace_id] % self.ii) == s:
                         target_op = op
                         break
                 
                 h = SMIHeader()
-                h.loops = 0 # 循环由 Header (EMBED=1) 控制，此处设为 0
+                h.loops = 0
                 h.embed = 0
                 
-                # 标记物理终结点 (在 Block 的最后一拍)
                 if s == self.ii - 1:
                     h.embed_end = 1
                 
                 if target_op:
                     h.vld = 1
-                    h.dly = schedule[target_op.trace_id]
+                    # 🛸 关键简化：时序已在 INIT NOP 中对齐，循环体内的指令不再需要 DLY。
+                    # 模调度保证了在一个 II 窗口内，所有指令按 Slot (s) 顺序发射即可。
+                    h.dly = 0
                     h.inc = base_stride if not target_op.metadata.get("is_invariant") else 0
-                    body = self.get_body_string(target_op.op_type, target_op.trace_id)
+                    body = self.get_body_string(target_op.op_type, target_op.trace_id, ops, unit_map)
                     label = f"Op: {target_op.trace_id:<8}"
                 else:
-                    h.vld = 0 # NOP
+                    h.vld = 0
                     h.dly = 0
                     h.inc = 0
                     body = "BODY:[NOP]"

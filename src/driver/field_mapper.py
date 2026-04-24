@@ -48,13 +48,13 @@ class FieldMapper:
             elif fname in SEMANTIC_BANK:
                 for k in SEMANTIC_BANK:
                     if k in meta and meta[k] is not None:
-                        fval = int(meta[k])
+                        fval = resolve_fval(field, meta[k])
                         break
             
             elif fname in SEMANTIC_ADDR:
                 for k in SEMANTIC_ADDR:
                     if k in meta and meta[k] is not None:
-                        fval = int(meta[k])
+                        fval = resolve_fval(field, meta[k])
                         break
                 
             elif fname in SEMANTIC_PREC:
@@ -69,15 +69,17 @@ class FieldMapper:
             elif fname in SEMANTIC_SRCID:
                 for k in SEMANTIC_SRCID:
                     if k in meta and meta[k] is not None:
-                        fval = int(meta[k])
-                        break
+                        # 🛸 关键修复：使用 resolve_fval 以支持语义端口名映射
+                        fval = resolve_fval(field, meta[k])
+                        # 如果解析出来的不是默认值，或者我们成功解析了，就跳出
+                        if fval != field.default:
+                            break
             
             # 3. 特殊固定字段处理 (Legacy & Multi-core Support)
             elif fname == "wbe":
-                fval = int(meta.get("wbe", 0xFFFF))
+                fval = resolve_fval(field, meta.get("wbe", 0xFFFF))
             elif "smc_id" in fname.lower():
-                # 🛸 兼容性：优先查 SMC_ID，其次查询编译器通用的 smc_id
-                fval = int(meta.get("SMC_ID", meta.get("smc_id", meta.get("smc_id_en", 0))))
+                fval = resolve_fval(field, meta.get("SMC_ID", meta.get("smc_id", meta.get("smc_id_en", 0))))
 
             # --- 🚀 物理级联与掩码保护 (Physical Marshalling) ---
             # 修正：移入循环内部，确保每一位都被拼装
