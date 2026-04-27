@@ -63,15 +63,23 @@ def test_horner_3rd_alignment():
     schedule = result["schedule"]
     II = result["II"]
 
-    # 🛸 [NEW] 4. 对接物理后端：元数据注入
+    # 🛸 [NEW] 4. 对接物理后端：元数据注入与动态数据规模 n
+    n_elements = 2  # 验证 n=2 的极简场景
     for op in ops:
         op.metadata["global_t"] = schedule[op.trace_id]
-        # 注意：iq_id 已经在 solve_with_units 过程中被回填到 op.metadata 中了
         pass
 
     # 🛸 [NEW] 5. 物理装配 (Assembling)
+    # 预测总延迟: L + (n-1)*II
+    static_latency = max(schedule.values()) + 1 # 粗略估算 (未含最后一个单元的延迟)
+    predicted_total = static_latency + (n_elements - 1) * II
+    
+    print(f"\n[BACKEND PREDICTION] Data Scale n={n_elements}, II={II}")
+    print(f"  - Static Latency (L): ~{static_latency} cycles")
+    print(f"  - Predicted Total: {predicted_total} cycles")
+
     assembler = PhysicalAssembler(spec)
-    physical_instrs = assembler.assemble(ops, II=II, num_iterations=127)
+    physical_instrs = assembler.assemble(ops, II=II, num_iterations=n_elements)
 
     # 🛸 [NEW] 6. 调试输出：解析字段确认
     packer = LIRPacker("hw_config")

@@ -44,21 +44,42 @@ class PhysicalAssembler:
             first_op = ops[0]
             op_type = first_op.op_type.upper()
             
-            # A. INIT: 初始相位偏移
-            t_start = min(op.metadata.get("global_t", 0) for op in ops)
-            if t_start > 0:
+            # A. INIT: 初始相位偏移 (修正版：确保 BODY index 0 对齐到 (T//II)*II)
+            # 🛸 [V5.5 PRECISION] 为了让 BODY 的 k=0 落在全局时间的 (T_min // II) * II
+            # 我们需要补偿 HDR 占用的 1 拍。
+            t_first = min(op.metadata.get("global_t", 0) for op in ops)
+            align_t = (t_first // II) * II
+            
+            # 补偿：L_init + 1 (INIT) + 1 (HDR) = align_t
+            l_init = align_t - 2
+            
+            if l_init >= 0:
                 physical_instructions.append(PhysicalInstruction(
                     iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
-                    header=SMIHeader(vld=0, loops=t_start), payload={},
-                    stage="INIT", comment=f"Initial Phase Offset: {t_start} iterations",
+                    header=SMIHeader(vld=0, loops=l_init), payload={},
+                    stage="INIT", comment=f"Phase Alignment Gap: {l_init+1} cycles",
                     op_type=op_type
                 ))
-                
-            # B. HDR: 循环头 (自适应 num_iterations)
+            elif align_t == 1:
+                # 只有一拍间隙，直接放 HDR
+                pass 
+            # 如果 align_t == 0，说明需要立即开始，HDR 应该在 T=-1 (由上层调度保证 Lead-in)
+
+            # B. HDR: 循环头 (自适应补全流水线排空深度)
+            # 🛸 [V5.5 ADVANCED] 自动计算该单元内部不同阶段的最大跨度
+            # 计算该单元内部不同阶段的最大跨度 (Iter Offset)
+            t_vals = [op.metadata.get("global_t", 0) for op in ops]
+            iter_span = (max(t_vals) // II) - (min(t_vals) // II)
+            
+            # 最终循环次数 = 用户请求的 n + 流水线排空所需的额外迭代
+            # 这样保证了第 n 个数据的最后一个 stage 也能在循环结束前被执行
+            total_n = num_iterations + iter_span
+            loops_val = max(0, total_n - 1)
+            
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=1, trace_id=f"hdr_{iq_name}",
-                header=SMIHeader(vld=1, embed=1, loops=num_iterations), payload={},
-                stage="HDR", comment=f"Loop Header Config (Iter={num_iterations})",
+                header=SMIHeader(vld=1, embed=1, loops=loops_val), payload={},
+                stage="HDR", comment=f"Loop Header (n={num_iterations}, span={iter_span})",
                 op_type=op_type
             ))
             
