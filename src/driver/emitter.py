@@ -39,36 +39,31 @@ class LIRPacker:
         for iq_name, stream in iq_buckets.items():
             # 严格按时间排序
             stream.sort(key=lambda x: x.abs_t)
+            # 1. 确定单元基础类型 (用于静态打包)
+            lookup_type = self._get_lookup_type(iq_name)
+            total_bits = BitPacker.get_unit_bits(lookup_type)
+            hex_chars = (total_bits + 3) // 4
             
-            # 获取硬件规格
-            # 兼容性：从 iq_name 反查 iq_conf
-            # logic_0 -> IQ_LOGIC
-            lookup_type = iq_name.split("_")[0].upper()
-            iq_lookup = f"IQ_{lookup_type}"
-            if iq_lookup not in self.hw_spec.iqs:
-                # 兜底：如果是未知 IQ，尝试从 modules 找
-                iq_conf = type('obj', (object,), {'BITS_CODE': 128})
-            else:
-                iq_conf = self.hw_spec.iqs[iq_lookup]
-
             hex_lines = []
             for instr in stream:
-                # 调用 BitPacker 进行位拼接
+                # 🛸 明确阶段判定：只有 BODY 阶段才允许携带 Body 载荷
+                is_body_stage = (instr.stage == "BODY")
+                
+                # 🛸 调用静态契约打包器
                 val = BitPacker.pack_capsule(
-                    iq_name=iq_name,
-                    iq_conf=iq_conf,
-                    payload=instr.payload.get("bits", 0),
-                    hw_spec=self.hw_spec,
+                    unit_type=lookup_type,
+                    payload_dict=instr.payload,
+                    is_body=is_body_stage,
                     **instr.header.to_dict()
                 )
-                hex_lines.append(f"{val:032x}")
+                hex_lines.append(f"{val:0{hex_chars}x}")
             
             hex_file_name = f"iq_{iq_name}.hex"
             with open(smc0 / hex_file_name, "w") as f:
                 f.write("\n".join(hex_lines) + "\n")
             
             iq_init[iq_name.replace("_", "-")] = f"smc_0/{hex_file_name}"
-            print(f"[EMITTER] IQ: {iq_name} | Instructions: {len(hex_lines)}")
+            print(f"[EMITTER] IQ: {iq_name:<10} | Type: {lookup_type:<8} | Total: {total_bits:3} | Instrs: {len(hex_lines)}")
 
         # 3. 导出仿真配置
         actual_max_t = max((instr.abs_t for instr in instructions), default=0)
@@ -113,6 +108,33 @@ class LIRPacker:
                 "name": t_name, "bank": t_obj.bank, "addr": t_obj.offset,
                 "shape": t_obj.shape, "role": t_obj.role
             })
+
+    def _resolve_iq_conf(self, iq_name: str):
+        """将物理单元名映射到 iq_config.yaml 中的 IQConfig。"""
+        # 1. 提取基础类型名 (UR-R-0 -> UR_READ, logic_0 -> LOGIC)
+        base_type = self._get_lookup_type(iq_name)
+        
+        # 2. 尝试匹配 IQ_XXX
+        iq_keys = [f"IQ_{base_type}", f"IQ_{base_type.replace('_', '-')}", base_type]
+        for key in iq_keys:
+            if key in self.hw_spec.iqs:
+                return self.hw_spec.iqs[key]
+        return None
+
+    def _get_lookup_type(self, iq_name: str) -> str:
+        """剥离序号和特殊字符，还原为模块基类名。"""
+        name = iq_name.upper().replace("-", "_")
+        
+        # 特殊映射：UR_R0 -> UR_READ, UR_W0 -> UR_WRITE
+        if name.startswith("UR_R"): return "UR_READ"
+        if name.startswith("UR_W"): return "UR_WRITE"
+        
+        # 移除末尾的序号 (如 _0, _1, 或直接跟随字母的数字)
+        import re
+        name = re.sub(r'_\d+$', '', name)
+        name = re.sub(r'\d+$', '', name)
+        
+        return name
 
     def dump_verbose(self, instructions: List[PhysicalInstruction]):
         print("\n" + "="*40 + " TRUTH-ALIGNED MICRO-INSTRUCTION DUMP " + "="*40)

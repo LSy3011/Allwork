@@ -80,13 +80,25 @@ class IQUnit(Component):
             
             is_in_dly = (dly > 0 and not self._dly_finished_marker) or self.delay_active
             
+            print(f"  [IQ-DEBUG] Unit:{self.unit:<10} PC:{self.pc:<2} | hvld:{hvld} loops:{loops_val} dly:{dly} in_dly:{is_in_dly}")
+
             if hvld == 1 and not is_in_dly:
                 hjump = (raw_base >> off_jump) & 0x1
                 hembed = (raw_base >> off_hembed) & 0x7
+                
+                # 🛸 [COMPAT] 兼容性补丁：如果 EMBED_LOOPS 为 0 但 INC_EMBED 非 0，视为 Level 1 循环
+                if hembed == 0:
+                    off_inc_em = self.decoder._layout.get('INC_EMBED', {}).get('offset')
+                    if off_inc_em is not None:
+                        inc_em_val = (raw_base >> off_inc_em) & 0x3F
+                        if inc_em_val > 0:
+                            hembed = 1
+                
                 raw_inc = (raw_base >> off_inc) & 0xF
                 current_inc = raw_inc if raw_inc < 8 else raw_inc - 16
                 
                 if hembed > 0:
+                    print(f"    [IQ-LOOP-INIT] Unit:{self.unit} Level:{hembed} Max:{loops_val}")
                     self.loop_states[hembed]["max"] = loops_val
                     # 🛸 关键修复：外层循环 (Level 1) 必须从专用位域 INC_EMBED 提取步长
                     if hembed == 1:
@@ -194,7 +206,8 @@ class IQUnit(Component):
         for name, info in self.decoder._layout.items():
             if "ADDR" in name.upper():
                 offset = info["offset"]
-                width = info["spec"].width if info["spec"] else 8
+                # 🛸 [FIX] 使用 .bits 而非 .width
+                width = info["spec"].bits if info["spec"] else 8
                 field_mask = (1 << width) - 1
                 
                 # 🚀 物理升维：支持全维度嵌套增量 (L0 + L1 + L2 + ...)

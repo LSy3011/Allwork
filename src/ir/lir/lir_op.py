@@ -22,16 +22,15 @@ class SMIHeader:
 
     def to_dict(self) -> Dict[str, int]:
         return {
-            "valid": self.vld,
-            "jump": self.jump,
-            "embed": self.embed,
-            "embed_end": self.embed_end,
-            "loops": self.loops,
-            "cond": self.cond,
-            "dly": self.dly,
-            "inc": self.inc,
-            "inc_embed": self.inc_embed,
-            "level": self.level
+            "VLD": self.vld,
+            "JUMP": self.jump,
+            "INC_EMBED": self.inc_embed or self.embed,
+            "EMBED_END": self.embed_end,
+            "LOOPS": self.loops,
+            "COND": self.cond,
+            "DLY": self.dly,
+            "INC": self.inc,
+            "EMBED_LOOPS": self.level
         }
 
 @dataclass

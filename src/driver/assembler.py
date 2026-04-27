@@ -2,222 +2,136 @@ import copy
 from typing import List, Dict, Any
 from ir.lir.lir_op import LIROp, PhysicalInstruction, SMIHeader
 from api.hw_spec import HardwareSpec
-from driver.field_mapper import FieldMapper
-from driver.hw_constants import PORT_OFFSET_UR_RDATA
 
 class PhysicalAssembler:
     """
-    AIACC 物理指令装配器 (V5.0)。
-    负责将带有逻辑元数据的 LIR 流“坍缩”为最终的物理指令对象。
+    AIACC 物理装配器 (V13.0)。
+    对齐精度语义：0=FP16, 1=FP32 (Hardware Default)。
     """
     def __init__(self, hw_spec: HardwareSpec):
         self.hw_spec = hw_spec
 
+    def _get_clean_id(self, node: Any) -> str:
+        if isinstance(node, str): return node
+        return getattr(node, "trace_id", str(node))
+
     def assemble(self, lir_stream: List[LIROp], II: int = 1, num_iterations: int = 1) -> List[PhysicalInstruction]:
-        """
-        [V5.5+ 终极对齐版] 编织分层流，并补全硬件默认属性。
-        :param num_iterations: 硬件循环迭代次数 (自适应)
-        """
-        node_to_src_id = self._build_physical_routing_map(lir_stream)
-        nodes_by_id = {op.trace_id: op for op in lir_stream}
-        
-        # 1. 建立 IQ 分桶 (计算单元用标准名，RTOVR 用 Slot 名)
+        trace_to_slot = {}
+        for op in lir_stream:
+            tid = self._get_clean_id(op)
+            phys_id = op.metadata.get("iq_id") or op.metadata.get("slot_id") or 0
+            trace_to_slot[tid] = int(phys_id)
+
         iq_buckets: Dict[str, List[LIROp]] = {}
         for op in lir_stream:
-            m_type = op.op_type.upper()
-            iq_id = op.metadata.get("iq_id")
-            if m_type == "RTOVR":
-                slot_id = op.metadata.get("slot_id")
-                # 🛸 严格对齐物理 Slot: rtovr_3, rtovr_4...
-                iq_name = f"rtovr_{slot_id}" if slot_id is not None else "rtovr_unknown"
-            elif iq_id is not None:
-                # 🛸 使用 Spec 标准名: FPMUL-0, FPADD-0, UR-READ-0...
-                iq_name = self.hw_spec.get_iq_name(iq_id, op.op_type).upper()
+            m_type = str(op.op_type).upper().strip()
+            tid = self._get_clean_id(op)
+            phys_id = trace_to_slot.get(tid, 0)
+            
+            if "RTOVR" in m_type:
+                registry = self.hw_spec.config.get("iq_registry", {})
+                base_rt = registry.get("RTOVR", 100)
+                # 🛸 [FIX] RTOVR 命名对齐仿真器 (rtovr-0 而非 rtovr_0)
+                iq_name = f"rtovr-{phys_id - base_rt}"
             else:
-                continue
+                # 🛸 [FIX] UR 命名对齐仿真器 (ur-r0 而非 ur-r-0)
+                iq_name = self.hw_spec.get_iq_name(phys_id, op.op_type).upper()
+                iq_name = iq_name.replace("UR-R-", "UR-R").replace("UR-W-", "UR-W")
+                iq_name = iq_name.replace("_", "-").lower()
             iq_buckets.setdefault(iq_name, []).append(op)
             
         physical_instructions = []
-        
-        # 2. 对每个物理 IQ 进行流编织
         for iq_name, ops in iq_buckets.items():
             first_op = ops[0]
-            op_type = first_op.op_type.upper()
-            
-            # A. INIT: 初始相位偏移 (修正版：确保 BODY index 0 对齐到 (T//II)*II)
-            # 🛸 [V5.5 PRECISION] 为了让 BODY 的 k=0 落在全局时间的 (T_min // II) * II
-            # 我们需要补偿 HDR 占用的 1 拍。
-            t_first = min(op.metadata.get("global_t", 0) for op in ops)
+            op_type = str(first_op.op_type).upper().strip()
+            t_vals = [op.metadata.get("global_t", 0) for op in ops]
+            t_first = min(t_vals)
             align_t = (t_first // II) * II
-            
-            # 补偿：L_init + 1 (INIT) + 1 (HDR) = align_t
             l_init = align_t - 2
             
             if l_init >= 0:
                 physical_instructions.append(PhysicalInstruction(
                     iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
                     header=SMIHeader(vld=0, loops=l_init), payload={},
-                    stage="INIT", comment=f"Phase Alignment Gap: {l_init+1} cycles",
-                    op_type=op_type
+                    stage="INIT", op_type=op_type
                 ))
-            elif align_t == 1:
-                # 只有一拍间隙，直接放 HDR
-                pass 
-            # 如果 align_t == 0，说明需要立即开始，HDR 应该在 T=-1 (由上层调度保证 Lead-in)
 
-            # B. HDR: 循环头 (自适应补全流水线排空深度)
-            # 🛸 [V5.5 ADVANCED] 自动计算该单元内部不同阶段的最大跨度
-            # 计算该单元内部不同阶段的最大跨度 (Iter Offset)
-            t_vals = [op.metadata.get("global_t", 0) for op in ops]
-            iter_span = (max(t_vals) // II) - (min(t_vals) // II)
-            
-            # 最终循环次数 = 用户请求的 n + 流水线排空所需的额外迭代
-            # 这样保证了第 n 个数据的最后一个 stage 也能在循环结束前被执行
-            total_n = num_iterations + iter_span
-            loops_val = max(0, total_n - 1)
-            
+            loops_val = max(0, num_iterations + (max(t_vals)//II - min(t_vals)//II) - 1)
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=1, trace_id=f"hdr_{iq_name}",
-                header=SMIHeader(vld=1, embed=1, loops=loops_val), payload={},
-                stage="HDR", comment=f"Loop Header (n={num_iterations}, span={iter_span})",
-                op_type=op_type
+                # 🛸 [FIX] 设置 level=1 以触发硬件/仿真器的 EMBED_LOOPS 逻辑
+                header=SMIHeader(vld=1, embed=1, level=1, loops=loops_val), payload={},
+                stage="HDR", op_type=op_type
             ))
             
-            # C. BODY: 内核循环
             kernel_map: Dict[int, LIROp] = {op.metadata["global_t"] % II: op for op in ops}
             
+            # --- [II-ALIGNED BODY GENERATION] ---
+            # 🚀 [II-ALIGNED] 强制补全 II 个周期的指令流，消除时序漂移
             for k in range(II):
                 if k in kernel_map:
                     op = kernel_map[k]
-                    self._bind_operand_ports(op, nodes_by_id, node_to_src_id)
-                    # 🛸 属性补全与 SMC_ID 锁定
-                    payload = self._fill_default_payload(op.op_type, op.metadata)
-                    
-                    p_instr = PhysicalInstruction(
-                        iq_name=iq_name, abs_t=k + 2, 
-                        header=SMIHeader(vld=1, inc=1), 
-                        payload=payload,
-                        stage="BODY", local_id=k,
-                        trace_id=op.trace_id, op_type=op.op_type
-                    )
-                    if k == II - 1: p_instr.header.embed_end = 1
-                    physical_instructions.append(p_instr)
+                    # 有操作的周期，VLD=1
+                    header = SMIHeader(vld=1, inc=0, dly=0)
+                    payload = self._resolve_physical_payload(op, trace_to_slot)
+                    trace_id = op.trace_id
                 else:
-                    # NOP 填充
-                    physical_instructions.append(PhysicalInstruction(
-                        iq_name=iq_name, abs_t=k + 2,
-                        header=SMIHeader(vld=0), payload={},
-                        stage="BODY", local_id=k,
-                        trace_id="NOP", op_type=op_type,
-                        comment="NOP Cell"
-                    ))
-                    if k == II - 1: physical_instructions[-1].header.embed_end = 1
-
-        return sorted(physical_instructions, key=lambda x: (x.iq_name, x.abs_t))
-
-    def _fill_default_payload(self, op_type: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """根据 modules.yaml 补全默认硬件字段，并强制锁定关键位"""
-        # 🛸 鲁棒匹配模块名
-        m_type_upper = op_type.upper()
-        target_mod = None
-        for mod_name in self.hw_spec.modules:
-            if mod_name.upper() == m_type_upper:
-                target_mod = self.hw_spec.modules[mod_name]
-                break
-        
-        payload = copy.deepcopy(metadata)
-        
-        if target_mod:
-            for field in target_mod.code_fields:
-                f_name = field.name
-                if f_name not in payload:
-                    # 🛸 活跃指令 VALID 默认设为 1，其他按 0 补全
-                    if f_name.upper() == "VALID" or f_name.lower() == "vld":
-                        payload[f_name] = 1
-                    else:
-                        payload[f_name] = 0
-            
-            # 🛸 强制对齐 SMC_ID (兼容多种命名)
-            for smc_key in ["SMC_ID", "smc_id_en"]:
-                if smc_key in payload or any(f.name == smc_key for f in target_mod.code_fields):
-                    payload[smc_key] = 31
-                    
-        return payload
-    def _build_physical_routing_map(self, stream: List[LIROp]) -> Dict[tuple, int]:
-        """
-        [V5.2 自适应路由] 建立物理端子 ID 映射表。
-        不再依赖硬编码字典，而是根据 Registry 基址与 Unit 端口定义动态推算。
-        """
-        node_to_src_id = {}
-        registry = self.hw_spec.config.get("iq_registry", {})
-        
-        for op in stream:
-            m_type = op.op_type.upper()
-            iq_id = op.metadata.get("iq_id")
-            
-            # 🛸 [NEW] 优先使用已分配的物理 iq_id 作为路由基址
-            if iq_id is not None:
-                base_id = iq_id
-            else:
-                base_id = registry.get(m_type)
-                if base_id is None:
-                    # 🛸 处理 UR_READ 等特殊注册名
-                    if m_type == "UR_READ": base_id = registry.get("UR_READ", 30)
-                    elif m_type == "UR_WRITE": base_id = registry.get("UR_WRITE", 35)
-                    else: continue
-            
-            # 获取该单元的输出端口列表
-            mod_spec = self.hw_spec.modules.get(m_type)
-            if not mod_spec: continue
-            
-            # 🛸 [FIX] Pydantic 对象访问模式
-            output_ports = getattr(mod_spec, "ports", {}).get("outputs", [])
-            if not output_ports:
-                # 兼容旧版或简化定义的 D 端口
-                node_to_src_id[(op.trace_id, "D")] = base_id
-            else:
-                for i, port in enumerate(output_ports):
-                    # 如果 port 也是对象，同样需要处理
-                    p_name = port.get("name", "D") if isinstance(port, dict) else getattr(port, "name", "D")
-                    node_to_src_id[(op.trace_id, p_name)] = base_id + i
-                    
-        return node_to_src_id
-
-    def _bind_operand_ports(self, op: LIROp, nodes_by_id: Dict[str, LIROp], node_to_src_id: Dict[tuple, int]):
-        """执行物理端口绑定，处理 RTOVR 递归穿透。"""
-        m_type = op.op_type.upper()
-        deps = op.metadata.get("depends_on", [])
-        
-        for i, dep_id in enumerate(deps):
-            # 1. 递归查找真实的生产者 (穿透 RTOVR)
-            real_producer_id = dep_id
-            requested_port = op.metadata.get("dep_port", "D") if m_type == "RTOVR" else "D"
-            
-            # 👽 如果依赖的是一个 RTOVR 节点，说明我们需要“穿透”它去拿它背后的源
-            if dep_id in nodes_by_id:
-                dep_obj = nodes_by_id[dep_id]
-                if dep_obj.op_type == "RTOVR":
-                    # 获取 RTOVR 想要拉取的端口 (D 或 ST)
-                    requested_port = dep_obj.metadata.get("dep_port", "D")
-                    # 获取 RTOVR 背后的真实源 ID
-                    if dep_obj.metadata.get("depends_on"):
-                        real_producer_id = dep_obj.metadata["depends_on"][0]
-            
-            # 2. LOGIC 的第三个操作数固定拉取状态位 (ST)
-            if m_type == "LOGIC" and i == 2: 
-                requested_port = "ST"
-
-            # 3. 查找物理端口 ID 并注入元数据
-            if (real_producer_id, requested_port) in node_to_src_id:
-                sid = node_to_src_id[(real_producer_id, requested_port)]
+                    # 无操作的周期，插入 VLD:0 的 NOP 占位符
+                    header = SMIHeader(vld=0, inc=0, dly=0)
+                    payload = {}
+                    trace_id = f"nop_{iq_name}_{k}"
                 
-                # --- 核心对齐逻辑 ---
-                if m_type == "RTOVR":
-                    # RTOVR 的微指令字段名通常为 SEL (见 modules.yaml)
-                    op.metadata["SEL"] = sid
-                else:
-                    # 通用计算单元字段映射
-                    port_suffix = f"s{i}_src" if i < 2 else "st_src"
-                    op.metadata[port_suffix] = sid
-                    # 兼容性冗余
-                    op.metadata["p_src_id"] = sid
+                # 🛸 关键对齐：EMBED_END:1 必须且只能在第 II-1 条指令上 (即周期的末尾)
+                if k == II - 1:
+                    header.embed_end = 1
+                
+                p_instr = PhysicalInstruction(
+                    iq_name=iq_name, abs_t=k + 2, 
+                    header=header, payload=payload,
+                    stage="BODY", local_id=k, op_type=op_type, trace_id=trace_id
+                )
+                physical_instructions.append(p_instr)
+        return physical_instructions
+
+    def _resolve_physical_payload(self, op: Any, trace_to_slot: Dict[str, int]) -> Dict[str, Any]:
+        res = copy.deepcopy(op.metadata.get("physical_attrs", {}))
+        m_type = str(op.op_type).upper().strip()
+        
+        # 🛸 [TRUTH-ALIGN] 精度语义：0=FP16, 1=FP32
+        # 遵循硬件默认值：如果没有指定，默认为 FP32 (1)
+        data_format = op.metadata.get("data_format", "FP32")
+        if data_format == "FP16":
+            res["SRC_PREC"] = 0
+            res["DST_PREC"] = 0
+        else: # FP32 or Default
+            res["SRC_PREC"] = 1
+            res["DST_PREC"] = 1
+
+        if m_type == "FPADD":
+            if op.metadata.get("logic_op") == "SUB" or op.trace_id.startswith("sub"):
+                res["SUB"] = 1
+            else:
+                res["SUB"] = 0
+            res["UPDATE_ST"] = op.metadata.get("UPDATE_ST", 1)
+
+        if m_type in ["UR_READ", "UR_WRITE"]:
+            logical_addr = op.metadata.get("logical_addr")
+            if logical_addr is not None:
+                res["ADDR"] = logical_addr % 256
+                res["BANK"] = (logical_addr // 256) % 8
+        
+        if "RTOVR" in m_type:
+            inputs = op.metadata.get("depends_on", [])
+            if inputs:
+                src_tid = self._get_clean_id(inputs[0])
+                src_slot = trace_to_slot.get(src_tid, 0)
+                res["SEL"] = src_slot
+
+        res["VALID"] = 1
+        res["SMC_ID"] = 31 
+        
+        for key in ["ADDR", "BANK", "SEL", "SUB", "WBE", "SRC_PREC", "DST_PREC"]:
+            if key in op.metadata:
+                res[key] = op.metadata[key]
+
+        return res

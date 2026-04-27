@@ -69,8 +69,11 @@ class MockSpec:
 
 
 def make_op(op_type: str, trace_id: str,
-            bank_id=None, deps=None, iq_id=None) -> MIROp:
-    """MIROp 工厂，简化测试构造。"""
+            bank_id=None, deps=None, iq_id=None, **kwargs) -> MIROp:
+    """
+    MIROp 工厂 (V2.0)。
+    支持通过 **kwargs 注入任意 metadata 属性。
+    """
     meta = {}
     if deps:
         meta["depends_on"] = deps
@@ -78,5 +81,10 @@ def make_op(op_type: str, trace_id: str,
         meta["manual_bank"] = bank_id
     if iq_id is not None:
         meta["iq_id"] = iq_id
+    
+    # 🛸 [NEW] 注入所有自定义属性
+    for k, v in kwargs.items():
+        meta[k] = v
+        
     return MIROp(op_type=op_type, logic_cycle=0,
                  trace_id=trace_id, metadata=meta)

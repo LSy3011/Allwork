@@ -1,69 +1,68 @@
-import struct
-from typing import Dict
-from typing import Dict, Any
+from typing import List, Dict, Any
 
-DEFAULT_BITS_CODE = 16
+# 🛸 AIACC V6.5 绝对物理真理 (完全对齐 hw_config/specs/units/*.yaml)
+ISA_V5_FULL_SPEC = {
+    "FPADD": (10, {
+        "VALID": (0, 1), "SRC_PREC": (1, 1), "DST_PREC": (2, 1), 
+        "UPDATE_ST": (3, 1), "SUB": (4, 1), "SMC_ID": (5, 5)
+    }),
+    "FPMUL": (8, {
+        "VALID": (0, 1), "SRC_PREC": (1, 1), "DST_PREC": (2, 1), "SMC_ID": (3, 5)
+    }),
+    "UR_READ": (17, {
+        "VALID": (0, 1), "BANK": (1, 3), "ADDR": (4, 8), "SMC_ID": (12, 5)
+    }),
+    "UR_WRITE": (33, {
+        "VALID": (0, 1), "BANK": (1, 3), "ADDR": (4, 8), "WBE": (12, 16), "SMC_ID": (28, 5)
+    }),
+    "RTOVR": (7, {
+        "VALID": (0, 1), "SEL": (1, 6)
+    }),
+}
+
+ISA_V5_HEADER = {
+    "INC_EMBED": (0, 6), "INC": (6, 4), "DLY": (10, 3), "COND": (13, 7), 
+    "LOOPS": (20, 10), "EMBED_END": (30, 6), "EMBED_LOOPS": (36, 3), 
+    "JUMP": (39, 1), "VLD": (40, 1)
+}
 
 class BitPacker:
     """
-    AIACC V9.1 位封装器 (鲁棒规格驱动版)。
+    AIACC 绝对位打包引擎 (V6.5 - YAML-Aligned)。
+    实现从逻辑字段到物理比特位的 bit-perfect 映射。
     """
     @staticmethod
-    def pack_capsule(iq_name: str, iq_conf: Any, payload: int, loops: int = 0, dly: int = 0, 
-                     inc: int = 0, embed: int = 0, jump: int = 0, embed_end: int = 0, 
-                     hw_spec: Any = None, valid: int = 1, level: int = 0, 
-                     cond: int = 0, inc_embed: int = 0) -> int:
-        header = 0
+    def pack_capsule(unit_type: str, payload_dict: Dict[str, Any], is_body: bool = True, **header_kwargs) -> int:
+        u_type = unit_type.upper().replace("-", "_")
+        if "UR_READ" in u_type: u_type = "UR_READ"
+        if "UR_WRITE" in u_type: u_type = "UR_WRITE"
         
-        # 🛸 物理对齐：位宽决议中心
-        # 优先级：1. 明确传入的 iq_conf.BITS_CODE (最权威) > 2. 默认 16
-        bits_code = getattr(iq_conf, "BITS_CODE", DEFAULT_BITS_CODE)
-        
-        # 🛸 动态 Header 映射 (基于硬件规格书)
-        if hw_spec and hasattr(hw_spec, "system_core") and hw_spec.system_core:
-            iq_header = hw_spec.system_core.get("iq_header", [])
-            curr = 0
-            # 这里的输入变量需要映射到 Header 字段
-            # embed 映射为 INC_EMBED (Level 1 增量), level 映射为 EMBED_LOOPS (层级标签)
-            val_map = {
-                "INC_EMBED": inc_embed or embed, # 兼容性处理
-                "INC": inc, "DLY": dly, 
-                "COND": cond, "LOOPS": loops, "EMBED_END": embed_end, 
-                "EMBED_LOOPS": level, "JUMP": jump, "VLD": valid
-            }
-            for item in iq_header:
-                f_name = item.get("field")
-                f_width = item.get("width")
-                f_val = val_map.get(f_name, 0)
-                header |= ((f_val & ((1 << f_width) - 1)) << curr)
-                curr += f_width
-        else:
-            # 🛸 安全回退基准 (isa_v5 对齐)
-            header |= (embed & 0x3F)               # [0:5]
-            header |= ((inc & 0xF) << 6)           # [6:9]
-            header |= ((dly & 0x7) << 10)          # [10:12]
-            # COND Placeholder [13:19]
-            header |= ((loops & 0x3FF) << 20)      # [20:29]
-            header |= ((embed_end & 0x3F) << 30)   # [30:35]
-            # EMBED_LOOPS [36:38]
-            header |= ((level & 0x7) << 36)
-            header |= ((jump & 1) << 39)           # [39]
-            header |= (valid << 40)                 # [40] VLD
+        spec = ISA_V5_FULL_SPEC.get(u_type)
+        body_bits, b_fields = spec if spec else (16, {})
 
-        # 🛰️ 物理封装：统一 ISA 空间合并 (Unified ISA Space Merging)
-        # 修正 V5.0 严重 Bug：不再级联 (Concat)，而是根据 Offset 覆盖/合并。
-        # Header 已经在 bits [0:40] 中根据规格对齐，Payload (CODE) 默认在 LSB [0:bits_code-1]。
-        
-        # 1. 提取 Payload 掩码，防止溢出干扰 Header 高位字段 (如 VLD/JUMP)
-        mask = (1 << bits_code) - 1
-        safe_payload = payload & mask
-        
-        # 2. 合并逻辑：由于 V5 ISA 的 Payload 区域与 INC/DLY/LOOPS 等字段存在物理复用 (Reuse)，
-        # 我们采用 OR 逻辑。在编译器上层，如果启用了 CODE，通常会保证 INC/DLY 字段为 0 以免干扰。
-        # 最终指令宽度保持在 41-bit (或由硬件参数定义的 BITS_HEADER 宽度)。
-        return (header | safe_payload)
+        # 1. 打包 Header (41 bits)
+        h_val = 0
+        for f_name, (start, width) in ISA_V5_HEADER.items():
+            # SMIHeader.to_dict() 返回的是大写键名
+            val = header_kwargs.get(f_name, 0)
+            h_val |= (int(val) & ((1 << width) - 1)) << start
+
+        # 2. 打包 Body
+        b_val = 0
+        if is_body:
+            norm_body = {k.upper(): v for k, v in payload_dict.items()}
+            for f_name, (start, width) in b_fields.items():
+                f_val = norm_body.get(f_name.upper(), 0)
+                b_val |= (int(f_val) & ((1 << width) - 1)) << start
+
+        # 3. 组合封装 (Header 在高位)
+        return (h_val << body_bits) | b_val
 
     @staticmethod
-    def pack_to_bytes(val: int, total_bits: int) -> bytes:
-        byte_len = (total_bits + 7) // 8
-        return val.to_bytes(byte_len, byteorder='little')
+    def get_unit_bits(unit_type: str) -> int:
+        u_type = unit_type.upper().replace("-", "_")
+        if "UR_R" in u_type: u_type = "UR_READ"
+        if "UR_W" in u_type: u_type = "UR_WRITE"
+        spec = ISA_V5_FULL_SPEC.get(u_type)
+        body_bits = spec[0] if spec else 16
+        return 41 + body_bits

@@ -31,11 +31,13 @@ class UCodeSynthesizer(SMTSynthesizer):
             if res:
                 print("SAT")
                 schedule, unit_assignments = res
-                return {
+                ret = {
                     "schedule": schedule,
                     "II": ii,
                     "unit_assignments": unit_assignments
                 }
+                print(f"  [SMT-DEBUG] Returning result with {len(unit_assignments)} assignments")
+                return ret
             print("UNSAT")
         return None
 
