@@ -54,7 +54,9 @@ class FPMulUnit(Component):
         instr = self.decoder.decode(ctrl_code)
         valid_trigger = (instr.VALID == "VALID")
         
-        # 1. 同步锁存
+        # 🛸 [DEBUG]
+        if ctrl_code != 0 and cycle < 100:
+            print(f">>> [FPMUL-DECODE-AUDIT] Cyc:{cycle} Decoded:{instr.to_dict()}")
         if inputs.get('s0_valid', False): 
             self.regs_s0 = inputs['s0']
             # self.logger.debug(f"[MUL-IN] S0 Latch: {self.regs_s0}")
@@ -95,8 +97,8 @@ class FPMulUnit(Component):
                 def from_bits(b): return struct.unpack('>f', struct.pack('>I', b & 0xFFFFFFFF))[0]
                 stages_str = " | ".join([f"S{i}:" + (f"{from_bits(s['result']):.4f}" if s['valid'] else "IDLE") for i, s in enumerate(self.pipeline)])
                 self.logger.info(f"[Unit:{self.name}] Cycle {cycle} Pipeline: {stages_str}")
-                if valid_trigger:
-                    self.logger.info(f"[Unit:{self.name}] Cycle {cycle} Compute Start: s0[0]={from_bits(self.regs_s0):.4f} s1[0]={from_bits(self.regs_s1):.4f}")
+            if valid_trigger:
+                print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:{self.name} Tag:COMPUTE S0:{self.regs_s0:032x} S1:{self.regs_s1:032x}")
         
         self._next_pipeline = [{
             'result': res_val, 'valid': valid_trigger

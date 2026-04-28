@@ -49,7 +49,7 @@ class URBank(Component):
                 # 统一 128-bit (32 hex chars) 格式
                 f.write(f"0x{val:032x}\n")
 
-    def evaluate(self, inputs: Dict[str, Any]):
+    def evaluate(self, inputs: Dict[str, Any], cycle: int = -1):
         """
         inputs: {'R0': {...}, 'W0': {...}}
         """
@@ -63,7 +63,9 @@ class URBank(Component):
             if req and req.get('en'):
                 b, a = req['bank'], req['addr']
                 if 0 <= b < self.num_banks and 0 <= a < self.bank_size:
-                    self._next_read_ports_out[i] = self.storage[b][a]
+                    val = self.storage[b][a]
+                    self._next_read_ports_out[i] = val
+                    print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:UR-READ Tag:READ Port:{i} Bank:{b} Addr:{a} V0:{val:032x}")
 
 
         # 写逻辑
@@ -74,9 +76,7 @@ class URBank(Component):
                 b, a, d = req['bank'], req['addr'], req.get('data', 0)
                 if 0 <= b < self.num_banks and 0 <= a < self.bank_size:
                     self._pending_writes[(b, a)] = d
-                    # 获取当前 cycle 的办法是? _pending_writes 是在 evaluate，周期数由 kernel pass
-                    # 这里无法直接获取 cycle，但 kernel 的 evaluate 调用传了 inputs。
-                    print(f">>> [UR-WRITE] W{i} Bank:{b} Addr:{a} Data:{d:032x}")
+                    print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:UR-WRITE Tag:WRITE Port:{i} Bank:{b} Addr:{a} V0:{d:032x}")
 
     def tick(self, cycle: int = -1):
         self.read_ports_out = self._next_read_ports_out

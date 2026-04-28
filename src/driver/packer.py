@@ -34,19 +34,20 @@ class BitPacker:
     @staticmethod
     def pack_capsule(unit_type: str, payload_dict: Dict[str, Any], is_body: bool = True, **header_kwargs) -> int:
         u_type = unit_type.upper().replace("-", "_")
-        if "UR_READ" in u_type: u_type = "UR_READ"
-        if "UR_WRITE" in u_type: u_type = "UR_WRITE"
+        if "UR_READ" in u_type or "UR_R" in u_type: u_type = "UR_READ"
+        if "UR_WRITE" in u_type or "UR_W" in u_type: u_type = "UR_WRITE"
         
         spec = ISA_V5_FULL_SPEC.get(u_type)
         body_bits, b_fields = spec if spec else (16, {})
 
         # 1. 打包 Header (41 bits)
         h_val = 0
+        norm_header = {k.upper(): v for k, v in header_kwargs.items()}
+        
         for f_name, (start, width) in ISA_V5_HEADER.items():
-            # SMIHeader.to_dict() 返回的是大写键名
-            val = header_kwargs.get(f_name, 0)
+            val = norm_header.get(f_name, 0)
             h_val |= (int(val) & ((1 << width) - 1)) << start
-
+        
         # 2. 打包 Body
         b_val = 0
         if is_body:

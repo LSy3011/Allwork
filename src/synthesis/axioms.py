@@ -90,6 +90,56 @@ class SynthesisAxioms:
                         )
 
     # ------------------------------------------------------------------
+    # 物理连接绑定公理 (RTOVR -> Unit Fixed Connectivity)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def add_physical_binding_axiom(
+        solver,
+        ops: List[MIROp],
+        iq_vars: Dict[str, z3.ArithRef],
+        spec: HardwareSpec,
+    ):
+        """
+        物理绑定公理：强制 RTOVR 指令分配到与消费者端口硬连线的物理插槽。
+        基于 rtovr_config.yaml 中的 producers_dvr 映射。
+        """
+        # 1. 获取 DVR 映射 (Port Name -> Slot ID)
+        dvr_map = spec.get_dvr_map() # {'FPADD': {'S0': 5, 'S1': 6}, ...}
+        
+        # 2. 遍历所有具有 RTOVR 依赖的算子
+        for op in ops:
+            u_type = str(op.op_type).upper()
+            deps = op.metadata.get("depends_on", [])
+            if not deps: continue
+            
+            # 确定该算子的输入端口序列 (S0, S1, S2, D...)
+            # 这是一个基于硬件约定的简化映射
+            port_names = ["S0", "S1", "S2", "S3", "D", "ST"]
+            if u_type == "UR_WRITE": port_names = ["D"]
+            
+            for i, dep_id in enumerate(deps):
+                # 寻找对应的生产者算子
+                producer = next((o for o in ops if o.trace_id == dep_id), None)
+                if producer and producer.op_type == "RTOVR":
+                    # 确定目标端口名称
+                    p_name = port_names[i] if i < len(port_names) else "S0"
+                    
+                    # 查找 Slot ID
+                    target_slot = None
+                    if u_type in dvr_map and p_name in dvr_map[u_type]:
+                        target_slot = dvr_map[u_type][p_name]
+                    
+                    if target_slot is not None:
+                        # 🛸 [V5.1 FIX] 物理绑定地址必须叠加 RTOVR 基地址
+                        registry = spec.config.get("iq_registry", {})
+                        base_rt = registry.get("RTOVR", 100)
+                        
+                        label = f"bind_{producer.trace_id}_{u_type}_{p_name}"
+                        SynthesisAxioms._add_constraint(
+                            solver, iq_vars[producer.trace_id] == base_rt + target_slot, label
+                        )
+
+    # ------------------------------------------------------------------
     # 读端口时分复用
     # ------------------------------------------------------------------
     @staticmethod
@@ -414,12 +464,76 @@ class SynthesisAxioms:
             ]:
                 for rd in rtovr_deps:
                     label = f"shadow_{rd}_{op.trace_id}"
-                    # 1 <= delta <= II-1
+                    # 🛸 [V5.2 STRICT] 物理真相：RTOVR 脉冲仅持续 1 拍，采样必须在下一拍执行
                     SynthesisAxioms._add_constraint(
-                        solver, t_vars[op.trace_id] >= t_vars[rd] + 1, f"{label}_lower"
+                        solver, t_vars[op.trace_id] == t_vars[rd] + 1, label
                     )
+
+    # ------------------------------------------------------------------
+    # IQ 启动对齐公理 (防止早期迭代污染)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def add_iq_alignment_axiom(
+        solver,
+        ops: List[MIROp],
+        t_vars: Dict[str, z3.ArithRef],
+        iq_vars: Dict[str, z3.ArithRef],
+        II: int,
+    ):
+        """
+        IQ 启动对齐公理：共享同一 IQ 的操作必须落在相同的迭代基准（Iteration Phase）。
+        """
+        for i in range(len(ops)):
+            for j in range(i + 1, len(ops)):
+                op_i, op_j = ops[i], ops[j]
+                if op_i.trace_id in iq_vars and op_j.trace_id in iq_vars:
+                    same_iq = iq_vars[op_i.trace_id] == iq_vars[op_j.trace_id]
+                    # 🛸 [V5.1 FIX] 使用显式整数除法，并包含所有操作类型
+                    phase_i = t_vars[op_i.trace_id] / II
+                    phase_j = t_vars[op_j.trace_id] / II
+                    label = f"iq_align_{op_i.trace_id}_{op_j.trace_id}"
                     SynthesisAxioms._add_constraint(
-                        solver, t_vars[op.trace_id] <= t_vars[rd] + max(1, II - 1), f"{label}_upper"
+                        solver,
+                        z3.Implies(same_iq, phase_i == phase_j),
+                        label
+                    )
+
+    # ------------------------------------------------------------------
+    # 局部相位隔离公理 (仅针对访存副作用单元)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def add_side_effect_phase_axiom(
+        solver,
+        ops: List[MIROp],
+        t_vars: Dict[str, z3.ArithRef],
+        iq_vars: Dict[str, z3.ArithRef],
+        II: int,
+    ):
+        """
+        局部相位隔离：对于有副作用的 IQ（如写内存、带 Stride 的读内存），
+        禁止不同层级的算子复用同一个物理 IQ，防止“幻影发射”破坏内存或指针。
+        """
+        for i in range(len(ops)):
+            for j in range(i + 1, len(ops)):
+                op_i, op_j = ops[i], ops[j]
+                # 只有访存类单元需要强制相位隔离
+                if op_i.op_type.upper() not in ["UR_READ", "UR_WRITE"]:
+                    continue
+                    
+                # 如果是 Stride=0 的常量读取，幻影发射无害，豁免隔离
+                if op_i.op_type.upper() == "UR_READ" and op_i.metadata.get("stride") == 0:
+                    if op_j.op_type.upper() == "UR_READ" and op_j.metadata.get("stride") == 0:
+                        continue
+
+                if op_i.trace_id in iq_vars and op_j.trace_id in iq_vars:
+                    same_iq = iq_vars[op_i.trace_id] == iq_vars[op_j.trace_id]
+                    phase_i = t_vars[op_i.trace_id] / II
+                    phase_j = t_vars[op_j.trace_id] / II
+                    label = f"phase_iso_{op_i.trace_id}_{op_j.trace_id}"
+                    SynthesisAxioms._add_constraint(
+                        solver,
+                        z3.Implies(same_iq, phase_i == phase_j),
+                        label
                     )
 
     # ------------------------------------------------------------------

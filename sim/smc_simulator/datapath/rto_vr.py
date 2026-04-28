@@ -27,10 +27,8 @@ class RtoVRUnit(Component):
     def evaluate(self, inputs: Dict[str, Any]):
         sources = inputs.get('sources', {})
         iq_updates = inputs.get('iq_updates', [])
+        cycle = inputs.get('cycle', -1)
         
-        # Transmission Latency = 1: 
-        # Data is prepared this cycle, ready next cycle.
-        # We also clear current buffers to maintain non-latching pulse.
         self._next_outputs = [0] * self.num_outputs
         self._next_valid = set()
 
@@ -40,7 +38,7 @@ class RtoVRUnit(Component):
                  src_id = (inst >> 1) & 0x3F
                  if 0 <= port_id < self.num_outputs:
                       val = sources.get(src_id, 0)
-                      print(f"[RTOVR] Port:{port_id} Src:{src_id} Data:{val:08x}")
+                      print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:RTOVR Tag:ROUTE Port:{port_id} Src:{src_id} V0:{val:032x}")
                       self._next_outputs[port_id] = val
                       self._next_valid.add(port_id)
 
@@ -52,11 +50,12 @@ class RtoVRUnit(Component):
         self._next_valid = set()
 
     def get_output(self, port_id: int) -> int:
-        return self.outputs[port_id] if 0 <= port_id < self.num_outputs else 0
+        if 0 <= port_id < self.num_outputs:
+            return self.outputs[port_id]
+        return 0
 
     def is_valid(self, port_id: int) -> bool:
-        v = port_id in self.valid_outputs
-        return v
+        return port_id in self.valid_outputs
 
     def get_regs(self) -> Dict[str, int]:
         """Debug helper: returns values of all non-zero active output clusters."""

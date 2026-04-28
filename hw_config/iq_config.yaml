@@ -27,6 +27,7 @@ iq_config:
     module: UR_READ
     count: 4
     EN_LOOPS: true
+    EN_INC: true
     BITS_LOOPS: 10
     BITS_CODE: 17
 
@@ -34,6 +35,7 @@ iq_config:
     module: UR_WRITE
     count: 4
     EN_LOOPS: true
+    EN_INC: true
     BITS_LOOPS: 10
     BITS_CODE: 33
 

@@ -9,13 +9,15 @@ class IQUnit(Component):
     重构后的 Instruction Queue (IQ) 单元。
     支持物理 Header 解析、地址合成 (Address Synthesis) 和多层嵌套循环 (Nested Loops)。
     """
-    def __init__(self, name: str, decoder=None):
+    def __init__(self, name: str, decoder=None, en_inc: bool = False):
         super().__init__(name)
         self.unit = name
         self.logger = logging.getLogger(name)
         self.decoder = decoder
+        self.en_inc = en_inc
         p_width = self.decoder.payload_width if self.decoder else 0
-        self.logger.info(f"[IQ-INIT] Unit: {name}, Payload Width: {p_width}")
+        self.payload_width = p_width
+        print(f"  [IQ-INIT-AUDIT] Unit: {name:<10} | Payload Width: {p_width}")
         self.memory = []
         self.pc = 0
         self._next_pc = 0
@@ -75,61 +77,61 @@ class IQUnit(Component):
             p_width = self.decoder.payload_width
             
             hvld = (raw_base >> off_vld) & 0x1
+            self.exec_active = False 
             loops_val = (raw_base >> off_loops) & 0x3FF
             dly = (raw_base >> off_dly) & 0x7 
             
             is_in_dly = (dly > 0 and not self._dly_finished_marker) or self.delay_active
             
-            print(f"  [IQ-DEBUG] Unit:{self.unit:<10} PC:{self.pc:<2} | hvld:{hvld} loops:{loops_val} dly:{dly} in_dly:{is_in_dly}")
+            # print(f"  [IQ-DEBUG] Unit:{self.unit:<10} PC:{self.pc:<2} | hvld:{hvld} loops:{loops_val} dly:{dly} in_dly:{is_in_dly}")
 
-            if hvld == 1 and not is_in_dly:
-                hjump = (raw_base >> off_jump) & 0x1
-                hembed = (raw_base >> off_hembed) & 0x7
-                
-                # 🛸 [COMPAT] 兼容性补丁：如果 EMBED_LOOPS 为 0 但 INC_EMBED 非 0，视为 Level 1 循环
-                if hembed == 0:
-                    off_inc_em = self.decoder._layout.get('INC_EMBED', {}).get('offset')
-                    if off_inc_em is not None:
-                        inc_em_val = (raw_base >> off_inc_em) & 0x3F
-                        if inc_em_val > 0:
-                            hembed = 1
-                
-                raw_inc = (raw_base >> off_inc) & 0xF
-                current_inc = raw_inc if raw_inc < 8 else raw_inc - 16
-                
-                if hembed > 0:
-                    print(f"    [IQ-LOOP-INIT] Unit:{self.unit} Level:{hembed} Max:{loops_val}")
-                    self.loop_states[hembed]["max"] = loops_val
-                    # 🛸 关键修复：外层循环 (Level 1) 必须从专用位域 INC_EMBED 提取步长
-                    if hembed == 1:
-                        off_inc_em = self.decoder._layout['INC_EMBED']['offset']
-                        raw_inc_em = (raw_base >> off_inc_em) & 0x3F
-                        l1_inc = raw_inc_em if raw_inc_em < 32 else raw_inc_em - 64
-                        self.loop_states[hembed]["inc"] = l1_inc
-                    else:
-                        self.loop_states[hembed]["inc"] = current_inc
-                    self.loop_states[hembed]["cnt"] = 0
-                    self.loop_start_pcs[hembed] = self.pc + 1
-                    self._next_pc = self.pc + 1
+            hjump = (raw_base >> off_jump) & 0x1
+            hembed = (raw_base >> off_hembed) & 0x7
+            raw_inc = (raw_base >> off_inc) & 0xF
+            current_inc = raw_inc if raw_inc < 8 else raw_inc - 16
+            
+            if self.unit == "ur-r1":
+                print(f"  [IQ-INC-AUDIT] ur-r1 PC:{self.pc} Raw:{hex(raw_base)} INC:{current_inc}")
 
-                    self._instruction_valid = False
-                    return
-
+            # 🚀 物理契约 V27.0: 无论 VLD 是否为 1，只要是执行帧 (EMBED=0) 就必须运行地址合成
+            is_control_frame = (hjump == 1) or (hembed > 0)
+            
+            if not is_control_frame:
                 decoded = self.decoder.decode(raw_base)
-                self._current_instruction = self._apply_nested_inc(raw_base, decoded, p_width, current_inc, cycle=cycle)
                 
-                is_control_frame = (hjump == 1)
-                self._instruction_valid = not is_control_frame
-                self.exec_active = not hjump
+                self._current_instruction = self._apply_nested_inc(
+                    raw_base, decoded, p_width, current_inc, en_inc=self.en_inc, cycle=cycle
+                )
+                
+                self._instruction_valid = True # 即使是 NOP 也要发给后端（后端会看 VLD）
+                self.exec_active = (hvld == 1)
                 self.loop_states[0]["inc"] = current_inc
                 self.loop_states[0]["max"] = loops_val
-            else:
+            elif hembed > 0:
+                print(f"    [IQ-LOOP-INIT] Unit:{self.unit} Level:{hembed} Max:{loops_val}")
+                self.loop_states[hembed]["max"] = loops_val
+                # 🛸 关键修复：外层循环 (Level 1) 必须从专用位域 INC_EMBED 提取步长
+                if hembed == 1:
+                    off_inc_em = self.decoder._layout['INC_EMBED']['offset']
+                    raw_inc_em = (raw_base >> off_inc_em) & 0x3F
+                    l1_inc = raw_inc_em if raw_inc_em < 32 else raw_inc_em - 64
+                    self.loop_states[hembed]["inc"] = l1_inc
+                else:
+                    self.loop_states[hembed]["inc"] = current_inc
+                self.loop_states[hembed]["cnt"] = 0
+                print(f"    [IQ-DEBUG-HDR] {self.unit} Stored Level:{hembed} Inc:{self.loop_states[hembed]['inc']}")
+                self.loop_start_pcs[hembed] = self.pc + 1
+                self._next_pc = self.pc + 1
                 self._instruction_valid = False
                 self.exec_active = False
-                hjump = 0; hembed = 0; current_inc = 0
-                # 🚀 物理增强：支持 NOP 指令的 LOOPS 扩展，维持气泡占位
+                return
+            else:
+                # JUMP 等控制指令
+                self._instruction_valid = False
+                self.exec_active = False
                 self.loop_states[0]["max"] = loops_val
-                self.loop_states[0]["inc"] = 0 # NOP 无增量
+                self.loop_states[0]["inc"] = 0
+
         else:
             hvld = 0; dly = 0; loops_val = 0; hjump = 0; hembed = 0
             self._instruction_valid = False
@@ -189,41 +191,53 @@ class IQUnit(Component):
             self.loop_states[0]["cnt"] += 1
             self._next_pc = self.pc
 
-    def _apply_nested_inc(self, raw, decoded, p_width, inst_inc, cycle=0):
+    def _apply_nested_inc(self, raw, decoded, p_width, inst_inc, en_inc=True, cycle=0):
+        """
+        🛸 物理契约 V27.0 核心地址合成逻辑。
+        PhysicalValue = BASE + (INC_0 * CNT_0) + Σ_{i=1}^{6} (INC_i * CNT_i * MASK_i)
+        """
         if not self.decoder or not hasattr(self.decoder, "_layout"):
             return raw
-        pulse_step = self.loop_states[0]["cnt"]
-        l1_step = self.loop_states[1]["cnt"]
-        off_inc_embed = self.decoder._layout.get('INC_EMBED', {}).get('offset', p_width + 0)
-        raw_inc_embed = (raw >> off_inc_embed) & 0x3F
-        if self.unit == "ur-w0":
-            print(f"[IQ-DEBUG] {self.unit} Raw: {hex(raw)}, Offset: {off_inc_embed}, RawIncEm: {raw_inc_embed}")
 
-        l1_inc = raw_inc_embed if raw_inc_embed < 32 else raw_inc_embed - 64
-        if inst_inc == 0 and l1_inc == 0:
+        # 1. 提取 INC_EMBED 掩码 (Bit 0-5 of Header)
+        off_inc_embed = self.decoder._layout.get('INC_EMBED', {}).get('offset', p_width + 0)
+        mask_val = (raw >> off_inc_embed) & 0x3F
+        
+        # 2. 计算总增量
+        # INC_0 * CNT_0 (最内层脉冲)
+        pulse_step = self.loop_states[0]["cnt"]
+        total_phys_inc = pulse_step * inst_inc
+        
+        # Σ (INC_i * CNT_i * MASK_i) (外层嵌套)
+        if en_inc:
+            for i in range(1, 7):
+                mask_i = (mask_val >> (i - 1)) & 0x1
+                if mask_i:
+                    inc_i = self.loop_states[i]["inc"]
+                    cnt_i = self.loop_states[i]["cnt"]
+                    total_phys_inc += (inc_i * cnt_i)
+
+        # 🚀 物理契约对齐：即使总增量为 0，只要 INC_EMBED 掩码开启 (mask_val > 0)，
+        # 就必须执行重构逻辑，以保持该指令在每一圈迭代中的“动态活跃”状态，防止跳拍。
+        if total_phys_inc == 0 and mask_val == 0:
             return raw
+
         new_payload = raw & ((1 << p_width) - 1)
         for name, info in self.decoder._layout.items():
             if "ADDR" in name.upper():
                 offset = info["offset"]
-                # 🛸 [FIX] 使用 .bits 而非 .width
-                width = info["spec"].bits if info["spec"] else 8
+                width = info["spec"].bits if (info["spec"] and hasattr(info["spec"], 'bits')) else 8
                 field_mask = (1 << width) - 1
-                
-                # 🚀 物理升维：支持全维度嵌套增量 (L0 + L1 + L2 + ...)
-                total_phys_inc = pulse_step * inst_inc
-                for i in range(1, 8):
-                    total_phys_inc += self.loop_states[i]["cnt"] * self.loop_states[i]["inc"]
                 
                 orig_val = (new_payload >> offset) & field_mask
                 new_field_val = (orig_val + total_phys_inc) & field_mask
                 
-                # 物理探针：监控所有核心数据搬运单元的地址切换
-
-                if self.unit.startswith("ur-") and "ADDR" in name.upper():
-                    print(f"[IQ-DIAG] {self.unit} Cyc:{cycle} L0Cnt:{pulse_step} L1Cnt:{l1_step} "
-                          f"Base:{orig_val} Inc:{inst_inc} L1Inc:{l1_inc} -> Final:{new_field_val}")
+                if self.unit.startswith("ur-") and cycle % 100 == 0: # 减少日志打印
+                    print(f"[IQ-DIAG] {self.unit} Cyc:{cycle} TotalInc:{total_phys_inc} "
+                          f"Base:{orig_val} -> Final:{new_field_val}")
+                
                 new_payload = (new_payload & ~(field_mask << offset)) | (new_field_val << offset)
+        
         header_mask = ~((1 << p_width) - 1)
         return (raw & header_mask) | new_payload
 
@@ -240,4 +254,5 @@ class IQUnit(Component):
     def get_current_instruction(self) -> int: 
         return self._current_instruction if self._instruction_valid else 0
     def is_valid(self) -> bool: 
-        return self._instruction_valid
+        # 🛸 V27.0 修正：is_valid 必须对齐物理 VLD 信号，否则 TraceRecorder 会画出错误的符号
+        return self.exec_active

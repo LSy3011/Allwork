@@ -182,12 +182,13 @@ class HardwareSpec(BaseModel):
         for slot_id, label in raw_dvr.items():
             parts = label.split('_')
             if len(parts) < 2: continue
-            # 🛸 [NEW] 鲁棒解析：支持 UR_WRITE_0_D 这种命名
+            
             port = parts[-1]
+            # 🛸 [FIX] 保留实例索引，例如 UR_WRITE_0
             if len(parts) >= 3 and parts[-2].isdigit():
-                unit = "_".join(parts[:-2])
+                unit = "_".join(parts[:-1]) # "UR_WRITE_0"
             else:
-                unit = "_".join(parts[:-1])
+                unit = "_".join(parts[:-1]) # "FPADD"
                 
             if unit not in dvr_map: dvr_map[unit] = {}
             dvr_map[unit][port] = slot_id

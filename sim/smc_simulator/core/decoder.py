@@ -115,7 +115,7 @@ class InstructionDecoder:
         全量解码：将 128-bit 原始比特解析为语义对象
         """
         fields = {}
-        print(f"[DECODER-DEBUG] Decoding raw bits: {hex(raw_bits)}")
+        # print(f"[DECODER-DEBUG] Decoding raw bits: {hex(raw_bits)}")
         for name, info in self._layout.items():
             val = (raw_bits >> info["offset"]) & info["mask"]
             
@@ -132,8 +132,9 @@ class InstructionDecoder:
                 fields[name] = val
             
             # 🛸 关键调试：仅打印非零的核心控制字段或特定的 Unit 调试
-            if val != 0 or name in ["VLD", "DLY", "LOOPS", "EMBED_END"]:
-                print(f"  [FIELD] {name:<10} | Offset: {info['offset']:<2} | Val: {val}")
+            # if val != 0 or name in ["VLD", "DLY", "LOOPS", "EMBED_END"]:
+                # print(f"  [FIELD] {name:<10} | Offset: {info['offset']:<2} | Val: {val}")
+                # pass
                 
         return DecodedInstruction(fields)
 

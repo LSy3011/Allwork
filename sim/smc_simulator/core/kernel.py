@@ -37,6 +37,8 @@ from smc_simulator.units.fp32addtree8to1_unit import FP32AddTree8To1Unit
 from smc_simulator.units.fp16_mul_unit import FP16MulUnit
 from smc_simulator.units.int8_to_fp16_unit import Int8ToFp16Unit
 
+from api.hw_spec import HardwareSpec
+
 class ParallelKernel:
     """
     AIACC 并行内核 (Parallel Kernel)
@@ -51,6 +53,11 @@ class ParallelKernel:
         if not spec_loader: spec_loader = SpecLoader()
         self.spec_loader = spec_loader
         self.sys_spec = spec_loader.get_system_core()
+        
+        # 🛸 V27.0: 使用 HardwareSpec 加载完整的 IQ 物理属性 (SSoT)
+        self.hw_spec = HardwareSpec.load("hw_config")
+        self.iq_configs = self.hw_spec.iqs
+        
         # 获取来自 Skill 的 IQ 宽度注册表
         self.iq_registry = self.sys_spec.get('iq_registry', {})
         
@@ -138,15 +145,23 @@ class ParallelKernel:
 
         # 2. 初始化 IQs 并注入解码器
         for i in range(self.read_ports):
-            iqs[f'ur-r{i}'] = IQUnit(f'ur-r{i}', decoder=self.decoders['ur_read'])
+            iq_cfg = self.iq_configs.get("IQ_UR_READ")
+            en_inc = iq_cfg.EN_INC if iq_cfg else False
+            iqs[f'ur-r{i}'] = IQUnit(f'ur-r{i}', decoder=self.decoders['ur_read'], en_inc=en_inc)
         for i in range(self.write_ports):
-            iqs[f'ur-w{i}'] = IQUnit(f'ur-w{i}', decoder=self.decoders['ur_write'])
+            iq_cfg = self.iq_configs.get("IQ_UR_WRITE")
+            en_inc = iq_cfg.EN_INC if iq_cfg else False
+            iqs[f'ur-w{i}'] = IQUnit(f'ur-w{i}', decoder=self.decoders['ur_write'], en_inc=en_inc)
         
         for name in self.units.keys():
-            iqs[name] = IQUnit(name, decoder=self.decoders.get(name))
+            iq_cfg = self.iq_configs.get(f"IQ_{name.upper()}")
+            en_inc = iq_cfg.EN_INC if iq_cfg else False
+            iqs[name] = IQUnit(name, decoder=self.decoders.get(name), en_inc=en_inc)
             
         for i in range(64):
-            iqs[f'rtovr-{i}'] = IQUnit(f'rtovr-{i}', decoder=self.decoders['rtovr'])
+            iq_cfg = self.iq_configs.get("IQ_RTOVR")
+            en_inc = iq_cfg.EN_INC if iq_cfg else False
+            iqs[f'rtovr-{i}'] = IQUnit(f'rtovr-{i}', decoder=self.decoders['rtovr'], en_inc=en_inc)
             
         return iqs
 
@@ -217,6 +232,8 @@ class ParallelKernel:
                     bank_val = decoded.get('BANK') if 'BANK' in decoded else decoded.get('wbank', 0)
                     addr_val = decoded.get('ADDR') if 'ADDR' in decoded else decoded.get('waddr', 0)
                     ur_requests[f'W{i}'] = {'en': True, 'bank': int(bank_val), 'addr': int(addr_val), 'data': wdata}
+                    if wdata != 0:
+                        print(f">>> [KERNEL-WRITE] Cyc:{self.cycle_count} Port:W{i} Bank:{bank_val} Addr:{addr_val} Data:{wdata:08x}")
 
         # Filter iq_states for arbiter check_conflicts to only those actually executing commands
         executing_iqs = [n for n, s in iq_states.items() if s['is_valid'] and not s.get('is_fetching_dly', False)]
@@ -238,7 +255,8 @@ class ParallelKernel:
             
         self.rtovr.evaluate({
             'sources': sources,
-            'iq_updates': rtovr_iq_updates
+            'iq_updates': rtovr_iq_updates,
+            'cycle': self.cycle_count
         })
         
         # 3. 评估计算单元
@@ -263,7 +281,6 @@ class ParallelKernel:
                 # Fallback to singular get_output (might be indexed or simple)
                 elif hasattr(unit, 'get_output'):
                     try:
-                        # Some units take index (RtoVR), some don't
                         out_val = unit.get_output()
                     except TypeError:
                         out_val = 0
@@ -501,8 +518,6 @@ class ParallelKernel:
                 if vld in ["VALID", "VLD", 1, "1", True]: 
                     bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))
                     addr = int(get_field(decoded, 'ADDR', get_field(decoded, 'waddr')))
-                    data = self.ur_bank.storage[bank][addr]
-                    print(f"[UR-DEBUG] T={self.cycle_count} UNIT:ur-r{i} READ BANK:{bank} ADDR:{addr} HEX:{data:032x}")
                     ur_inputs[f'R{i}'] = {'en': True, 'bank': bank, 'addr': addr}
 
         
@@ -526,13 +541,14 @@ class ParallelKernel:
                         'addr': addr,
                         'data': data_val
                     }
+                    print(f"  [UR-WRITE-AUDIT] Cyc:{self.cycle_count} Port:W{i} Bank:{bank} Addr:{addr} Data:{data_val:08x}")
 
 
 
 
         
         if ur_inputs:
-            self.ur_bank.evaluate(ur_inputs)
+            self.ur_bank.evaluate(ur_inputs, cycle=self.cycle_count)
 
     def _tick_all(self):
         self.ur_bank.tick(self.cycle_count)
