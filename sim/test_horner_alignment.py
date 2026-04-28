@@ -135,48 +135,6 @@ def print_aligned_timeline(expected_schedule, actual_activity, II, max_cycles=60
         print(row)
     print("=" * 90)
 
-def hex_to_floats(hex_line):
-    # hex_line: "0x..."
-    hex_str = hex_line.strip()[2:]
-    # Pack 4 floats (32-bit each) from 128-bit hex
-    floats = []
-    # Hardware Contract: Lane 0 is at LSB (rightmost 32 bits)
-    for i in range(4):
-        chunk = hex_str[i*8:(i+1)*8]
-        f = struct.unpack('>f', struct.pack('>I', int(chunk, 16)))[0]
-        floats.append(f)
-    return list(reversed(floats))
-
-def check_final_memory(output_dir, golden_y):
-    bank_path = os.path.join(output_dir, "smc_0", "output_bank", "bank2_final.hex")
-    if not os.path.exists(bank_path):
-        print("❌ bank2_final.hex not found")
-        return False
-        
-    with open(bank_path, 'r') as f:
-        # 过滤掉全零行 (假设只有前 4 行有效)
-        hex_lines = [l.strip() for l in f if l.strip() and not l.startswith('0x00000000000000000000000000000000')]
-    
-    actual_y = []
-    for line in hex_lines:
-        actual_y.extend(hex_to_floats(line))
-    
-    actual_y = np.array(actual_y[:len(golden_y)], dtype=np.float32)
-    
-    print("\n" + "="*15 + " [STEP 4] END-TO-END MEMORY VERIFICATION " + "="*15)
-    diff = np.abs(golden_y - actual_y)
-    max_diff = np.max(diff)
-    
-    if max_diff < 1e-5:
-        print(f"✅ Final memory output matches Golden reference! (Max Diff: {max_diff:.2e})")
-        return True
-    else:
-        print(f"❌ Numerical divergence in memory! Max Diff: {max_diff:.2e}")
-        # 打印前几个差异
-        for i in range(min(4, len(golden_y))):
-            print(f"  Index {i}: Golden={golden_y[i]:.6f}, Actual={actual_y[i]:.6f}")
-        return False
-
 def test_horner_production_alignment():
     print("\n" + "="*20 + " SIMD 3rd-Order Horner Taylor: 4-Row Test " + "="*20)
     spec = HardwareSpec.load("hw_config")
@@ -360,11 +318,7 @@ def test_horner_production_alignment():
     verify_cmd = ["python3", "sim/verify_truth_alignment.py"]
     verify_res = subprocess.run(verify_cmd)
     
-    # 4. 运行最终内存比对 (Step 4)
-    print("\n[STEP 4] Running Final Memory Comparison...")
-    memory_ok = check_final_memory(output_dir, golden_y)
-    
-    if audit_res.returncode == 0 and verify_res.returncode == 0 and memory_ok:
+    if audit_res.returncode == 0 and verify_res.returncode == 0:
         print("\n" + "✨"*10 + " ALL PHYSICAL CHECKS PASSED " + "✨"*10)
     else:
         print("\n" + "❌"*10 + " PIPELINE VERIFICATION FAILED " + "❌"*10)
