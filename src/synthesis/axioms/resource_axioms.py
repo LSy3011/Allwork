@@ -18,6 +18,8 @@ class ResourceAxioms(AxiomBase):
         # 兼容旧版的其他资源约束
         ResourceAxioms.add_bank_conflict_axiom(solver, ops, t_vars, II, spec, **kwargs)
         ResourceAxioms.add_spill_reload_mutex_axiom(solver, ops, t_vars, II, spec, **kwargs)
+        # 对称性破缺优化
+        ResourceAxioms.add_symmetry_breaking_axiom(solver, ops, t_vars, II, spec, **kwargs)
 
     @staticmethod
     def add_modulo_constraint(solver, ops, t_vars, II, spec, **kwargs):
@@ -28,22 +30,38 @@ class ResourceAxioms(AxiomBase):
         if u_vars is None:
             return
 
-        for i in range(len(ops)):
-            for j in range(i + 1, len(ops)):
-                op_i, op_j = ops[i], ops[j]
-                # 检查是否可能映射到同一资源类型
-                type_i = ResourceAxioms._get_resource_type(op_i.op_type)
-                type_j = ResourceAxioms._get_resource_type(op_j.op_type)
-                
-                if type_i == type_j:
-                    label = f"mod_conflict_{op_i.trace_id}_{op_j.trace_id}"
-                    # 如果 unit_id 相同，则 mod 必须不同
+        # 按资源类型分组操作
+        type_to_ops: Dict[str, List[MIROp]] = {}
+        for op in ops:
+            u_type = ResourceAxioms._get_resource_type(op.op_type)
+            type_to_ops.setdefault(u_type, []).append(op)
+
+        for u_type, op_list in type_to_ops.items():
+            if len(op_list) <= 1:
+                continue
+            
+            # 获取该类型的所有物理实例 ID
+            valid_iqs = spec.get_iq_ids(u_type)
+            if not valid_iqs:
+                continue
+
+            for iq_id in valid_iqs:
+                # 对于每一个物理单元 iq_id，每一个模槽 slot，最多只能有一个操作映射上去
+                for slot in range(II):
+                    # 构造谓词列表：(op 映射到 iq_id 且 落在 slot 槽位)
+                    predicates = []
+                    for op in op_list:
+                        cond = z3.And(
+                            u_vars[op.trace_id] == iq_id,
+                            t_vars[op.trace_id] % II == slot
+                        )
+                        predicates.append((cond, 1))
+                    
+                    label = f"mod_pble_{u_type}_{iq_id}_s{slot}"
+                    # 使用 Pseudo-Boolean Le (<= 1) 约束
                     ResourceAxioms._add_constraint(
                         solver,
-                        z3.Implies(
-                            u_vars[op_i.trace_id] == u_vars[op_j.trace_id],
-                            t_vars[op_i.trace_id] % II != t_vars[op_j.trace_id] % II
-                        ),
+                        z3.PbLe(predicates, 1),
                         label
                     )
 
@@ -101,6 +119,51 @@ class ResourceAxioms(AxiomBase):
                         t_vars[op_i.trace_id] % II != t_vars[op_j.trace_id] % II,
                         label
                     )
+
+    @staticmethod
+    def add_symmetry_breaking_axiom(solver, ops, t_vars, II, spec, **kwargs):
+        """
+        对称性破缺公理：强制同类资源实例按顺序使用，消除等价排列产生的搜索空间。
+        
+        策略：对于资源类型 T，如果使用了实例 k，则必须有某个操作使用了实例 k-1。
+        这确保了求解器不会跳过实例（例如只用 0 和 2 而不用 1），
+        因为在完全对称的情况下，[0, 2] 与 [0, 1] 是等价的。
+        """
+        u_vars = kwargs.get("u_vars")
+        if u_vars is None: return
+
+        # 按类型分组操作
+        type_to_ops: Dict[str, List[MIROp]] = {}
+        for op in ops:
+            u_type = ResourceAxioms._get_resource_type(op.op_type)
+            # 只对已知具有物理连接对称性的类型进行破缺 (如 UR 端口)
+            # 如果是 ALU，由于 RTOVR 物理绑定可能不对称，不建议开启。
+            if u_type in ["UR_READ", "UR_WRITE"]:
+                type_to_ops.setdefault(u_type, []).append(op)
+
+        for u_type, op_list in type_to_ops.items():
+            valid_iqs = spec.get_iq_ids(u_type)
+            if len(valid_iqs) <= 1: continue
+
+            # 对物理实例 ID 进行排序，建立序关系
+            sorted_iqs = sorted(valid_iqs)
+            
+            for k in range(1, len(sorted_iqs)):
+                iq_prev = sorted_iqs[k-1]
+                iq_curr = sorted_iqs[k]
+                
+                # 谓词：是否有操作使用了当前实例 iq_curr
+                used_curr = z3.Or([u_vars[op.trace_id] == iq_curr for op in op_list])
+                # 谓词：是否有操作使用了前一个实例 iq_prev
+                used_prev = z3.Or([u_vars[op.trace_id] == iq_prev for op in op_list])
+                
+                label = f"sym_break_{u_type}_iq{iq_curr}_needs_iq{iq_prev}"
+                # 约束：If Used(iq_curr) Then Used(iq_prev)
+                ResourceAxioms._add_constraint(
+                    solver,
+                    z3.Implies(used_curr, used_prev),
+                    label
+                )
 
     @staticmethod
     def add_read_port_mutex_axiom(solver, ops, t_vars, II, spec, **kwargs):
