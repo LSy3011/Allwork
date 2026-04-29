@@ -1,4 +1,4 @@
-import sys, os, argparse
+import sys, os, argparse, json
 import numpy as np
 
 # 调整路径以支持导入 src 和 verification_v2
@@ -16,7 +16,12 @@ OPERATOR_MAP = {
     "horner": HornerOperator
 }
 
-def run_test(op_name: str, n_rows: int, show_r: bool, show_m: bool):
+# 默认批处理算子参数
+DEFAULT_OP_ARGS = {
+    "horner": {"coeffs": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]}
+}
+
+def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show_r: bool, show_m: bool) -> bool:
     if show_r:
         print("\n" + "="*20 + f" AIACC V2.0 Modular Verification: {op_name.upper()} " + "="*20)
     
@@ -28,41 +33,26 @@ def run_test(op_name: str, n_rows: int, show_r: bool, show_m: bool):
     # 1. 动态准备算子与数据
     if op_name not in OPERATOR_MAP:
         print(f"❌ [ERROR] Operator '{op_name}' not found in registry.")
-        return
+        return False
 
-    # 实例化算子（此处可扩展更复杂的初始化参数逻辑）
-    if op_name == "horner":
-        # 测试 5 阶 Horner (6 个常数)
-        coeffs = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6] 
-        operator = HornerOperator(coeffs)
-    else:
-        operator = OPERATOR_MAP[op_name]()
+    # 实例化算子（通过参数注入实现去硬编码）
+    operator = OPERATOR_MAP[op_name](**op_args)
 
     # 动态生成输入数据（由算子自行决定结构）
     input_data = operator.prepare_input(n_rows)
     
     # 2. 运行流水线
-    runner = PipelineRunner(hw_config_name="hw_config", show_review=show_r, show_model=show_m)
+    runner = PipelineRunner(hw_config_name=hw_config_name, show_review=show_r, show_model=show_m)
     ctx = runner.run_full_stack(operator, input_data)
     
     if not ctx:
-        return
+        return False
 
     # 3. 可视化调试
     print_physical_instructions(ctx["physical_instrs"], show_model=show_m)
     
-    # 解析实际轨迹用于对齐图
-    timeline_path = os.path.join(ctx["output_dir"], "smc_0", "analysis", "timeline_ascii.txt")
-    actual_activity = {}
-    if os.path.exists(timeline_path):
-        with open(timeline_path, "r") as f:
-            for line in f:
-                if "|" in line and "iq_name" not in line and "occupancy" not in line:
-                    parts = line.split("|")
-                    if len(parts) >= 2:
-                        name = parts[0].strip()
-                        trace = parts[1].strip().split()
-                        actual_activity[name] = trace
+    # 解析实际轨迹用于对齐图 (下沉到 PipelineRunner)
+    actual_activity = runner.parse_simulation_timeline(ctx["output_dir"])
 
     print_aligned_timeline(ctx["schedule"], actual_activity, ctx["II"], max_cycles=50, show_review=show_r)
 
@@ -71,17 +61,20 @@ def run_test(op_name: str, n_rows: int, show_r: bool, show_m: bool):
     
     if not auditor.audit_physical_headers():
         print("\n❌ [FAIL-FAST] Header Audit failed. Stopping pipeline.")
-        return
+        return False
         
     if auditor.audit_truth_alignment(ctx["log_path"], num_iterations=ctx["num_iterations"]):
-        print("\n" + "✨"*10 + " ALL PHYSICAL CHECKS PASSED " + "✨"*10)
+        print("\n" + "✨"*10 + f" ALL PHYSICAL CHECKS PASSED FOR {op_name.upper()} " + "✨"*10)
+        return True
     else:
-        print("\n" + "❌"*10 + " VERIFICATION FAILED " + "❌"*10)
-        sys.exit(1)
+        print("\n" + "❌"*10 + f" VERIFICATION FAILED FOR {op_name.upper()} " + "❌"*10)
+        return False
 
 def main():
     parser = argparse.ArgumentParser(description="AIACC V2.0 Modular Verification Suite")
-    parser.add_argument("--op", type=str, default="horner", help="Operator name to verify (e.g., horner)")
+    parser.add_argument("--op", type=str, default="horner", help="Operator name to verify (e.g., horner) or 'all' for batch testing")
+    parser.add_argument("--op-args", type=str, default="{}", help="JSON string for operator kwargs")
+    parser.add_argument("--hw-config", type=str, default="hw_config", help="Hardware configuration name")
     parser.add_argument("--n-rows", type=int, default=16, help="Number of data rows to verify (Default: 16)")
     parser.add_argument("--review", action="store_true", default=True, help="Show high-level review info (Default)")
     parser.add_argument("--no-review", action="store_false", dest="review", help="Hide review info")
@@ -93,7 +86,27 @@ def main():
     show_r = args.review and (not args.quiet)
     show_m = args.model and (not args.quiet)
 
-    run_test(args.op, args.n_rows, show_r, show_m)
+    op_args_dict = json.loads(args.op_args)
+
+    if args.op == "all":
+        print("\n" + "="*20 + " STARTING BATCH VERIFICATION " + "="*20)
+        results = {}
+        for op in OPERATOR_MAP.keys():
+            kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(op, {})
+            success = run_test(op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+            results[op] = success
+        
+        print("\n" + "="*20 + " BATCH VERIFICATION REPORT " + "="*20)
+        all_passed = True
+        for op, success in results.items():
+            status = "✅ PASS" if success else "❌ FAIL"
+            print(f"[{op.upper()}]: {status}")
+            if not success: all_passed = False
+        sys.exit(0 if all_passed else 1)
+    else:
+        kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(args.op, {})
+        success = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+        sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

@@ -28,8 +28,24 @@ class UCodeSynthesizer:
         """
         low, high = MII, MAX_II
         best_res = None
+        best_meta = None
+        
+        # 保存初始 metadata 状态，防止被之前 SAT 的迭代污染
+        original_meta = {op.trace_id: {"iq_id": op.metadata.get("iq_id"), "slot_id": op.metadata.get("slot_id")} for op in ops}
         
         while low <= high:
+            # 每次探测前恢复初始状态
+            for op in ops:
+                if original_meta[op.trace_id]["iq_id"] is None:
+                    op.metadata.pop("iq_id", None)
+                else:
+                    op.metadata["iq_id"] = original_meta[op.trace_id]["iq_id"]
+                    
+                if original_meta[op.trace_id]["slot_id"] is None:
+                    op.metadata.pop("slot_id", None)
+                else:
+                    op.metadata["slot_id"] = original_meta[op.trace_id]["slot_id"]
+
             mid = (low + high) // 2
             print(f"[SOLVER] Trying II={mid} (Range: [{low}, {high}])...")
             
@@ -40,6 +56,7 @@ class UCodeSynthesizer:
                 if self.validate_physical_schedule(ops, schedule, unit_map, mid):
                     print(f"[SOLVER] II={mid} is SAT and Verified.")
                     best_res = {"schedule": schedule, "II": mid, "unit_assignments": unit_map}
+                    best_meta = {op.trace_id: {"iq_id": op.metadata.get("iq_id"), "slot_id": op.metadata.get("slot_id")} for op in ops}
                     high = mid - 1 # 继续寻找更小的 II
                 else:
                     print(f"[VERIFIER] Counter-verification FAILED for II={mid}. Treating as UNSAT.")
@@ -48,6 +65,14 @@ class UCodeSynthesizer:
                 print(f"[SOLVER] II={mid} is UNSAT.")
                 low = mid + 1
                 
+        # 搜索结束后，应用最佳的 metadata 结果
+        if best_meta:
+            for op in ops:
+                if best_meta[op.trace_id]["iq_id"] is not None:
+                    op.metadata["iq_id"] = best_meta[op.trace_id]["iq_id"]
+                if best_meta[op.trace_id]["slot_id"] is not None:
+                    op.metadata["slot_id"] = best_meta[op.trace_id]["slot_id"]
+                    
         return best_res
 
     def validate_physical_schedule(self, ops: List[MIROp], schedule: Dict[str, int], unit_map: Dict[str, str], II: int) -> bool:

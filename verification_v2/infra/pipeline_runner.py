@@ -134,3 +134,18 @@ class PipelineRunner:
         
         with open(conf_path, "w") as f:
             json.dump(data, f, indent=2)
+
+    def parse_simulation_timeline(self, output_dir: str) -> Dict[str, List[str]]:
+        """解析仿真产生的 timeline_ascii.txt 文件。"""
+        timeline_path = os.path.join(output_dir, "smc_0", "analysis", "timeline_ascii.txt")
+        actual_activity = {}
+        if os.path.exists(timeline_path):
+            with open(timeline_path, "r") as f:
+                for line in f:
+                    if "|" in line and "iq_name" not in line and "occupancy" not in line:
+                        parts = line.split("|")
+                        if len(parts) >= 2:
+                            name = parts[0].strip()
+                            trace = parts[1].strip().split()
+                            actual_activity[name] = trace
+        return actual_activity

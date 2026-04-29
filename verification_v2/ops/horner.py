@@ -22,7 +22,6 @@ class HornerOperator(BaseOperator):
         }
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
-        # 🛸 动态 Bank 深度对齐：彻底清除 256 硬编码
         bank_depth = spec.params.PARAM_UR_BANK_DEPTH if spec else 256
         
         # 逻辑地址计算基准
@@ -30,36 +29,31 @@ class HornerOperator(BaseOperator):
         ADDR_C = self.BANK_COEFF * bank_depth
         ADDR_Y = self.BANK_OUT * bank_depth
 
-        ops = []
-        # 1. 读取初始最高阶系数 (c_n)
-        ops.append(make_op("UR_READ", "rd_initial_c", logical_addr=ADDR_C, stride=0))
-        ops.append(make_op("RTOVR",   "rt_initial_c", deps=["rd_initial_c"]))
-        last_res_rt = "rt_initial_c"
+        import sympy as sp
+        from src.frontend.compiler import GraphCompiler
 
-        # 2. 循环构建 Horner 链: ans = (...((c_n * x + c_n-1) * x + c_n-2) ... * x + c_0)
-        for i in range(self.order):
-            stage = i + 1
-            
-            # 读取 x (每个 stage 独立读取以保证时序采样)
-            ops.append(make_op("UR_READ", f"rd_x{stage}", logical_addr=ADDR_X, stride=1))
-            ops.append(make_op("RTOVR",   f"rt_x{stage}", deps=[f"rd_x{stage}"]))
-            
-            # 乘法阶段: mul(prev_res, x)
-            ops.append(make_op("FPMUL", f"mul{stage}", deps=[last_res_rt, f"rt_x{stage}"]))
-            ops.append(make_op("RTOVR", f"rt_m{stage}", deps=[f"mul{stage}"]))
-            
-            # 读取当前加法项系数 (c_n-1, c_n-2...c0)
-            curr_c_idx = i + 1
-            ops.append(make_op("UR_READ", f"rd_const{stage}", logical_addr=ADDR_C + curr_c_idx, stride=0))
-            ops.append(make_op("RTOVR",   f"rt_const{stage}", deps=[f"rd_const{stage}"]))
-            
-            # 加法阶段: add(mul, const)
-            ops.append(make_op("FPADD", f"add{stage}", deps=[f"rt_m{stage}", f"rt_const{stage}"]))
-            last_res_rt = f"rt_a{stage}"
-            ops.append(make_op("RTOVR", last_res_rt, deps=[f"add{stage}"]))
-            
-        # 3. 最终写入
-        ops.append(make_op("UR_WRITE", "wr_y", deps=[last_res_rt], logical_addr=ADDR_Y, stride=1))
+        x = sp.Symbol('x')
+        c = [sp.Symbol(f'c{i}') for i in range(len(self.coeffs))]
+        
+        # Horner 公式: ((c0*x + c1)*x + c2) ... + cn
+        formula = c[0]
+        for i in range(1, len(self.coeffs)):
+            formula = formula * x + c[i]
+
+        inputs_meta = {
+            x: {"logical_addr": ADDR_X, "stride": 1, "role": "operand"}
+        }
+        for i in range(len(self.coeffs)):
+            inputs_meta[c[i]] = {"logical_addr": ADDR_C + i, "stride": 0, "role": "operand"}
+
+        compiler = GraphCompiler()
+        ops = compiler.compile(inputs_meta, formula, out_name="y")
+        
+        # 补齐前端生成的 UR_WRITE 的目标地址
+        for op in ops:
+            if op.op_type == "UR_WRITE" and op.metadata.get("role") == "output":
+                op.metadata["logical_addr"] = ADDR_Y
+                op.metadata["stride"] = 1
 
         # === RTOVR Edge 标记注入（Step 1）===
         nodes_by_id = {op.trace_id: op for op in ops}
