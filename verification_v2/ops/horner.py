@@ -60,6 +60,24 @@ class HornerOperator(BaseOperator):
             
         # 3. 最终写入
         ops.append(make_op("UR_WRITE", "wr_y", deps=[last_res_rt], logical_addr=ADDR_Y, stride=1))
+
+        # === RTOVR Edge 标记注入（Step 1）===
+        nodes_by_id = {op.trace_id: op for op in ops}
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                rtovr_prod_ids = op.metadata.get("depends_on", [])
+                if not rtovr_prod_ids:
+                    continue
+                rtovr_prod_id = rtovr_prod_ids[0]
+                dvr = op.metadata.get("dvr", -1)
+                sel = op.metadata.get("sel", -1)
+                # 将信息注入消费者节点
+                for consumer in ops:
+                    if op.trace_id in consumer.metadata.get("depends_on", []):
+                        consumer.metadata.setdefault("rtovr_deps", {})[rtovr_prod_id] = {
+                            "dvr": dvr, "sel": sel
+                        }
+
         return ops
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:

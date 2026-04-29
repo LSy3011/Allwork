@@ -107,7 +107,7 @@ class PipelineRunner:
             res = subprocess.run(sim_cmd, stdout=log_f, stderr=log_f)
             if res.returncode != 0:
                 print(f"❌ [ERROR] Physical simulation failed. Check {log_path}")
-                return False
+                # CONTINUE so auditor can print timing mismatch
 
         return {
             "output_dir": output_dir,

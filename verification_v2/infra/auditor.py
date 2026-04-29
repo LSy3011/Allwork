@@ -182,8 +182,8 @@ class Auditor:
                 print(f"\n❌ Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base} [FAILED]")
                 for line in debug_buffer: print(line)
             elif self.show_review:
-                # 成功时只显示一行摘要
-                print(f"  Op: {trace_id:<12} | IQ: {sim_iq_name:<12} | Status: ✅")
+                print(f"\n>>> Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base}")
+                for line in debug_buffer: print(line)
 
         if self.show_review:
             print(f"\n  [RESULT] Truth Audit: {'SUCCESS' if all_matched else 'FAILED'}")

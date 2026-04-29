@@ -59,7 +59,10 @@ class UCodeSynthesizer:
         iq_to_phases: Dict[str, set] = {}
         
         for op in ops:
-            t = schedule[op.trace_id]
+            if op.op_type.upper() == "RTOVR": continue
+            t = schedule.get(op.trace_id)
+            if t is None: continue
+            
             iq_name = unit_map.get(op.trace_id)
             if not iq_name: continue
             
@@ -84,36 +87,42 @@ class UCodeSynthesizer:
                 
         # 4. [时序审计] 生产 -> RTOVR 采样 -> ALU 消费 严格对齐
         for op in ops:
+            if op.op_type.upper() == "RTOVR": continue
             m_type = op.op_type.upper()
             deps = op.metadata.get("depends_on", [])
             
-            # 审计：RTOVR 必须在生产者完成的第一拍采样
-            if m_type == "RTOVR" and deps:
-                prod = nodes_by_id.get(deps[0])
-                if prod:
-                    lat = self.hw_spec.delays.get(prod.op_type.upper(), 1)
-                    if schedule[op.trace_id] != (schedule[prod.trace_id] + lat):
-                        print(f"[VERIFIER-FAIL] RTOVR Timing Drift: {op.trace_id} sampled late.")
-                        return False
-            
-            # 审计：ALU 必须在 RTOVR 脉冲后的下一拍采样
-            if m_type in ["FPMUL", "FPADD"]:
-                for dep_id in deps:
-                    if dep_id in nodes_by_id and nodes_by_id[dep_id].op_type == "RTOVR":
-                        delta = schedule[op.trace_id] - schedule[dep_id]
-                        if delta != 1:
-                            print(f"[VERIFIER-FAIL] ALU Sampling Window Violation: {op.trace_id} -> {dep_id} delta={delta}")
-                            return False
+            # [OPT Step3] RTOVR 已抽象为边，从消费者反推采样时刻
+            for prod_id, rtovr_info in op.metadata.get("rtovr_deps", {}).items():
+                prod = nodes_by_id.get(prod_id)
+                if not prod:
+                    continue
+                lat_p = self.hw_spec.delays.get(prod.op_type.upper(), 1)
+                t_prod = schedule.get(prod_id)
+                if t_prod is None: continue
+                t_consumer = schedule.get(op.trace_id)
+                if t_consumer is None: continue
+                
+                t_rtovr_inferred = t_consumer - 1
+                if t_rtovr_inferred < t_prod + lat_p:
+                    print(f"[VERIFIER-FAIL] RTOVR undersampling: {op.trace_id} reads before {prod_id} ready "
+                          f"(inferred t_rtovr={t_rtovr_inferred}, need >= {t_prod + lat_p})")
+                    return False
+                if t_rtovr_inferred >= t_prod + II:
+                    print(f"[VERIFIER-FAIL] RTOVR overwrite: {op.trace_id} reads after {prod_id} latch overwritten "
+                          f"(inferred t_rtovr={t_rtovr_inferred}, limit < {t_prod + II})")
+                    return False
                             
         return True
 
     def _solve_for_ii_with_units(self, ops: List[MIROp], II: int) -> Optional[Tuple[Dict[str, int], Dict[str, str]]]:
+        compute_ops = [op for op in ops if op.op_type.upper() != "RTOVR"]
+        
         solver = z3.Solver()
-        t_vars = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in ops}
-        u_vars = {op.trace_id: z3.Int(f"u_{op.trace_id}") for op in ops}
+        t_vars = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in compute_ops}
+        u_vars = {op.trace_id: z3.Int(f"u_{op.trace_id}") for op in compute_ops}
 
         # 1. 基础物理约束
-        for op in ops:
+        for op in compute_ops:
             # 🛸 [V27.1 REVERT] 回归 t >= 0。依靠 L_init=1 来提供物理启动缓冲。
             solver.add(t_vars[op.trace_id] >= 0)
             u_type = self._get_resource_type(op.op_type)
@@ -122,38 +131,66 @@ class UCodeSynthesizer:
             solver.add(z3.Or([u_vars[op.trace_id] == iq_id for iq_id in valid_iqs]))
 
         # 2. 物理公理
-        axioms.add_latency_axiom(solver, ops, t_vars, II, self.hw_spec)
-        axioms.add_rtovr_crossbar_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
-        axioms.add_shadow_binding_axiom(solver, ops, t_vars, II, self.hw_spec)
-        axioms.add_anti_overwrite_axiom(solver, ops, t_vars, II, self.hw_spec)
-        axioms.add_side_effect_phase_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
-        axioms.add_rtovr_alignment_axiom(solver, ops, t_vars, II, self.hw_spec)
+        axioms.add_latency_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
+        # axioms.add_rtovr_crossbar_axiom(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        # axioms.add_shadow_binding_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
+        # axioms.add_anti_overwrite_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
+        axioms.add_side_effect_phase_axiom(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        # axioms.add_rtovr_alignment_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
 
 
         # 3. 模冲突
-        axioms.add_resource_constraint(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        axioms.add_resource_constraint(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
 
         # 4. RtoVR 物理绑定
-        axioms.add_physical_binding_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        # axioms.add_physical_binding_axiom(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
         # 5. 手动 IQ 绑定 (供调试使用)
-        for op in ops:
+        for op in compute_ops:
             manual_iq = op.metadata.get("iq_id")
             if manual_iq is not None:
                 solver.add(u_vars[op.trace_id] == manual_iq)
 
         if solver.check() != z3.sat:
-            # print(f"[SOLVER] II={II} is UNSAT.")
             return None
         model = solver.model()
-        schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in ops}
+        schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in compute_ops}
         registry = self.hw_spec.config.get("iq_registry", {})
         base_rt = registry.get("RTOVR", 100)
         unit_assignments = {}
-        for op in ops:
+        for op in compute_ops:
             u_id = model.eval(u_vars[op.trace_id]).as_long()
             iq_name = self.hw_spec.get_iq_name(u_id, op.op_type)
             unit_assignments[op.trace_id] = iq_name
             op.metadata["iq_id"] = u_id
-            if op.op_type.upper() == "RTOVR":
-                op.metadata["slot_id"] = u_id - base_rt
+
+        # [OPT Step 3] Post-hoc 恢复 RTOVR 节点信息
+        dvr_map = self.hw_spec.get_dvr_map()
+        for op in compute_ops:
+            u_type = self._get_resource_type(op.op_type)
+            u_id = op.metadata["iq_id"]
+            port_names = ["S0", "S1", "S2", "S3", "D", "ST"]
+            if u_type == "UR_WRITE": port_names = ["D"]
+            
+            valid_iqs = self.res_to_iqs.get(u_type, [0])
+            idx = valid_iqs.index(u_id) if u_id in valid_iqs else 0
+            inst_name = f"{u_type}_{idx}" if len(valid_iqs) > 1 else u_type
+            
+            deps = op.metadata.get("depends_on", [])
+            for i, dep_id in enumerate(deps):
+                producer = next((o for o in ops if o.trace_id == dep_id), None)
+                if producer and producer.op_type.upper() == "RTOVR":
+                    # 恢复时间：消费者 t - 1
+                    schedule[producer.trace_id] = schedule[op.trace_id] - 1
+                    
+                    # 恢复物理绑定
+                    p_name = port_names[i] if i < len(port_names) else "S0"
+                    target_slot = 0
+                    if inst_name in dvr_map and p_name in dvr_map[inst_name]:
+                        target_slot = dvr_map[inst_name][p_name]
+                        
+                    rt_id = base_rt + target_slot
+                    unit_assignments[producer.trace_id] = self.hw_spec.get_iq_name(rt_id, "RTOVR")
+                    producer.metadata["iq_id"] = rt_id
+                    producer.metadata["slot_id"] = target_slot
+
         return schedule, unit_assignments

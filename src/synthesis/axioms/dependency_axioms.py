@@ -43,6 +43,19 @@ class DependencyAxioms(AxiomBase):
                     solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label
                 )
 
+            # === RTOVR 增广边约束（Step 2）===
+            for prod_id, rtovr_info in op.metadata.get("rtovr_deps", {}).items():
+                producer = next((o for o in ops if o.trace_id == prod_id), None)
+                if not producer:
+                    continue
+                lat_p = spec.delays.get(producer.op_type.upper(), 1)
+                # 修复 BUG: 将范围约束改为严格相等约束，防止同单元其它操作覆盖无深度的 RTOVR 锁存器
+                DependencyAxioms._add_constraint(
+                    solver,
+                    t_vars[op.trace_id] == t_vars[prod_id] + lat_p + 1,
+                    f"rtovr_strict_{op.trace_id}_{prod_id}"
+                )
+
     @staticmethod
     def add_dependency_axiom(solver, ops, t_vars, II, spec, **kwargs):
         """
