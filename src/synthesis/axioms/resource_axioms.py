@@ -18,8 +18,6 @@ class ResourceAxioms(AxiomBase):
         # 兼容旧版的其他资源约束
         ResourceAxioms.add_bank_conflict_axiom(solver, ops, t_vars, II, spec, **kwargs)
         ResourceAxioms.add_spill_reload_mutex_axiom(solver, ops, t_vars, II, spec, **kwargs)
-        # 对称性破缺优化
-        ResourceAxioms.add_symmetry_breaking_axiom(solver, ops, t_vars, II, spec, **kwargs)
 
     @staticmethod
     def add_modulo_constraint(solver, ops, t_vars, II, spec, **kwargs):

@@ -70,20 +70,18 @@ class PhysicalAxioms(AxiomBase):
             if not consumers:
                 continue
 
-            m_val = t_vars[consumers[0].trace_id]
-            for cons in consumers[1:]:
-                m_val = z3.If(t_vars[cons.trace_id] > m_val, t_vars[cons.trace_id], m_val)
-
             lat = spec.delays.get(op.op_type.upper(), 1)
             data_ready = t_vars[op.trace_id] + lat - 1
 
-            label = f"anti_overwrite_{op.trace_id}"
-            # 🛸 [V5 FIX] 边界修正：必须 < II 拍，确保在下一迭代冲刷前完成消费
-            PhysicalAxioms._add_constraint(
-                solver,
-                m_val - data_ready <= II,
-                label
-            )
+            for cons in consumers:
+                label = f"anti_overwrite_{op.trace_id}_to_{cons.trace_id}"
+                # 🛸 [OPTIMIZE] max(T_cons) - T_ready <= II 
+                # 等价于对于所有消费者：T_cons - T_ready <= II
+                PhysicalAxioms._add_constraint(
+                    solver,
+                    t_vars[cons.trace_id] - data_ready <= II,
+                    label
+                )
 
     @staticmethod
     def add_shadow_binding_axiom(solver, ops, t_vars, II, spec, **kwargs):
@@ -213,32 +211,28 @@ class PhysicalAxioms(AxiomBase):
                 
                 same_iq = u_vars[op_A.trace_id] == u_vars[op_B.trace_id]
 
-                def get_protection_window(op_x):
+                def get_protection_window_conds(op_x, op_target_t):
+                    """
+                    返回一组布尔谓词：确保 op_target_t 晚于 op_x 的所有消费者。
+                    """
                     consumers = [
                         o for o in ops
                         if op_x.trace_id in o.metadata.get("depends_on", [])
                     ]
                     if not consumers:
-                        return t_vars[op_x.trace_id]
-                    m_val = t_vars[consumers[0].trace_id]
-                    for cons in consumers[1:]:
-                        m_val = z3.If(
-                            t_vars[cons.trace_id] > m_val,
-                            t_vars[cons.trace_id],
-                            m_val,
-                        )
-                    return m_val
+                        return [op_target_t > t_vars[op_x.trace_id]]
+                    
+                    # 只要 op_target_t 大于每一个消费者的发射时间，就说明 A 已被搬走
+                    return [op_target_t > t_vars[cons.trace_id] for cons in consumers]
 
-                t_end_A = get_protection_window(op_A)
-                t_end_B = get_protection_window(op_B)
-
-                cond_B_after_A = t_vars[op_B.trace_id] > t_end_A
-                cond_A_after_B = t_vars[op_A.trace_id] > t_end_B
+                # B 在 A 所有消费者之后发射 OR A 在 B 所有消费者之后发射
+                cond_B_after_A_all = z3.And(get_protection_window_conds(op_A, t_vars[op_B.trace_id]))
+                cond_A_after_B_all = z3.And(get_protection_window_conds(op_B, t_vars[op_A.trace_id]))
 
                 label = f"iq_l_prot_{op_A.trace_id}_{op_B.trace_id}"
                 PhysicalAxioms._add_constraint(
                     solver,
-                    z3.Implies(same_iq, z3.Or(cond_B_after_A, cond_A_after_B)),
+                    z3.Implies(same_iq, z3.Or(cond_B_after_A_all, cond_A_after_B_all)),
                     label
                 )
 
