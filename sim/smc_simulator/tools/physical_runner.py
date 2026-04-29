@@ -1,4 +1,5 @@
 import sys
+import logging
 import json
 import struct
 import numpy as np
@@ -60,10 +61,16 @@ def run_physical_verification(case_dir: str):
          print(f"Error: {case_dir} does not exist.")
          return False
 
-    # Force import from root
+    # Force import from root, sim and src directories
     root = Path.cwd()
+    sim_dir = root / "sim"
+    src_dir = root / "src"
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
+    if str(sim_dir) not in sys.path:
+        sys.path.insert(0, str(sim_dir))
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
 
     import smc_simulator.core.kernel as kernel_mod
     ParallelKernel = kernel_mod.ParallelKernel
@@ -85,9 +92,29 @@ def run_physical_verification(case_dir: str):
 
     # Phase 2.1: Execution
     print(f"Starting Physical Simulation for {case_dir}...")
+    
+    # Configure logging to file and stdout
+    file_handler = logging.FileHandler(trace_file, mode='w')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logging.getLogger("ParallelKernel").addHandler(file_handler)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(logging.Formatter('%(message)s'))
+    logging.getLogger("ParallelKernel").addHandler(stream_handler)
+    logging.getLogger("ParallelKernel").setLevel(logging.INFO)
+
+    class Tee:
+        def __init__(self, *files): self.files = files
+        def write(self, obj):
+            for f in self.files: f.write(obj); f.flush()
+        def flush(self):
+            for f in self.files: f.flush()
+
     try:
         max_cycles = config.get("max_cycles", 1000)
-        kernel.run(max_cycles=max_cycles)
+        with open(trace_file, "a") as f_trace:
+            import contextlib
+            with contextlib.redirect_stdout(Tee(sys.stdout, f_trace)):
+                kernel.run(max_cycles=max_cycles)
         
         # [Standard Alignment] Phase 2.1.2: Analysis and Traces
         analysis_dir = case_path / "smc_0" / "analysis"
@@ -97,10 +124,6 @@ def run_physical_verification(case_dir: str):
         kernel.trace_recorder.save_to_timeline_ascii(str(analysis_dir / "timeline_ascii.txt"))
         if hasattr(kernel.trace_recorder, 'save_to_chrome_tracing'):
              kernel.trace_recorder.save_to_chrome_tracing(str(analysis_dir / "sim_events.json"))
-        
-        # Save main simulation trace
-        with open(case_path / "sim_trace.log", "w") as f_log:
-             f_log.write(f"Simulation completed at cycle {kernel.cycle_count}\n")
              
         # [Standard Alignment] Phase 2.1.3: Output Bank State
         output_bank_dir = case_path / "smc_0" / "output_bank"

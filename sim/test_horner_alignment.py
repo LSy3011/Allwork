@@ -194,8 +194,9 @@ def test_horner_production_alignment():
         op.metadata["unit_id"] = unit_map.get(op.trace_id)
 
     assembler = PhysicalAssembler(spec)
-    # 🛸 [NEW] 设定循环次数为 4，硬件 Header 将自动生成 LOOP:3
-    physical_instrs = assembler.assemble(ops, II=II, num_iterations=n_rows)
+    # 🛸 [NEW] 设定循环次数为 4 (16 elements / 4 lanes)，硬件 Header 将自动生成 LOOP:3
+    num_loop_iters = n_rows // 4
+    physical_instrs = assembler.assemble(ops, II=II, num_iterations=num_loop_iters)
 
     # 4. 数据注入与 Golden 计算
     program = MockProgram()
@@ -242,8 +243,8 @@ def test_horner_production_alignment():
     # 🛸 [NEW] 注册 Tensor 元数据用于仿真器对齐
     from collections import namedtuple
     TensorObj = namedtuple("TensorObj", ["bank", "offset", "shape", "role"])
-    program.tensors["x"] = TensorObj(bank=0, offset=0, shape=(n_rows, 4), role="input")
-    program.tensors["y"] = TensorObj(bank=2, offset=0, shape=(n_rows, 4), role="output")
+    program.tensors["x"] = TensorObj(bank=0, offset=0, shape=(num_loop_iters, 4), role="input")
+    program.tensors["y"] = TensorObj(bank=2, offset=0, shape=(num_loop_iters, 4), role="output")
 
     # 5. 导出并打印流水线纵向时序图
     output_dir = "build/alignment/horner_3rd"
@@ -294,7 +295,10 @@ def test_horner_production_alignment():
     # 🛸 [V27.5] 重定向输出到 test_output.log 以供审计
     with open("test_output.log", "w") as log_f:
         sim_cmd = ["python3", "sim/smc_simulator/tools/physical_runner.py", output_dir]
-        subprocess.run(sim_cmd, stdout=log_f, stderr=log_f)
+        res = subprocess.run(sim_cmd, stdout=log_f, stderr=log_f)
+        if res.returncode != 0:
+            print(f"❌ [ERROR] Physical simulation failed. Check test_output.log for details.")
+            sys.exit(1)
     
     # 🛸 [V27.5] 解析实际轨迹用于对齐图展现
     actual_activity = {}
@@ -302,8 +306,11 @@ def test_horner_production_alignment():
         with open(timeline_path, "r") as f:
             for line in f:
                 if "|" in line and "iq_name" not in line and "occupancy" not in line:
-                    name, trace = line.split("|")
-                    actual_activity[name.strip()] = trace.strip().split()
+                    parts = line.split("|")
+                    if len(parts) >= 2:
+                        name = parts[0].strip()
+                        trace = parts[1].strip().split()
+                        actual_activity[name] = trace
 
     # 🛸 [V27.5] 打印对齐后的垂直时序图
     print_aligned_timeline(schedule, actual_activity, II, max_cycles=50)
