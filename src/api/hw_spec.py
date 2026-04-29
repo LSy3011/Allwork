@@ -158,6 +158,8 @@ class HardwareSpec(BaseModel):
                            "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16"]:
                     return u_u.lower()
                 p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
+                if "-r" in p_name or "-w" in p_name:
+                    return f"{p_name}{idx}"
                 return f"{p_name}-{idx}"
 
         # 2. 全局扫描

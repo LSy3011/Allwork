@@ -31,39 +31,34 @@ class HornerOperator(BaseOperator):
         ADDR_Y = self.BANK_OUT * bank_depth
 
         ops = []
-        last_res_rt = None
-        
-        # 循环构建 Horner 链: ans = (...((c_n * x + c_n-1) * x + c_n-2) ... * x + c_0)
+        # 1. 读取初始最高阶系数 (c_n)
+        ops.append(make_op("UR_READ", "rd_initial_c", logical_addr=ADDR_C, stride=0))
+        ops.append(make_op("RTOVR",   "rt_initial_c", deps=["rd_initial_c"]))
+        last_res_rt = "rt_initial_c"
+
+        # 2. 循环构建 Horner 链: ans = (...((c_n * x + c_n-1) * x + c_n-2) ... * x + c_0)
         for i in range(self.order):
-            curr_c_idx = i
             stage = i + 1
             
-            # 读取当前系数
-            ops.append(make_op("UR_READ", f"rd_c{stage}", logical_addr=ADDR_C + curr_c_idx, stride=0))
-            ops.append(make_op("RTOVR",   f"rt_c{stage}", deps=[f"rd_c{stage}"]))
-            
-            # 读取 x
+            # 读取 x (每个 stage 独立读取以保证时序采样)
             ops.append(make_op("UR_READ", f"rd_x{stage}", logical_addr=ADDR_X, stride=1))
             ops.append(make_op("RTOVR",   f"rt_x{stage}", deps=[f"rd_x{stage}"]))
             
-            # 第一阶段: mul(c_n, x)，后续阶段: mul(prev_add, x)
-            mul_in1 = f"rt_c{stage}" if i == 0 else last_res_rt
-            mul_in2 = f"rt_x{stage}"
-            
-            ops.append(make_op("FPMUL", f"mul{stage}", deps=[mul_in1, mul_in2]))
+            # 乘法阶段: mul(prev_res, x)
+            ops.append(make_op("FPMUL", f"mul{stage}", deps=[last_res_rt, f"rt_x{stage}"]))
             ops.append(make_op("RTOVR", f"rt_m{stage}", deps=[f"mul{stage}"]))
             
-            # 读取加法项系数 (c_n-1, c_n-2...c0)
-            next_c_idx = i + 1
-            ops.append(make_op("UR_READ", f"rd_const{stage}", logical_addr=ADDR_C + next_c_idx, stride=0))
+            # 读取当前加法项系数 (c_n-1, c_n-2...c0)
+            curr_c_idx = i + 1
+            ops.append(make_op("UR_READ", f"rd_const{stage}", logical_addr=ADDR_C + curr_c_idx, stride=0))
             ops.append(make_op("RTOVR",   f"rt_const{stage}", deps=[f"rd_const{stage}"]))
             
-            # add(mul, const)
+            # 加法阶段: add(mul, const)
             ops.append(make_op("FPADD", f"add{stage}", deps=[f"rt_m{stage}", f"rt_const{stage}"]))
             last_res_rt = f"rt_a{stage}"
             ops.append(make_op("RTOVR", last_res_rt, deps=[f"add{stage}"]))
             
-        # 最终写入
+        # 3. 最终写入
         ops.append(make_op("UR_WRITE", "wr_y", deps=[last_res_rt], logical_addr=ADDR_Y, stride=1))
         return ops
 

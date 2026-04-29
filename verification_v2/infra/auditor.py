@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 class Auditor:
-    OP_SYMBOLS = {'fpmul': 'm', 'fpadd': 'a', 'rtovr': 'r', 'ur_read': 'L', 'ur_write': 'S'}
+    OP_SYMBOLS = {'fpmul': 'm', 'fpadd': 'a', 'rtovr': 'r', 'ur-r': 'L', 'ur-w': 'S', 'ur': 'L'}
 
     def __init__(self, output_dir: str, spec: Any, show_review: bool = True, show_model: bool = False):
         self.output_dir = Path(output_dir)
@@ -105,6 +105,12 @@ class Auditor:
                             if unit_name == "rtovr":
                                 port = data.get("Port")
                                 actual_values[(cyc, f"rtovr-{port}")] = {"tag": tag, "data": data}
+                            elif unit_name == "ur-read":
+                                port = data.get("Port")
+                                actual_values[(cyc, f"ur-r{port}")] = {"tag": tag, "data": data}
+                            elif unit_name == "ur-write":
+                                port = data.get("Port")
+                                actual_values[(cyc, f"ur-w{port}")] = {"tag": tag, "data": data}
                             else:
                                 actual_values[(cyc, unit_name)] = {"tag": tag, "data": data}
                         except: continue
@@ -126,7 +132,12 @@ class Auditor:
             
             t_base = info["t"]
             iq_name = info["iq"].lower().replace("_", "-")
-            target_char = self.OP_SYMBOLS.get(iq_name.split("-")[0], 'X')
+            # 🛸 改进：更精准的字符映射匹配
+            target_char = 'X'
+            for prefix, symbol in self.OP_SYMBOLS.items():
+                if iq_name.startswith(prefix):
+                    target_char = symbol
+                    break
             
             sim_iq_name = iq_name
             if sim_iq_name not in sim_activity:
@@ -148,7 +159,7 @@ class Auditor:
                 if (expected_cyc, sim_iq_name) in actual_values:
                     act_val = self.to_float(actual_values[(expected_cyc, sim_iq_name)]["data"].get("V0", "0"))
                     val_info = f" | Val: {act_val:.4f} ✅"
-                elif any(x in trace_id for x in ["rd_", "mul", "add"]):
+                elif any(x in trace_id for x in ["rd_", "mul", "add", "wr_"]):
                     val_ok = False; val_info = " | Data Missing"
                 
                 icon = "✅" if (timing_ok and val_ok) else "❌"
