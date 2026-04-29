@@ -2,7 +2,7 @@ from typing import List, Dict, Optional, Set, Tuple
 import copy
 import z3
 from ir.mir.mir_op import MIROp
-from synthesis.axioms import SynthesisAxioms
+import synthesis.axioms as axioms
 from driver.hw_resource import ResourceType
 from core.ii_analyzer import IIAnalyzer
 from api.hw_spec import HardwareSpec
@@ -193,19 +193,13 @@ class SMTSynthesizer:
                 solver.add(t[op.trace_id] >= t[dep_id] + (delay - 1) + transit)
 
         # ── 4. 资源互斥公理（基于模槽 s）────────────────────────────────
-        SynthesisAxioms.add_read_port_mutex_axiom(solver, ops, t, iq_vars, s)
-        SynthesisAxioms.add_iq_latch_protect_axiom(solver, ops, t, iq_vars)
-        SynthesisAxioms.add_rtovr_crossbar_axiom(solver, ops, t, self.hw_spec)
-        SynthesisAxioms.add_bank_conflict_axiom(solver, ops, t, s)
-        SynthesisAxioms.add_spill_reload_mutex_axiom(solver, ops, t, s)
-        SynthesisAxioms.add_alu_pipeline_axiom(solver, ops, t, iq_vars, self.hw_spec, s)
-        SynthesisAxioms.add_write_port_mutex_axiom(solver, ops, t, iq_vars, s)
+        axioms.add_resource_constraint(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)
+        axioms.add_iq_latch_protect_axiom(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)
+        axioms.add_rtovr_crossbar_axiom(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)
 
         # ── 5. 防覆盖公理（数据存活期 ≤ II）────────────────────────────
         # [I1] 对此架构，启用 no_output_fifo=True，强制消费者在数据被覆盖前读取
-        SynthesisAxioms.add_anti_overwrite_axiom(
-            solver, ops, t, II, self.hw_spec, no_output_fifo=True
-        )
+        axioms.add_anti_overwrite_axiom(solver, ops, t, II, self.hw_spec)
 
         # ── 6. 影子绑定（RTOVR → ALU，窗口 [1, II-1] 拍，绝对时间）────────
         for op in ops:

@@ -2,7 +2,7 @@ import z3
 from typing import List, Dict, Any, Optional, Tuple
 from ir.mir.mir_op import MIROp
 from api.hw_spec import HardwareSpec
-from synthesis.axioms import SynthesisAxioms as V5SynthesisAxioms
+import synthesis.axioms as axioms
 
 class UCodeSynthesizer:
     """
@@ -23,18 +23,32 @@ class UCodeSynthesizer:
         return u
 
     def solve_with_units(self, ops: List[MIROp], MII: int = 1, MAX_II: int = 32) -> Optional[Dict[str, Any]]:
-        for II in range(MII, MAX_II + 1):
-            print(f"[SOLVER] Trying II={II}...")
-            result = self._solve_for_ii_with_units(ops, II)
+        """
+        使用二分查找优化 II 搜索过程。
+        """
+        low, high = MII, MAX_II
+        best_res = None
+        
+        while low <= high:
+            mid = (low + high) // 2
+            print(f"[SOLVER] Trying II={mid} (Range: [{low}, {high}])...")
+            
+            result = self._solve_for_ii_with_units(ops, mid)
             if result:
                 schedule, unit_map = result
-                # 🛸 [V5.1 ADD] 引入“脚本反证”机制 (Script-based Counter-Verification)
-                # 即使 SMT 返回 SAT，也必须由脚本二次确认绝对时间对齐，确保硬件 IQ 安全。
-                if self.validate_physical_schedule(ops, schedule, unit_map, II):
-                    return {"schedule": schedule, "II": II, "unit_assignments": unit_map}
+                # 执行物理验证审计
+                if self.validate_physical_schedule(ops, schedule, unit_map, mid):
+                    print(f"[SOLVER] II={mid} is SAT and Verified.")
+                    best_res = {"schedule": schedule, "II": mid, "unit_assignments": unit_map}
+                    high = mid - 1 # 继续寻找更小的 II
                 else:
-                    print(f"[VERIFIER] Counter-verification FAILED for II={II}. Forcing II increment.")
-        return None
+                    print(f"[VERIFIER] Counter-verification FAILED for II={mid}. Treating as UNSAT.")
+                    low = mid + 1
+            else:
+                print(f"[SOLVER] II={mid} is UNSAT.")
+                low = mid + 1
+                
+        return best_res
 
     def validate_physical_schedule(self, ops: List[MIROp], schedule: Dict[str, int], unit_map: Dict[str, str], II: int) -> bool:
         """
@@ -108,53 +122,19 @@ class UCodeSynthesizer:
             solver.add(z3.Or([u_vars[op.trace_id] == iq_id for iq_id in valid_iqs]))
 
         # 2. 物理公理
-        V5SynthesisAxioms.add_latency_axiom(solver, ops, t_vars, self.hw_spec)
-        V5SynthesisAxioms.add_rtovr_crossbar_axiom(solver, ops, t_vars, self.hw_spec)
-        # 🛸 [V27.0 RESTORE] 恢复影子绑定公理，确保 RTOVR 脉冲选通窗口对齐
-        V5SynthesisAxioms.add_shadow_binding_axiom(solver, ops, t_vars, II)
-        # 🛸 [V27.0 RESTORE] 恢复防覆盖公理，确保在无 FIFO 架构下的数据存活期
-        V5SynthesisAxioms.add_anti_overwrite_axiom(solver, ops, t_vars, II, self.hw_spec, no_output_fifo=True)
-        # 🛸 [V5.2 ADD] 局部相位隔离公理：仅针对访存等有副作用的单元
-        V5SynthesisAxioms.add_side_effect_phase_axiom(solver, ops, t_vars, u_vars, II)
+        axioms.add_latency_axiom(solver, ops, t_vars, II, self.hw_spec)
+        axioms.add_rtovr_crossbar_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        axioms.add_shadow_binding_axiom(solver, ops, t_vars, II, self.hw_spec)
+        axioms.add_anti_overwrite_axiom(solver, ops, t_vars, II, self.hw_spec)
+        axioms.add_side_effect_phase_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        axioms.add_rtovr_alignment_axiom(solver, ops, t_vars, II, self.hw_spec)
 
-        # 🛸 [V27.5 FIX] 强制 RTOVR 严格对齐采样
-        for op in ops:
-            if op.op_type.upper() == "RTOVR":
-                for dep_id in op.metadata.get("depends_on", []):
-                    producer = next((o for o in ops if o.trace_id == dep_id), None)
-                    if producer:
-                        lat = self.hw_spec.delays.get(producer.op_type.upper(), 1)
-                        solver.add(t_vars[op.trace_id] == t_vars[producer.trace_id] + lat)
 
         # 3. 模冲突
-        for i in range(len(ops)):
-            for j in range(i + 1, len(ops)):
-                op_i, op_j = ops[i], ops[j]
-                if self._get_resource_type(op_i.op_type) == self._get_resource_type(op_j.op_type):
-                    solver.add(z3.Implies(u_vars[op_i.trace_id] == u_vars[op_j.trace_id],
-                                         t_vars[op_i.trace_id] % II != t_vars[op_j.trace_id] % II))
+        axioms.add_resource_constraint(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
 
-        # 4. RtoVR 条件绑定 (保持 V21 鲁棒逻辑)
-        DVR_MAP = self.hw_spec.get_dvr_map()
-        registry = self.hw_spec.config.get("iq_registry", {})
-        base_rt = registry.get("RTOVR", 100)
-        for op in ops:
-            u_type = self._get_resource_type(op.op_type)
-            valid_iqs = self.res_to_iqs.get(u_type, [])
-            deps = op.metadata.get("depends_on", [])
-            if not deps: continue
-            port_names = ["S0", "S1", "S2", "S3", "D", "ST"]
-            if u_type == "UR_WRITE": port_names = ["D"]
-            for i, dep_id in enumerate(deps):
-                producer = next((o for o in ops if o.trace_id == dep_id), None)
-                if producer and producer.op_type == "RTOVR":
-                    p_name = port_names[i] if i < len(port_names) else "S0"
-                    for idx, iq_id in enumerate(valid_iqs):
-                        inst_name = f"{u_type}_{idx}" if len(valid_iqs) > 1 else u_type
-                        if inst_name in DVR_MAP and p_name in DVR_MAP[inst_name]:
-                            target_slot = DVR_MAP[inst_name][p_name]
-                            solver.add(z3.Implies(u_vars[op.trace_id] == iq_id, 
-                                                 u_vars[producer.trace_id] == base_rt + target_slot))
+        # 4. RtoVR 物理绑定
+        axioms.add_physical_binding_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars)
         # 5. 手动 IQ 绑定 (供调试使用)
         for op in ops:
             manual_iq = op.metadata.get("iq_id")
@@ -166,6 +146,8 @@ class UCodeSynthesizer:
             return None
         model = solver.model()
         schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in ops}
+        registry = self.hw_spec.config.get("iq_registry", {})
+        base_rt = registry.get("RTOVR", 100)
         unit_assignments = {}
         for op in ops:
             u_id = model.eval(u_vars[op.trace_id]).as_long()
