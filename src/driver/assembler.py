@@ -8,8 +8,9 @@ class PhysicalAssembler:
     AIACC 物理装配器 (V26.0 - INC 字段修正版)。
     根据用户指示，将地址步长填入 INC 字段 (Bit 6-9)，同时保留 INC_EMBED 以兼容仿真器。
     """
-    def __init__(self, hw_spec: HardwareSpec):
+    def __init__(self, hw_spec: HardwareSpec, verbosity: int = 2):
         self.hw_spec = hw_spec
+        self.verbosity = verbosity
 
     def _get_clean_id(self, node: Any) -> str:
         if isinstance(node, str): return node
@@ -19,7 +20,7 @@ class PhysicalAssembler:
         trace_to_slot = {}
         trace_to_type = {}
         registry = self.hw_spec.config.get("iq_registry", {})
-        print(f"  [REG-AUDIT] Loaded Registry: {registry}")
+        # [REMOVED REDUNDANT REG-AUDIT]
         for op in lir_stream:
             tid = self._get_clean_id(op)
             u_id = op.metadata.get("unit_id", "").lower()
@@ -36,17 +37,17 @@ class PhysicalAssembler:
                 idx = int(idx_str)
                 phys_id = registry.get("UR_WRITE", 35) + idx
             else:
-                # 尝试从 metadata 中直接获取 iq_id 或通过 unit_id 查表
                 phys_id = op.metadata.get("iq_id") or op.metadata.get("slot_id")
                 if phys_id is None and u_id:
+                    registry = self.hw_spec.config.get("iq_registry", {})
                     phys_id = registry.get(u_id.upper(), 0)
                 phys_id = int(phys_id or 0)
-                
+
+            # [REMOVED REDUNDANT ID-TRACE]
             trace_to_slot[tid] = phys_id
             trace_to_type[tid] = str(op.op_type).upper().strip()
-            print(f"  [ID-TRACE] Op:{tid} U_ID:{u_id} Slot:{trace_to_slot[tid]}")
         
-        print(f"  [ASM-DEBUG] Trace to Slot Mapping: {trace_to_slot}")
+        # [REMOVED REDUNDANT ASM-DEBUG]
 
         iq_buckets: Dict[str, List[LIROp]] = {}
         for op in lir_stream:
@@ -104,8 +105,9 @@ class PhysicalAssembler:
             kernel_map: Dict[int, Any] = {op.metadata["global_t"] % II: op for op in ops}
             
             # 🛸 [DEBUG V27.4] 核心审计：检查槽位冲突
-            slots_str = ", ".join([f"Slot{s}:{op.trace_id}" for s, op in sorted(kernel_map.items())])
-            print(f"  [KERNEL-MAP-AUDIT] Unit:{iq_name:<10} | {slots_str}")
+            if self.verbosity >= 3:
+                slots_str = ", ".join([f"Slot{s}:{op.trace_id}" for s, op in sorted(kernel_map.items())])
+                print(f"  [KERNEL-MAP-AUDIT] Unit:{iq_name:<10} | {slots_str}")
             for k in range(II):
                 if k in kernel_map:
                     op = kernel_map[k]
@@ -178,16 +180,23 @@ class PhysicalAssembler:
                 src_slot = trace_to_slot.get(src_tid, 0)
                 
                 res["VALID"] = 1
-                if src_type == "FPADD": res["SEL"] = 4
-                elif src_type == "FPMUL": res["SEL"] = 3
+                dr_map = self.hw_spec.get_dr_map()
+                
+                if src_type in dr_map:
+                    # 🛸 动态查找单元 (FPADD, FPMUL 等) 的 D 端口
+                    res["SEL"] = dr_map[src_type].get("D", 0)
                 elif src_type == "UR_READ":
+                    # 🛸 动态查找 UR_READ 的特定实例端口 (如 UR_READ_0_D)
                     registry = self.hw_spec.config.get("iq_registry", {})
                     base_ur = registry.get("UR_READ", 30)
-                    res["SEL"] = 30 + (src_slot - base_ur)
+                    idx = src_slot - base_ur
+                    unit_key = f"UR_READ_{idx}"
+                    res["SEL"] = dr_map.get(unit_key, {}).get("D", base_ur + idx)
                 else:
                     res["SEL"] = 0
                 
-                print(f"  [RTOVR-ASM-AUDIT] Op:{op.trace_id} Src:{src_tid} SrcType:{src_type} SrcSlot:{src_slot} -> SEL:{res['SEL']}")
+                if self.verbosity >= 3:
+                    print(f"  [RTOVR-ASM-AUDIT] Op:{op.trace_id} Src:{src_tid} SrcType:{src_type} SrcSlot:{src_slot} -> SEL:{res['SEL']}")
             else:
                 res["SEL"] = 0
                 
@@ -195,7 +204,7 @@ class PhysicalAssembler:
             res["SMC_ID"] = 0
             
         # 🛸 [DEBUG]
-        if m_type in ["UR_READ", "UR_WRITE", "FPMUL", "FPADD"]:
+        if self.verbosity >= 3 and m_type in ["UR_READ", "UR_WRITE", "FPMUL", "FPADD"]:
              print(f"  [PAYLOAD-AUDIT] Op:{op.trace_id} Type:{m_type} Payload:{res}")
              
         return res

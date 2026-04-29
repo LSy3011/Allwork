@@ -176,20 +176,27 @@ class HardwareSpec(BaseModel):
         return f"{unit_type.lower()}_unknown" if unit_type else "unknown"
 
     def get_dvr_map(self) -> Dict[str, Dict[str, int]]:
-        """从 rtovr_config 解析物理槽位绑定表"""
+        """从 rtovr_config 解析物理槽位(出口)绑定表: RtoVR -> Unit-Port"""
         raw_dvr = self.rtovr_config.get("producers_dvr", {})
         dvr_map = {}
         for slot_id, label in raw_dvr.items():
             parts = label.split('_')
             if len(parts) < 2: continue
-            
             port = parts[-1]
-            # 🛸 [FIX] 保留实例索引，例如 UR_WRITE_0
-            if len(parts) >= 3 and parts[-2].isdigit():
-                unit = "_".join(parts[:-1]) # "UR_WRITE_0"
-            else:
-                unit = "_".join(parts[:-1]) # "FPADD"
-                
+            unit = "_".join(parts[:-1])
             if unit not in dvr_map: dvr_map[unit] = {}
             dvr_map[unit][port] = slot_id
         return dvr_map
+
+    def get_dr_map(self) -> Dict[str, Dict[str, int]]:
+        """从 rtovr_config 解析物理入口绑定表: Unit-Port -> RtoVR-SEL"""
+        raw_dr = self.rtovr_config.get("consumers_dr", {})
+        dr_map = {}
+        for sel_id, label in raw_dr.items():
+            parts = label.split('_')
+            if len(parts) < 2: continue
+            port = parts[-1]
+            unit = "_".join(parts[:-1])
+            if unit not in dr_map: dr_map[unit] = {}
+            dr_map[unit][port] = sel_id
+        return dr_map

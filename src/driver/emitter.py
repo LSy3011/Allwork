@@ -19,8 +19,9 @@ class LIRPacker:
     负责将已经物理定稿的 PhysicalInstruction 序列化为 Hex 文件。
     不再承担任何路由推导或时序逻辑。
     """
-    def __init__(self, config_dir: str = "hw_config"):
+    def __init__(self, config_dir: str = "hw_config", verbosity: int = 2):
         self.hw_spec = HardwareSpec.load(config_dir)
+        self.verbosity = verbosity
 
     def emit_from_instructions(self, instructions: List[PhysicalInstruction], case_root: str, program=None):
         root = Path(case_root)
@@ -41,7 +42,7 @@ class LIRPacker:
             stream.sort(key=lambda x: x.abs_t)
             # 1. 确定单元基础类型 (用于静态打包)
             lookup_type = self._get_lookup_type(iq_name)
-            total_bits = BitPacker.get_unit_bits(lookup_type)
+            total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type)
             hex_chars = (total_bits + 3) // 4
             
             hex_lines = []
@@ -49,8 +50,9 @@ class LIRPacker:
                 # 🛸 明确阶段判定：只有 BODY 阶段才允许携带 Body 载荷
                 is_body_stage = (instr.stage == "BODY")
                 
-                # 🛸 调用静态契约打包器
+                # 🛸 调用动态规格打包器
                 val = BitPacker.pack_capsule(
+                    spec=self.hw_spec,
                     unit_type=lookup_type,
                     payload_dict=instr.payload,
                     is_body=is_body_stage,
@@ -63,7 +65,8 @@ class LIRPacker:
                 f.write("\n".join(hex_lines) + "\n")
             
             iq_init[iq_name.replace("_", "-")] = f"smc_0/{hex_file_name}"
-            print(f"[EMITTER] IQ: {iq_name:<10} | Type: {lookup_type:<8} | Total: {total_bits:3} | Instrs: {len(hex_lines)}")
+            if self.verbosity >= 2:
+                print(f"[EMITTER] IQ: {iq_name:<10} | Type: {lookup_type:<8} | Total: {total_bits:3} | Instrs: {len(hex_lines)}")
 
         # 3. 导出仿真配置
         actual_max_t = max((instr.abs_t for instr in instructions), default=0)
@@ -82,20 +85,22 @@ class LIRPacker:
         with open(root / "sim_config.json", "w") as f:
             json.dump(sim_conf, f, indent=2)
 
-        print(f"[EMIT DONE] case emitted to {case_root}")
+        if self.verbosity >= 2:
+            print(f"[EMIT DONE] case emitted to {case_root}")
 
     def _handle_program_data(self, program, ur_dir, sim_conf):
         """处理 Bank 数据初始化与 Tensor 元数据映射。"""
+        v_lanes = program.vector_lanes
         for b_id, storage in program.memory_allocator.banks.items():
             with open(ur_dir / f"bank{b_id}.hex", "w") as f:
                 for entry in storage:
                     if not isinstance(entry, (list, np.ndarray, tuple)):
-                        # 🛸 标量广播扩展: 如果原始数据是标量，其物理行填满 4 份一样的数
-                        entry = [entry] * 4
+                        # 🛸 标量广播扩展: 根据实际 vector_lanes 填满物理行
+                        entry = [entry] * v_lanes
                     
-                    # 🛰️ 128-bit 矢量物理通道对位 (修正为 LSB-First: Index i -> Lane i)
+                    # 🛰️ 128-bit 矢量物理通道对位 (动态适配 lanes)
                     packed = 0
-                    for i, x in enumerate(entry[:4]):
+                    for i, x in enumerate(entry[:v_lanes]):
                         if isinstance(x, int):
                             bits = x & 0xFFFFFFFF
                         else:
