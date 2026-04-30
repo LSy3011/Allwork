@@ -28,6 +28,10 @@ class LIRPacker:
         smc0 = root / "smc_0"
         ur_dir, bank_dir, analysis = smc0/"ur_data", smc0/"output_bank", smc0/"analysis"
         for d in [smc0, ur_dir, bank_dir, analysis]: os.makedirs(d, exist_ok=True)
+        # 0. 清理旧文件，防止残留干扰 (Cleanup old files to avoid confusion)
+        for old_hex in smc0.glob("iq_*.hex"):
+            old_hex.unlink()
+        
         (root / "sim_trace.log").touch()
         
         # 1. 按物理 IQ 分桶

@@ -10,15 +10,22 @@ from verification_v2.infra.visualizer import print_physical_instructions, print_
 from verification_v2.infra.pipeline_runner import PipelineRunner
 from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
+from verification_v2.ops.taylor import TaylorOperator
 
 # 算子注册表：未来新增算子只需在此添加映射
 OPERATOR_MAP = {
-    "horner": HornerOperator
+    "horner": HornerOperator,
+    "sin3":   HornerOperator,
+    "sin5":   HornerOperator,
+    "sin5_taylor": TaylorOperator
 }
 
 # 默认批处理算子参数
 DEFAULT_OP_ARGS = {
-    "horner": {"coeffs": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]}
+    "horner": {"coeffs": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]},
+    "sin3":   {"coeffs": [-1/6.0, 0.0, 1.0, 0.0]},
+    "sin5":   {"coeffs": [1/120.0, 0.0, -1/6.0, 0.0, 1.0, 0.0]},
+    "sin5_taylor": {"coeffs": {5: 1/120.0, 3: -1/6.0, 1: 1.0}}
 }
 
 def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show_r: bool, show_m: bool) -> bool:
