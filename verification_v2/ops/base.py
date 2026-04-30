@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 import numpy as np
 
 class BaseOperator(ABC):
@@ -18,6 +18,14 @@ class BaseOperator(ABC):
         return 32 
 
     @property
+    def dtype(self):
+        """根据位宽自动映射 NumPy 类型"""
+        bits = self.element_bits
+        if bits == 32: return np.float32
+        if bits == 16: return np.float16
+        return np.float32
+
+    @property
     @abstractmethod
     def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
         pass
@@ -34,38 +42,47 @@ class BaseOperator(ABC):
     def prepare_input(self, n_rows: int) -> Dict[str, np.ndarray]:
         pass
 
+    def _get_hw_param(self, spec: Any, key: str, default: int) -> int:
+        if not spec or not hasattr(spec, "params"): return default
+        return getattr(spec.params, key, default)
+
     def get_bank_addr(self, name: str, spec: Any) -> int:
-        bank_depth = spec.params.PARAM_UR_BANK_DEPTH if spec else 256
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
         config = self.tensor_configs.get(name)
         if not config:
             raise ValueError(f"Tensor '{name}' not found in tensor_configs.")
         return config["bank"] * bank_depth
 
+    def _find_free_bank(self, spec: Any) -> int:
+        used_banks = {cfg["bank"] for cfg in self.tensor_configs.values() if "bank" in cfg}
+        max_banks = self._get_hw_param(spec, "PARAM_UR_BANK_NUM", 8)
+        for b in range(max_banks):
+            if b not in used_banks:
+                return b
+        raise RuntimeError("No free UR banks available for intermediate storage.")
+
     def build_inputs_meta(self, symbols_map: Dict[str, Any], spec: Any) -> Dict:
         meta = {}
         for name, symbol in symbols_map.items():
             addr_base = self.get_bank_addr(name, spec)
+            config = self.tensor_configs[name]
+            default_stride = 1 if config.get("role") == "input" else 0
+            stride = config.get("stride", default_stride)
             if isinstance(symbol, list):
                 for i, sym in enumerate(symbol):
-                    meta[sym] = {"logical_addr": addr_base + i, "stride": 0, "role": "operand"}
+                    meta[sym] = {"logical_addr": addr_base + i, "stride": stride, "role": "operand"}
             else:
-                stride = 1 if self.tensor_configs[name]["role"] == "input" else 0
                 meta[symbol] = {"logical_addr": addr_base, "stride": stride, "role": "operand"}
         return meta
 
     def compile_with_adpc(self, formula, inputs_meta: Dict, out_name: str = "y", out_addr: int = None, spec: Any = None) -> List[Any]:
-        """[ADPC V4.2] 全自动编译并注入物理契约，修复中间变量 Stride 丢失问题"""
         from src.frontend.compiler import GraphCompiler
         compiler = GraphCompiler()
         ops = compiler.compile(inputs_meta, formula, out_name=out_name)
-
-        bank_depth = spec.params.PARAM_UR_BANK_DEPTH if spec else 256
-        temp_base = 3 * bank_depth 
-        
-        # --- 🛸 [V4.2 FIX] 同步中间变量读写地址 ---
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        free_bank = self._find_free_bank(spec)
+        temp_base = free_bank * bank_depth 
         sym_to_addr = {}
-        
-        # 第一遍扫描：分配写地址
         temp_offset = 0
         for op in ops:
             if op.op_type == "UR_WRITE" and op.metadata.get("role") == "intermediate":
@@ -75,24 +92,17 @@ class BaseOperator(ABC):
                     temp_offset += 1
                 op.metadata["logical_addr"] = sym_to_addr[sym_name]
                 op.metadata["stride"] = 1
-
             elif out_addr is not None and op.op_type == "UR_WRITE" and op.metadata.get("role") == "output":
                 op.metadata["logical_addr"] = out_addr
                 op.metadata["stride"] = 1
                 op.metadata["is_output"] = True
-
-        # 第二遍扫描：同步读地址 (Reload)
         for op in ops:
-            if op.op_type == "UR_READ":
-                # 编译器为 Reload 生成的 trace_id 包含原始 symbol 名
-                # 例如: rt_x0_reload_7_FPMUL...
+            if op.op_type == "UR_READ" and "logical_addr" not in op.metadata:
                 for sym_name, addr in sym_to_addr.items():
                     if f"_{sym_name}_" in op.trace_id or op.trace_id.startswith(f"{sym_name}_"):
                         op.metadata["logical_addr"] = addr
                         op.metadata["stride"] = 1
                         break
-
-            # 3. 自动注入 RTOVR 边依赖
             if op.op_type.upper() == "RTOVR":
                 prod_ids = op.metadata.get("depends_on", [])
                 if prod_ids:

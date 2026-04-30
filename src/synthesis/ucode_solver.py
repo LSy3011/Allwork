@@ -180,7 +180,10 @@ class UCodeSynthesizer:
         model = solver.model()
         schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in compute_ops}
         registry = self.hw_spec.config.get("iq_registry", {})
-        base_rt = registry.get("RTOVR", 100)
+        
+        # 🛸 [V5.3 PATCH] 动态获取基地址，移除硬编码 100
+        base_rt = registry.get("RTOVR", 100) 
+        
         unit_assignments = {}
         for op in compute_ops:
             u_id = model.eval(u_vars[op.trace_id]).as_long()
@@ -193,6 +196,7 @@ class UCodeSynthesizer:
         for op in compute_ops:
             u_type = self._get_resource_type(op.op_type)
             u_id = op.metadata["iq_id"]
+            
             port_names = ["S0", "S1", "S2", "S3", "D", "ST"]
             if u_type == "UR_WRITE": port_names = ["D"]
             

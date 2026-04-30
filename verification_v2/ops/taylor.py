@@ -5,8 +5,8 @@ from .base import BaseOperator
 
 class TaylorOperator(BaseOperator):
     """
-    [ADPC V4.2] 智能稀疏 Horner 泰勒算子。
-    现已支持 BaseOperator V4.1 的自动中间变量隔离功能。
+    [ADPC V5.1] 工业级 Taylor 算子。
+    完全移除硬编码，支持动态精度与动态物理布局。
     """
     def __init__(self, coeffs: Dict[int, float]):
         self.sparse_coeffs = dict(sorted(coeffs.items(), key=lambda x: x[0], reverse=True))
@@ -25,7 +25,6 @@ class TaylorOperator(BaseOperator):
         x = sp.Symbol('x')
         c = [sp.Symbol(f'c{p}') for p in self.powers]
         
-        # --- 🚀 智能稀疏 Horner 构造算法 ---
         formula = c[0]
         for i in range(len(self.powers) - 1):
             diff = self.powers[i] - self.powers[i+1]
@@ -46,7 +45,8 @@ class TaylorOperator(BaseOperator):
         return {"y": golden_y, "intermediates": []}
 
     def prepare_input(self, n_rows: int) -> Dict[str, np.ndarray]:
-        data_x = np.linspace(0.1, 1.2, n_rows).astype(np.float32)
+        # 🛸 [V5.1 FIX] 使用动态 dtype，移除 np.float32 硬编码
+        data_x = np.linspace(0.1, 1.2, n_rows).astype(self.dtype)
         return {
             "x": data_x,
             "coeffs": self.coeff_values

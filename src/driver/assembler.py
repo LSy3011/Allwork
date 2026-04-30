@@ -5,8 +5,7 @@ from api.hw_spec import HardwareSpec
 
 class PhysicalAssembler:
     """
-    AIACC 物理装配器 (V26.0 - INC 字段修正版)。
-    根据用户指示，将地址步长填入 INC 字段 (Bit 6-9)，同时保留 INC_EMBED 以兼容仿真器。
+    AIACC 物理装配器 (V5.1 - 零硬编码版)。
     """
     def __init__(self, hw_spec: HardwareSpec, verbosity: int = 2):
         self.hw_spec = hw_spec
@@ -16,72 +15,67 @@ class PhysicalAssembler:
         if isinstance(node, str): return node
         return getattr(node, "trace_id", str(node))
 
+    def _get_registry_val(self, key: str) -> int:
+        """从注册表中提取基地址，若缺失则抛出异常，强制要求规格对齐"""
+        val = self.hw_spec.config.get("iq_registry", {}).get(key)
+        if val is None:
+            raise ValueError(f"CRITICAL: Resource key '{key}' missing in iq_registry. Please update hardware spec.")
+        return val
+
     def assemble(self, lir_stream: List[LIROp], II: int = 1, num_iterations: int = 1) -> List[PhysicalInstruction]:
         trace_to_slot = {}
         trace_to_type = {}
-        registry = self.hw_spec.config.get("iq_registry", {})
-        # [REMOVED REDUNDANT REG-AUDIT]
+        
         for op in lir_stream:
             tid = self._get_clean_id(op)
             u_id = op.metadata.get("unit_id", "").lower()
             if not u_id: continue
             
-            # 🛸 [V27.4 FIX] 统一处理 ur-rX, ur-wX 和通用单元 ID 解析
+            # 🛸 [V5.1 FIX] 移除 30/35/100 等魔法数字
             if "ur-r" in u_id:
-                idx_str = u_id.split("-r")[-1].replace("-", "")
-                idx = int(idx_str)
-                base = registry.get("UR_READ", 30)
-                phys_id = base + idx
+                idx = int(u_id.split("-r")[-1].replace("-", ""))
+                phys_id = self._get_registry_val("UR_READ") + idx
             elif "ur-w" in u_id:
-                idx_str = u_id.split("-w")[-1].replace("-", "")
-                idx = int(idx_str)
-                phys_id = registry.get("UR_WRITE", 35) + idx
+                idx = int(u_id.split("-w")[-1].replace("-", ""))
+                phys_id = self._get_registry_val("UR_WRITE") + idx
+            elif "rtovr" in u_id:
+                idx = int(u_id.split("-")[-1])
+                phys_id = self._get_registry_val("RTOVR") + idx
             else:
                 phys_id = op.metadata.get("iq_id") or op.metadata.get("slot_id")
-                if phys_id is None and u_id:
-                    registry = self.hw_spec.config.get("iq_registry", {})
-                    phys_id = registry.get(u_id.upper(), 0)
-                phys_id = int(phys_id or 0)
+                if phys_id is None:
+                    phys_id = self._get_registry_val(u_id.upper())
+                phys_id = int(phys_id)
 
-            # [REMOVED REDUNDANT ID-TRACE]
             trace_to_slot[tid] = phys_id
             trace_to_type[tid] = str(op.op_type).upper().strip()
         
-        # [REMOVED REDUNDANT ASM-DEBUG]
-
         iq_buckets: Dict[str, List[LIROp]] = {}
         for op in lir_stream:
             m_type = str(op.op_type).upper().strip()
             tid = self._get_clean_id(op)
             phys_id = trace_to_slot.get(tid, 0)
             if "RTOVR" in m_type:
-                registry = self.hw_spec.config.get("iq_registry", {})
-                base_rt = registry.get("RTOVR", 100)
+                base_rt = self._get_registry_val("RTOVR")
                 iq_name = f"rtovr-{phys_id - base_rt}"
             else:
-                u_type_str = str(op.op_type).upper().strip()
-                iq_name = self.hw_spec.get_iq_name(phys_id, u_type_str).upper()
+                iq_name = self.hw_spec.get_iq_name(phys_id, m_type).upper()
                 iq_name = iq_name.replace("UR-R-", "UR-R").replace("UR-W-", "UR-W")
                 iq_name = iq_name.replace("_", "-").lower()
             iq_buckets.setdefault(iq_name, []).append(op)
             
         physical_instructions = []
         for iq_name, ops in iq_buckets.items():
-            # 🛸 [V27.4 COMPACT] 极致紧凑按需起跑：Absolute_Cyc = 2 + t
             t_min_iq = min(op.metadata.get("global_t", 0) for op in ops)
             skip_iterations = t_min_iq // II
-            
-            # 🛸 [V5.2 FIX] 全量加入一拍 INIT，确保 loops = l_init - 1 >= 0
             l_init = (skip_iterations * II) + 1
             
-            # 1. 发射单元定制的 INIT 帧 (Cyc 0 ~ l_init-1)
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
                 header=SMIHeader(vld=0, loops=l_init - 1), payload={},
                 stage="INIT", op_type=str(ops[0].op_type)
             ))
 
-            # 2. 发射单元定制的 HDR 帧 (Cyc l_init)
             iq_max_stride = 0
             for op in ops:
                 s = int(op.metadata.get("stride", 0))
@@ -90,7 +84,6 @@ class PhysicalAssembler:
             is_memory_iq = ("ur-" in iq_name.lower()) or ("rtovr" in iq_name.lower())
             hdr_inc_embed = max(iq_max_stride, 1) if is_memory_iq else 0
             
-            # 🛸 [V27.4 DRAIN] 总循环次数需要减去该单元跳过的次数
             max_t_global = max(op.metadata.get("global_t", 0) for op in ops)
             total_iterations_needed = (max_t_global // II) + num_iterations
             loops_val = total_iterations_needed - skip_iterations - 1
@@ -101,55 +94,38 @@ class PhysicalAssembler:
                 payload={}, stage="HDR", op_type=str(ops[0].op_type)
             ))
             
-            # 3. 发射 BODY 帧 (从物理周期 l_init + 1 开始)
             kernel_map: Dict[int, Any] = {op.metadata["global_t"] % II: op for op in ops}
-            
-            # 🛸 [DEBUG V27.4] 核心审计：检查槽位冲突
-            if self.verbosity >= 3:
-                slots_str = ", ".join([f"Slot{s}:{op.trace_id}" for s, op in sorted(kernel_map.items())])
-                print(f"  [KERNEL-MAP-AUDIT] Unit:{iq_name:<10} | {slots_str}")
             for k in range(II):
                 if k in kernel_map:
                     op = kernel_map[k]
                     op_stride = int(op.metadata.get("stride", 0))
                     logical_addr = op.metadata.get("logical_addr", 0)
-                    # 🛸 [V27.5 FIX] 相对预减补偿：地址合成使用 IQ 全局 CNT。
-                    # 该 IQ 的第一个 BODY 帧对应的 CNT 为 0。
-                    # 相对偏移 = (当前算子全局拍 - 该 IQ 起始全局拍) // II
                     iq_start_t = min(o.metadata.get("global_t", 0) for o in ops)
                     relative_skip = (op.metadata.get("global_t", 0) - iq_start_t) // II
                     addr = (logical_addr - op_stride * relative_skip)
                     
-                    # 🛸 [V5.2 FIX] 地址合成归一化：内核指令不带 Stride，由外层 HDR 统一控制
                     op_mask = 0x1 if (is_memory_iq and op_stride != 0) else 0
-                    op_inc = 0 
-                    header = SMIHeader(vld=1, inc=op_inc, dly=0, inc_embed=op_mask)
+                    header = SMIHeader(vld=1, inc=0, dly=0, inc_embed=op_mask)
                     payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
                     
-                    # 🛸 动态修正 ADDR 字段 (包含预减结果)
+                    bank_depth = getattr(self.hw_spec.params, "PARAM_UR_BANK_DEPTH", 256)
+                    bank_num = getattr(self.hw_spec.params, "PARAM_UR_BANK_NUM", 8)
+
                     if "ADDR" in payload:
-                        payload["ADDR"] = addr % 256
-                        payload["BANK"] = (addr // 256) % 8
+                        payload["ADDR"] = addr % bank_depth
+                        payload["BANK"] = (addr // bank_depth) % bank_num
                     trace_id = op.trace_id
                 else:
                     header = SMIHeader(vld=0, inc=0, dly=0, inc_embed=0)
                     payload = {}
                     trace_id = f"nop_{iq_name}_{k}"
 
-                # 🚀 [V5.2 FINAL] 绝对时序对齐公式：Cyc = l_init + 1 + k
-                # 其中 l_init = (skip * II) + 1。
-                # 代入得 Cyc = (skip * II) + 2 + k。
-                # 当 skip=0, k=t 时，Cyc = 2 + t。完美对齐！
                 abs_t_val = l_init + 1 + k
-                
                 if k == II - 1: header.embed_end = 1
-                
                 physical_instructions.append(PhysicalInstruction(
-                    iq_name=iq_name, abs_t=abs_t_val, 
-                    header=header, payload=payload,
+                    iq_name=iq_name, abs_t=abs_t_val, header=header, payload=payload,
                     stage="BODY", local_id=k, op_type=str(ops[0].op_type), trace_id=trace_id
                 ))
-                
         return physical_instructions
 
     def _resolve_physical_payload(self, op: Any, trace_to_slot: Dict[str, int], trace_to_type: Dict[str, str]) -> Dict[str, Any]:
@@ -167,8 +143,10 @@ class PhysicalAssembler:
             res["VALID"] = 1
             addr = op.metadata.get("logical_addr")
             if addr is not None:
-                # 🛸 [REVERT V27.0] 确认为“后加用”契约，撤销预减补偿
-                res["ADDR"] = addr % 256; res["BANK"] = (addr // 256) % 8
+                bank_depth = getattr(self.hw_spec.params, "PARAM_UR_BANK_DEPTH", 256)
+                bank_num = getattr(self.hw_spec.params, "PARAM_UR_BANK_NUM", 8)
+                res["ADDR"] = addr % bank_depth
+                res["BANK"] = (addr // bank_depth) % bank_num
             if m_type == "UR_WRITE":
                 res["WBE"] = 0xFFFF
 
@@ -178,33 +156,19 @@ class PhysicalAssembler:
                 src_tid = self._get_clean_id(inputs[0])
                 src_type = trace_to_type.get(src_tid, "UNKNOWN")
                 src_slot = trace_to_slot.get(src_tid, 0)
-                
                 res["VALID"] = 1
                 dr_map = self.hw_spec.get_dr_map()
-                
                 if src_type in dr_map:
-                    # 🛸 动态查找单元 (FPADD, FPMUL 等) 的 D 端口
                     res["SEL"] = dr_map[src_type].get("D", 0)
                 elif src_type == "UR_READ":
-                    # 🛸 动态查找 UR_READ 的特定实例端口 (如 UR_READ_0_D)
-                    registry = self.hw_spec.config.get("iq_registry", {})
-                    base_ur = registry.get("UR_READ", 30)
+                    base_ur = self._get_registry_val("UR_READ")
                     idx = src_slot - base_ur
                     unit_key = f"UR_READ_{idx}"
                     res["SEL"] = dr_map.get(unit_key, {}).get("D", base_ur + idx)
                 else:
                     res["SEL"] = 0
-                
-                if self.verbosity >= 3:
-                    print(f"  [RTOVR-ASM-AUDIT] Op:{op.trace_id} Src:{src_tid} SrcType:{src_type} SrcSlot:{src_slot} -> SEL:{res['SEL']}")
             else:
                 res["SEL"] = 0
-                
         if m_type not in ["RTOVR"]:
             res["SMC_ID"] = 0
-            
-        # 🛸 [DEBUG]
-        if self.verbosity >= 3 and m_type in ["UR_READ", "UR_WRITE", "FPMUL", "FPADD"]:
-             print(f"  [PAYLOAD-AUDIT] Op:{op.trace_id} Type:{m_type} Payload:{res}")
-             
         return res

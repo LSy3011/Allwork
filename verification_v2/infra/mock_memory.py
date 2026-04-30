@@ -1,21 +1,41 @@
 import numpy as np
+from typing import Any
 
 class MockProgram:
+    """
+    [ADPC V5.4] 硬件感知型模拟内存层。
+    移除所有 256/8 等硬编码，实时根据 HardwareSpec 构建内存拓扑。
+    """
     class MockAllocator:
-        def __init__(self, vector_lanes: int):
+        def __init__(self, vector_lanes: int, bank_num: int, bank_depth: int, dtype: Any):
             self.vector_lanes = vector_lanes
-            # 初始化 8 个 Bank，每行长度为动态 vector_lanes
-            self.banks = {i: [np.zeros(vector_lanes, dtype=np.float32) for _ in range(256)] for i in range(8)}
+            self.bank_depth = bank_depth
+            # 🛸 [V5.4 FIX] 动态初始化 Bank 几何结构与数据类型
+            self.banks = {
+                i: [np.zeros(vector_lanes, dtype=dtype) for _ in range(bank_depth)] 
+                for i in range(bank_num)
+            }
     
-    def __init__(self, vector_lanes: int = 4):
-        self.vector_lanes = vector_lanes
-        self.memory_allocator = self.MockAllocator(vector_lanes)
+    def __init__(self, spec: Any, dtype: Any = np.float32):
+        # 🛸 从 spec 提取物理参数
+        self.vector_width_bits = getattr(spec.params, "PARAM_SMC_VECTOR_WIDTH", 128)
+        self.element_bits = 32 # 默认为 32
+        if dtype == np.float16: self.element_bits = 16
+        
+        self.vector_lanes = self.vector_width_bits // self.element_bits
+        self.bank_num = getattr(spec.params, "PARAM_UR_BANK_NUM", 8)
+        self.bank_depth = getattr(spec.params, "PARAM_UR_BANK_DEPTH", 256)
+        
+        self.memory_allocator = self.MockAllocator(
+            self.vector_lanes, self.bank_num, self.bank_depth, dtype
+        )
         self.tensors = {}
         
     def inject_vector(self, logical_addr: int, data: np.ndarray):
         """注入矢量数据"""
-        bank_id = logical_addr // 256
-        offset = logical_addr % 256
+        # 🛸 [V5.4 FIX] 使用动态 bank_depth 进行地址转换
+        bank_id = logical_addr // self.bank_depth
+        offset = logical_addr % self.bank_depth
         v_lanes = self.vector_lanes
         num_rows = (len(data) + v_lanes - 1) // v_lanes
         for r in range(num_rows):
@@ -26,6 +46,8 @@ class MockProgram:
 
     def inject_broadcast(self, logical_addr: int, scalar: float):
         """将标量广播到整个 SIMD 行"""
-        bank_id = logical_addr // 256
-        offset = logical_addr % 256
-        self.memory_allocator.banks[bank_id][offset] = np.full(self.vector_lanes, scalar, dtype=np.float32)
+        bank_id = logical_addr // self.bank_depth
+        offset = logical_addr % self.bank_depth
+        self.memory_allocator.banks[bank_id][offset] = np.full(
+            self.vector_lanes, scalar, dtype=self.memory_allocator.banks[0][0].dtype
+        )

@@ -92,6 +92,7 @@ class GraphCompiler:
         self.b = MIROpBuilder()
         self.mir_env = {}
         self.cse_vars = set()
+        
         # 🛸 V4.0 常量池缓存：避免重复生成相同数值的 UR_READ 节点
         self.const_pool = {} 
         
@@ -203,7 +204,7 @@ class GraphCompiler:
                      return
                  elif exp_val == -1:
                      # 🛸 [ADPC V4.0] 64 阶倍增泰勒展开 (Binary Power Series V3.0)
-                     # 数学等价于 64 阶: (1-dx)(1+dx^2)(1+dx^4)...(1+dx^32)
+                     # 数学等等价于 64 阶: (1-dx)(1+dx^2)(1+dx^4)...(1+dx^32)
                      # 拓扑表现为线性链，深度约 24 拍，远优于自回归结构的 NR 方案。
                      x_node = self._get_op(base)
                      one_node = self._get_const(sp.Float(1.0))
