@@ -2,14 +2,16 @@ import sympy as sp
 from typing import List, Dict, Any
 from ir.mir.builder import MIROpBuilder
 from driver.hw_resource import ResourceType as RT, PortSlot as PS
+from frontend.optimizer import PhysicalGraphOptimizer
 
 class GraphCompiler:
     """
     AIACC 前端编译器：包含中端 (SymPy CSE 优化) 与硬件下降匹配器 (Hardware Lowering)
     """
-    def __init__(self):
+    def __init__(self, optimizer: Any = None):
         self.b = MIROpBuilder()
         self.mir_env = {}
+        self.optimizer = optimizer
         
         # 预先定义每个算力单元在硬件中暴露出的目标插槽 (Slot)
         self.slot_map = {
@@ -28,11 +30,32 @@ class GraphCompiler:
         self.inl_cnt = 0
         self.cse_vars = set()
 
-    def _route(self, nid: str, target_slot: PS, dep_port: str = None):
+    def _route(self, nid: str, target_slot: PS, dep_port: str = "D"):
         """路由下发：在数学操作数进计算器前，必须包一层硬件专属搬运指令 RTOVR"""
         self.rt_cnt += 1
         uid = f"rt_{nid}_{target_slot.name}_{self.rt_cnt}"[:64]
-        kwargs = {"dep_port": dep_port} if dep_port else {}
+        kwargs = {"dep_port": dep_port}
+        
+        # [Phase 4] 编译期证明 SEL：从 dr_map 直接推断 sel，杜绝装配期猜测
+        if getattr(self, "spec", None) is not None and hasattr(self.spec, "get_dr_map"):
+            producer = next((o for o in self.b.ops if o.trace_id == nid), None)
+            if producer:
+                src_type = str(producer.op_type).upper()
+                dr_map = self.spec.get_dr_map()
+                
+                sel_id = 0
+                if src_type in dr_map:
+                    sel_id = dr_map[src_type].get(dep_port, dr_map[src_type].get("D", 0))
+                elif src_type == "UR_READ":
+                    # 获取该单元的真实 ID（例如从 ur-r2 的 metadata 获取）
+                    iq_type_str = getattr(producer.metadata.get("iq_type", ""), "name", "")
+                    if "UR_R" in iq_type_str:
+                        idx = int(iq_type_str[-1]) if iq_type_str[-1].isdigit() else 0
+                        base_ur = 30 # 通常 UR_READ_0 在 dr_map 中对应 base 30
+                        unit_key = f"UR_READ_{idx}"
+                        sel_id = dr_map.get(unit_key, {}).get(dep_port, base_ur + idx)
+                kwargs["sel"] = sel_id
+
         return self.b.make_op("RTOVR", uid, target_slot, [nid], **kwargs)
 
     def compile_tensor(self, inputs, formula, shape: List[int], out_name="out_0") -> List:
@@ -82,7 +105,7 @@ class GraphCompiler:
                 
         return dfg
 
-    def compile(self, inputs, formula, out_name="out_0") -> List:
+    def compile(self, inputs: Dict, formula: Any, out_name="out_0", spec=None) -> List[Any]:
         """
         编译主函数。将复杂的符号数学公式压缩、优化并装配为底层算子图。
         inputs: DFG 的输入口锚点，允许指派测试用的 kwargs (如 manual_bank)
@@ -95,6 +118,7 @@ class GraphCompiler:
         
         # 🛸 V4.0 常量池缓存：避免重复生成相同数值的 UR_READ 节点
         self.const_pool = {} 
+        self.spec = spec  # [Phase 4] 存储 spec 以供 _route 查表证明
         
         self.inputs_meta = inputs
         # --- Stage 1: Sympy 中端图优化 (常数叠算，公共子代清除) ---
@@ -107,13 +131,7 @@ class GraphCompiler:
         for i, (sym, expr) in enumerate(opt_nodes):
             self.cse_vars.add(sym)
             self._lower_expr(sym, expr)
-            # 突破点: 拥有超过1个下游子代的特征向量，必须转储(Spilled)出被覆写的 ALU FIFO
-            write_slot = self.slot_map["UR_WRITE"][(1 + i) % 4]
-            routed_res = self._route(self.mir_env[sym], write_slot)
-            kwargs = {"role": "intermediate", "meta_name": str(sym)}
-            if hasattr(self, "loop_context"):
-                kwargs["inc"] = self.loop_context["inner_inc"]
-            self.b.make_op("UR_WRITE", f"spill_{sym}", RT.UR_WRITE, [routed_res], **kwargs)
+            # 🛸 [ENGINEERING] 移除此处的手动 Spill 逻辑，统一由 PhysicalGraphOptimizer 处理
             
         # --- Stage 2.3: 终极连线并汇出至输出寄存器 ---
         for i, res_expr in enumerate(final_res):
@@ -131,7 +149,22 @@ class GraphCompiler:
                 kwargs["inc"] = self.loop_context["inner_inc"]
             self.b.make_op("UR_WRITE", f"out_obj_{i}", RT.UR_WRITE, [routed_res], **kwargs)
             
-        return self.b.get_dfg()
+        # --- Stage 3: 物理图优化与生命周期加固 (Engineering Grade) ---
+        # 🛸 [ENGINEERING] 动态获取硬件参数，防止寻址塌缩
+        bank_depth = 256
+        scratch_bank = 6
+        if hasattr(spec, "params"):
+            bank_depth = getattr(spec.params, "PARAM_UR_BANK_DEPTH", 256)
+            bank_num = getattr(spec.params, "PARAM_UR_BANK_NUM", 8)
+            scratch_bank = bank_num - 2 if bank_num > 2 else 0
+            
+        if getattr(self, "optimizer", None) is not None:
+            optimizer = self.optimizer
+        else:
+            optimizer = PhysicalGraphOptimizer(scratch_bank=scratch_bank, bank_depth=bank_depth)
+        optimized_dfg = optimizer.optimize(self.b.get_dfg())
+        
+        return optimized_dfg
 
     def _lower_expr(self, sym, expr):
         """AST 硬件特征探测匹配中心。"""
@@ -252,6 +285,60 @@ class GraphCompiler:
                 r1 = self._route(op_list[i], PS.FPADD_S1)
                 current = self.b.make_op("FPADD", f"{sym}_a{i}", RT.FPADD, [r0, r1])
             self.mir_env[sym] = current
+            return
+
+        # 匹配【条件分支 (Piecewise)】 -> FPADD(ST) + LOGIC(SEL) 级联链
+        if isinstance(expr, sp.Piecewise):
+            # args 格式: [(val1, cond1), (val2, cond2), ..., (val_n, True)]
+            args = expr.args
+            if len(args) < 2 or args[-1][1] != True:
+                raise ValueError(f"Piecewise must have at least 2 branches and end with (val, True): {expr}")
+            
+            # 从后往前构建选择链 (MUX Chain)
+            # 初始默认值
+            current_op = self._get_op(args[-1][0])
+            
+            for i in range(len(args) - 2, -1, -1):
+                val_expr, cond_expr = args[i]
+                
+                # 1. 解析比较条件
+                if isinstance(cond_expr, sp.StrictGreaterThan):
+                    a, b = cond_expr.args
+                    op_type = "SELECT_GT"
+                elif isinstance(cond_expr, sp.GreaterThan):
+                    a, b = cond_expr.args
+                    op_type = "SELECT_GE"
+                elif isinstance(cond_expr, sp.StrictLessThan):
+                    a, b = cond_expr.args
+                    op_type = "SELECT_LS"
+                elif isinstance(cond_expr, sp.LessThan):
+                    a, b = cond_expr.args
+                    op_type = "SELECT_LE"
+                elif isinstance(cond_expr, sp.Eq):
+                    a, b = cond_expr.args
+                    op_type = "SELECT_EQ"
+                else:
+                    raise ValueError(f"Unsupported condition in Piecewise: {cond_expr}")
+                
+                # 2. 生成状态对比节点 (a - b)
+                op_a = self._get_op(a)
+                op_b = self._get_op(b)
+                r0_cmp = self._route(op_a, PS.FPADD_S0)
+                r1_cmp = self._route(op_b, PS.FPADD_S1)
+                cmp_node = self.b.make_op("FPADD", f"{sym}_cmp_{i}", RT.FPADD, [r0_cmp, r1_cmp], 
+                                          UPDATE_ST=1, SUB=1)
+                
+                # 3. 生成逻辑选择节点 (IF cond_i THEN val_i ELSE current_op)
+                op_v1 = self._get_op(val_expr)
+                st_wire = self._route(cmp_node, PS.LOGIC_ST, dep_port="ST")
+                r0_sel = self._route(op_v1, PS.LOGIC_S0)
+                r1_sel = self._route(current_op, PS.LOGIC_S1)
+                
+                current_op = self.b.make_op("LOGIC", f"{sym}_mux_{i}", RT.LOGIC, 
+                                            [r0_sel, r1_sel, st_wire], 
+                                            OP_TYPE=op_type, VALID=1)
+            
+            self.mir_env[sym] = current_op
             return
 
         # 匹配【逐元素 Max 对比选择】 -> FPADD(ST) + LOGIC(SEL)
@@ -500,9 +587,14 @@ class GraphCompiler:
         if hasattr(self, "loop_context"):
             metadata["inc"] = 0 
             
-        # 🛸 关键修复：防止重复传递 meta_name
+        # 🛸 关键修复：支持多个唯一常量的地址偏移
+        if "logical_addr" in metadata:
+            metadata["logical_addr"] += len(self.const_pool)
+            
+        # 🛸 关键修复：防止重复传递 meta_name 和 role
         m_name = metadata.pop("meta_name", "constants")
-        node = self.b.make_op("UR_READ", nid, RT.UR_READ, role="constant", meta_name=m_name, **metadata)
+        metadata.pop("role", None) # 统一在 make_op 中或 metadata 中指定
+        node = self.b.make_op("UR_READ", nid, RT.UR_READ, [], role="constant", meta_name=m_name, **metadata)
         self.const_pool[val_f] = node
         return node
         

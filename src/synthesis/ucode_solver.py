@@ -197,8 +197,12 @@ class UCodeSynthesizer:
             u_type = self._get_resource_type(op.op_type)
             u_id = op.metadata["iq_id"]
             
-            port_names = ["S0", "S1", "S2", "S3", "D", "ST"]
-            if u_type == "UR_WRITE": port_names = ["D"]
+            # 🛸 [ENGINEERING] 修正模块信息查找路径
+            unit_info = self.hw_spec.modules.get(u_type, {})
+            if hasattr(unit_info, "dict"): unit_info = unit_info.dict()
+            port_names = [p.split("-")[-1] for p in unit_info.get("inputs", [])]
+            if not port_names:
+                port_names = ["S0", "S1", "S2", "S3", "ST"]
             
             valid_iqs = self.res_to_iqs.get(u_type, [0])
             idx = valid_iqs.index(u_id) if u_id in valid_iqs else 0
@@ -218,8 +222,27 @@ class UCodeSynthesizer:
                         target_slot = dvr_map[inst_name][p_name]
                         
                     rt_id = base_rt + target_slot
+                    
+                    # 🛸 [ENGINEERING] 多端口生产者解析：根据 dep_port 找到正确的 Source ID
+                    # 查找该 RTOVR 节点对应生产者的哪个端口 (D 或 ST)
+                    dep_port = producer.metadata.get("dep_port", "D")
+                    dr_map = self.hw_spec.get_dr_map() # Unit -> Port -> ID
+                    
+                    # 获取真实的生产者节点（不是 RTOVR，而是 RTOVR 的输入源）
+                    # 注意：在 DFG 中，RTOVR 节点只有一个 dependency，即真正的生产者
+                    real_producer_id = producer.metadata.get("depends_on", [None])[0]
+                    real_producer = next((o for o in ops if o.trace_id == real_producer_id), None)
+                    real_producer_iq_id = real_producer.metadata.get("iq_id", u_id) if real_producer else u_id
+                    
+                    # 根据物理 ID 反查实例名，用于 dr_map 匹配 (例如 "UR_READ_0")
+                    real_producer_inst = self.hw_spec.get_iq_name(real_producer_iq_id).upper().replace("-", "_")
+                    
+                    # 查找优先级: 实例级(UR_READ_0) > 类型级(UR_READ) > 默认(real_producer_iq_id)
+                    sel_id = dr_map.get(real_producer_inst, dr_map.get(real_producer.op_type.upper() if real_producer else "", {})).get(dep_port, real_producer_iq_id)
+                    
                     unit_assignments[producer.trace_id] = self.hw_spec.get_iq_name(rt_id, "RTOVR")
                     producer.metadata["iq_id"] = rt_id
                     producer.metadata["slot_id"] = target_slot
+                    producer.metadata["sel"] = sel_id
 
         return schedule, unit_assignments

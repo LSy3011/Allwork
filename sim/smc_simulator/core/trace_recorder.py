@@ -67,7 +67,7 @@ class TraceRecorder:
         
         sorted_units = sorted(active_units)
         if not sorted_units:
-            print("⚠️ [TRACE-WARNING] No active units found during simulation. Skipping timeline.")
+            print("[TRACE-WARNING] No active units found during simulation. Skipping timeline.")
             return
 
         # 2. 构造缓冲区
@@ -127,4 +127,4 @@ class TraceRecorder:
         with open(file_path, "w") as f:
             f.write("\n".join(lines) + "\n")
         
-        print(f"📊 [TRACE-SAVE] Standard Legacy Style saved to: {os.path.abspath(file_path)}")
+        print(f"[TRACE-SAVE] Standard Legacy Style saved to: {os.path.abspath(file_path)}")

@@ -15,11 +15,11 @@ class Auditor:
     def audit_physical_headers(self):
         """审计 .hex 文件中的硬件 Header 字段"""
         if self.show_review:
-            print(f"\n🔍 [AUDIT-REVIEW] Physical Header Summary")
+            print(f"\n[AUDIT-REVIEW] Physical Header Summary")
         
         hex_files = glob.glob(str(self.smc_dir / "*.hex"))
         if not hex_files:
-            print(f"❌ [ERROR] No hex files found in {self.smc_dir}")
+            print(f"[ERROR] No hex files found in {self.smc_dir}")
             return False
             
         all_passed = True
@@ -54,10 +54,10 @@ class Auditor:
             
             if vld == 1:
                 if self.show_review:
-                    print(f"  Unit: {unit_name:<12} | EMB:{embed} | INC_E:{inc_embed} | LOOPS:{loops} ✅")
+                    print(f"  Unit: {unit_name:<12} | EMB:{embed} | INC_E:{inc_embed} | LOOPS:{loops} [PASS]")
                 
                 if embed == 0 or ("ur-" in unit_name and inc_embed == 0):
-                    print(f"    ❌ [FAIL] Unit {unit_name} misconfigured.")
+                    print(f"    [FAIL] Unit {unit_name} misconfigured.")
                     all_passed = False
         
         if self.show_review:
@@ -69,7 +69,7 @@ class Auditor:
     def audit_truth_alignment(self, log_path: str, num_iterations: int = 1):
         """进行时序对齐与数值审计（智能静默模式）。"""
         if self.show_review:
-            print("\n" + "="*20 + " 🛸 SMT-DRIVEN RIGID AUDIT REPORT (V27.5) " + "="*20)
+            print("\n" + "="*20 + " SMT-DRIVEN RIGID AUDIT REPORT (V27.5) " + "="*20)
             print(f"  [CONTRACT] Physical_Cycle = 2 + SMT_t | Iters: {num_iterations}")
         
         # 1. 加载元数据
@@ -79,7 +79,7 @@ class Auditor:
         timeline_path = self.smc_dir / "analysis" / "timeline_ascii.txt"
         
         if not (schedule_path.exists() and expected_vals_path.exists() and timeline_path.exists()):
-            print("❌ [ERROR] Audit metadata missing.")
+            print("[ERROR] Audit metadata missing.")
             return False
 
         with open(schedule_path, "r") as f:
@@ -158,11 +158,11 @@ class Auditor:
                 val_ok = True; val_info = ""
                 if (expected_cyc, sim_iq_name) in actual_values:
                     act_val = self.to_float(actual_values[(expected_cyc, sim_iq_name)]["data"].get("V0", "0"))
-                    val_info = f" | Val: {act_val:.4f} ✅"
+                    val_info = f" | Val: {act_val:.4f} [PASS]"
                 elif any(x in trace_id for x in ["rd_", "mul", "add", "wr_"]):
                     val_ok = False; val_info = " | Data Missing"
                 
-                icon = "✅" if (timing_ok and val_ok) else "❌"
+                icon = "[PASS]" if (timing_ok and val_ok) else "[FAIL]"
                 msg = f"  [ITER {iter_idx}] Cyc {expected_cyc}: '{actual_char}' {icon}{val_info}"
                 if not (timing_ok and val_ok):
                     op_failed = True
@@ -173,13 +173,13 @@ class Auditor:
                             if sim_trace[s_cyc] == target_char:
                                 found_at = s_cyc; break
                         if found_at != -1:
-                            msg += f"\n    ⚠️ [DIAGNOSIS] Found at {found_at}, Offset should be {found_at - t_base}"
+                            msg += f"\n    [DIAGNOSIS] Found at {found_at}, Offset should be {found_at - t_base}"
                 debug_buffer.append(msg)
 
             # --- 智能打印策略 ---
             if op_failed:
                 all_matched = False
-                print(f"\n❌ Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base} [FAILED]")
+                print(f"\n[FAIL] Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base} [FAILED]")
                 for line in debug_buffer: print(line)
             elif self.show_review:
                 print(f"\n>>> Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base}")

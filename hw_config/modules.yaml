@@ -45,15 +45,31 @@ modules:
     latency: 1
     inputs: [DVR-LOGIC-S0, DVR-LOGIC-S1, DVR-LOGIC-ST]
     outputs: [DR-LOGIC-D]
-    code_bits: 6
+    code_bits: 11
     code_fields:
-      - {name: VALID, bits: 1}
-      - {name: OP_TYPE, bits: 4}
-      - {name: PRECISION, bits: 1}
+      - {name: VALID, bits: 1, default: 1}
+      - name: OP_TYPE
+        bits: 4
+        default: 0
+        encoding:
+          AND: 0
+          OR: 1
+          XOR: 2
+          NOT: 3
+          COPY: 4
+          SELECT_GT: 5
+          SELECT_EQ: 6
+          SELECT_LS: 7
+          SELECT_GE: 8
+          SELECT_LE: 9
+          SELECT_NE: 10
+      - {name: PRECISION, bits: 1, default: 1}
+      - {name: SMC_ID, bits: 4, default: 0}
 
   RTOVR:
     type: router
     latency: 1
+    inputs: [DVR-RTOVR-SEL]
     code_bits: 7
     code_fields:
       - {name: VALID, bits: 1}
@@ -72,6 +88,7 @@ modules:
   UR_WRITE:
     type: memory_access
     latency: 1
+    inputs: [DVR-UR_WRITE-D]
     code_bits: 33
     code_fields:
       - {name: VALID, bits: 1}

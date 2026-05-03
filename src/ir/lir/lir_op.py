@@ -50,6 +50,18 @@ class PhysicalInstruction:
     comment: str = ""
     local_id: int = 0      # 在 II 周期内的索引 (0, 1, 2...)
     op_type: str = ""      # 原始算子类型
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "iq_name": self.iq_name,
+            "header": self.header.to_dict(),
+            "payload": self.payload,
+            "abs_t": self.abs_t,
+            "trace_id": self.trace_id,
+            "stage": self.stage,
+            "op_type": self.op_type,
+            "comment": self.comment
+        }
 
 class LIROp(IRNode):
     """

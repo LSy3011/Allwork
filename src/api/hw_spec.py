@@ -61,14 +61,14 @@ class HardwareSpec(BaseModel):
         def load_yaml(f):
             p = base / f
             if not p.exists(): return {}
-            with open(p, "r") as stream:
+            with open(p, "r", encoding='utf-8') as stream:
                 return yaml.safe_load(stream)
         
         # 🛸 V2.4 大一统加载尝试 (SSoT)
         master_spec_path = base / "specs" / "aiacc_v2.4_master.yaml"
         master_data = None
         if master_spec_path.exists():
-            with open(master_spec_path, "r") as f:
+            with open(master_spec_path, "r", encoding='utf-8') as f:
                 master_data = yaml.safe_load(f)
         
         # 1. 基础载入
@@ -91,7 +91,7 @@ class HardwareSpec(BaseModel):
                 # 回退到独立 YAML (保持兼容)
                 spec_file = base / "specs" / "units" / f"{mname.lower()}.yaml"
                 if spec_file.exists():
-                    with open(spec_file, "r") as f:
+                    with open(spec_file, "r", encoding='utf-8') as f:
                         u_data = yaml.safe_load(f)
             
             if u_data:

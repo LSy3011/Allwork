@@ -30,6 +30,11 @@ class PipelineRunner:
         vector_lanes = vector_width_bits // element_bits
         
         ops = operator.get_dfg(spec=self.spec)
+        if self.show_model:
+            print("\n[DEBUG] DFG Nodes Metadata:")
+            for op in ops:
+                print(f"  Node: {op.trace_id:<15} | Type: {op.op_type:<10} | Meta: {op.metadata}")
+                
         synth = UCodeSynthesizer(self.spec)
         result = synth.solve_with_units(ops, MII=1, MAX_II=32)
         if not result:
@@ -79,6 +84,10 @@ class PipelineRunner:
         packer.emit_from_instructions(physical_instrs, output_dir, program=program)
         self._patch_max_cycles(output_dir, safe_max_cycles)
         
+        # 🛸 [V5.4 FIX] 保存物理指令供审计员使用
+        with open(os.path.join(output_dir, "physical_instructions.json"), "w") as f:
+            json.dump([instr.to_dict() for instr in physical_instrs], f, indent=2)
+        
         np.savez(os.path.join(output_dir, "golden_data.npz"), y=golden_res["y"])
         with open(os.path.join(output_dir, "expected_values.json"), "w") as f:
             json.dump(golden_res["intermediates"], f, indent=2)
@@ -95,10 +104,10 @@ class PipelineRunner:
         
         log_path = os.path.join(output_dir, f"{op_name}_sim.log")
         with open(log_path, "w") as log_f:
-            sim_cmd = ["python3", "sim/smc_simulator/tools/physical_runner.py", output_dir]
+            sim_cmd = [sys.executable, "sim/smc_simulator/tools/physical_runner.py", output_dir]
             res = subprocess.run(sim_cmd, stdout=log_f, stderr=log_f)
             if res.returncode != 0:
-                print(f"❌ [ERROR] Physical simulation failed. Check {log_path}")
+                print(f"[ERROR] Physical simulation failed. Check {log_path}")
 
         return {
             "output_dir": output_dir,
