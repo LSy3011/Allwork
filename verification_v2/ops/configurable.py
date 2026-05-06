@@ -116,23 +116,15 @@ class ConfigurableOperator(BaseOperator):
         # 1. 注入常规张量
         super().inject_data(program, input_data, vector_lanes, spec)
         
-        # 2. 注入公式中的常量字面量
-        expr = self.formula
-        from sympy import Number
-        constants = sorted(list({float(n) for n in expr.atoms(Number)}))
-        
-        if constants:
-            # 找到 free bank 或使用指定的 constants bank
-            const_cfg = self.tensors_cfg.get("constants")
-            if const_cfg:
-                const_bank = const_cfg["bank"]
-                offset = const_cfg.get("offset", 0)
-            else:
-                const_bank = self._find_free_bank(spec)
-                offset = 0
-                
-            bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
-            addr_base = const_bank * bank_depth + offset
-            
-            for i, val in enumerate(constants):
-                program.inject_broadcast(addr_base + i, val)
+        # 2. 🛸 [V6.3 FIX] 统一且鲁棒的编译期常量注入
+        # 弃用老旧的手动 SymPy 公式字面量提取，直接查询编译器实际使用的 const_pool，
+        # 并通过 self.ops 检索其实际分配的 logical_addr 地址进行内存注入，
+        # 完美解决内核底层动态生成常量（如 Abs 展开引入的 -1.0）导致的漏注/内存污染问题
+        if hasattr(self, "ops") and hasattr(self, "compiler") and hasattr(self.compiler, "const_pool"):
+            op_map = {op.trace_id: op for op in self.ops}
+            for val_f, node_id in self.compiler.const_pool.items():
+                if node_id in op_map:
+                    node = op_map[node_id]
+                    if "logical_addr" in node.metadata:
+                        addr = node.metadata["logical_addr"]
+                        program.inject_broadcast(addr, val_f)

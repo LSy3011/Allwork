@@ -120,8 +120,8 @@ class BaseOperator(ABC):
             layout=layout
         )
 
-        compiler = GraphCompiler(optimizer=optimizer)
-        ops = compiler.compile(inputs_meta, formula, out_name=out_name, spec=spec)
+        self.compiler = GraphCompiler(optimizer=optimizer)
+        ops = self.compiler.compile(inputs_meta, formula, out_name=out_name, spec=spec)
 
         sym_to_addr = {}
         for op in ops:
@@ -163,6 +163,7 @@ class BaseOperator(ABC):
             for c in conflicts:
                 warnings.warn(f"[MemoryLayout] {c}", stacklevel=2)
 
+        self.ops = ops
         return ops
 
     def inject_data(self, program: Any, input_data: Dict[str, np.ndarray], vector_lanes: int, spec: Any = None):

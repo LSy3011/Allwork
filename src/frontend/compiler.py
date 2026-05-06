@@ -156,11 +156,8 @@ class GraphCompiler:
         raise NotImplementedError(f"Compiler Error: 未在算子库中找到匹配内核 {type(expr)}: {expr}")
 
     def _get_op(self, arg):
-        # 🛸 [V6.1 FIX] 优先检查是否为 CSE 变量，强制执行 Reload 逻辑
-        if arg in self.cse_vars:
-            self.inl_cnt += 1
-            return self.b.make_op("UR_READ", f"{arg}_rld_{self.inl_cnt}", RT.UR_READ, [f"spill_{arg}"], meta_name=str(arg), role="intermediate")
-        
+        # 🛸 [V6.2 FIX] CSE 变量现在统一且自动由 PhysicalGraphOptimizer 进行全局生命周期审计与溢出/重载 (Spill-Reload) 变换
+        # 编译器前端仅需返回 mir_env 中的原始节点，构建纯净的数据流图
         if arg in self.mir_env: return self.mir_env[arg]
         if arg in self.inputs_meta or str(arg) in self.inputs_meta: return self._get_input(arg)
         

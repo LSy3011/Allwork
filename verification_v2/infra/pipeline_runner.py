@@ -17,7 +17,7 @@ class PipelineRunner:
         self.output_root = "build/verification_v2"
         os.makedirs(self.output_root, exist_ok=True)
 
-    def run_full_stack(self, operator: Any, input_data: Dict[str, np.ndarray]):
+    def run_full_stack(self, operator: Any, input_data: Dict[str, np.ndarray], op_name: str = None):
         if self.show_review:
             print(f"\n>>> Starting Pipeline Runner...")
         
@@ -36,7 +36,7 @@ class PipelineRunner:
                 print(f"  Node: {op.trace_id:<15} | Type: {op.op_type:<10} | Meta: {op.metadata}")
                 
         synth = UCodeSynthesizer(self.spec)
-        result = synth.solve_with_units(ops, MII=1, MAX_II=32)
+        result = synth.solve_with_units(ops, MII=1, MAX_II=64)
         if not result:
             raise RuntimeError("Synthesis failed.")
         
@@ -44,7 +44,7 @@ class PipelineRunner:
         for op in ops:
             op.metadata["global_t"] = schedule[op.trace_id]
             op.metadata["unit_id"] = unit_map.get(op.trace_id)
-
+ 
         v_level = 3 if self.show_model else (2 if self.show_review else 1)
         assembler = PhysicalAssembler(self.spec, verbosity=v_level)
         
@@ -56,7 +56,7 @@ class PipelineRunner:
              
         num_loop_iters = len(input_data[input_key]) // vector_lanes
         physical_instrs = assembler.assemble(ops, II=II, num_iterations=num_loop_iters)
-
+ 
         operator.inject_data(program, input_data, vector_lanes=vector_lanes, spec=self.spec)
         golden_res = operator.get_golden(input_data, vector_lanes=vector_lanes)
         
@@ -69,8 +69,9 @@ class PipelineRunner:
                 shape=t_shape,
                 role=config["role"]
             )
-
-        op_name = operator.__class__.__name__.lower()
+ 
+        if op_name is None:
+            op_name = operator.__class__.__name__.lower()
         output_dir = os.path.join(self.output_root, op_name)
         os.makedirs(output_dir, exist_ok=True)
         
@@ -109,13 +110,33 @@ class PipelineRunner:
             if res.returncode != 0:
                 print(f"[ERROR] Physical simulation failed. Check {log_path}")
 
+        # 🛸 [V6.4] 解析并控制台实时回显 SMC 仿真比对结果
+        if os.path.exists(log_path):
+            with open(log_path, "r") as f:
+                lines = f.readlines()
+            start_idx = -1
+            for idx, line in enumerate(lines):
+                if "Simulation Finished" in line and "Verifying Data..." in line:
+                    start_idx = idx
+                    break
+            if start_idx != -1:
+                print("\n>>> SMC Physical Simulation Numerical Verification:")
+                for line in lines[start_idx:]:
+                    print("  " + line.strip("\n"))
+            else:
+                # Fallback: Just print last 10 lines if "Simulation Finished" is not matched
+                print("\n>>> SMC Physical Simulation Numerical Verification:")
+                for line in lines[-10:]:
+                    print("  " + line.strip("\n"))
+
         return {
             "output_dir": output_dir,
             "log_path": log_path,
             "schedule": schedule,
             "II": II,
             "physical_instrs": physical_instrs,
-            "num_iterations": num_loop_iters
+            "num_iterations": num_loop_iters,
+            "sim_success": (res.returncode == 0)
         }
 
     def _patch_max_cycles(self, output_dir: str, max_cycles: int):

@@ -60,7 +60,7 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     
     # 2. 运行流水线
     runner = PipelineRunner(hw_config_name=hw_config_name, show_review=show_r, show_model=show_m)
-    ctx = runner.run_full_stack(operator, input_data)
+    ctx = runner.run_full_stack(operator, input_data, op_name=op_name)
     
     if not ctx:
         return False
@@ -80,7 +80,10 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
         print("\n[FAIL-FAST] Header Audit failed. Stopping pipeline.")
         return False
         
-    if auditor.audit_truth_alignment(ctx["log_path"], num_iterations=ctx["num_iterations"]):
+    sim_ok = ctx.get("sim_success", True)
+    align_ok = auditor.audit_truth_alignment(ctx["log_path"], num_iterations=ctx["num_iterations"])
+    
+    if align_ok and sim_ok:
         print("\n" + "*"*10 + f" ALL PHYSICAL CHECKS PASSED FOR {op_name.upper()} " + "*"*10)
         return True
     else:
