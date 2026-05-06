@@ -1,6 +1,6 @@
 name: "hardsigmoid"
-# hardsigmoid: 0.0 if x < -2.5 else (1.0 if x > 2.5 else 0.2*x + 0.5)
-formula: "Piecewise((0.0, x < -2.5), (1.0, x > 2.5), (0.2 * x + 0.5, True))"
+# hardsigmoid using Min/Max: Min(1.0, Max(0.0, 0.2 * x + 0.5))
+formula: "Min(1.0, Max(0.0, 0.2 * x + 0.5))"
 tensors:
   x: { bank: 0, role: "input", offset: 0 }
   constants: { bank: 7, role: "constant", offset: 0 }

@@ -122,7 +122,8 @@ class PhysicalMemoryLayout:
                 f"[MemoryLayout] Scratch bank {self._scratch_bank} 已满 "
                 f"({self._depth} 个 slot)，无法为 '{name}' 分配。"
             )
-        self._scratch_offset += 1
+        # 🛸 [BUG-FIX] 将步长由 1 改为 16，防止多迭代（Loop Iterations）时的 stride 地址叠加冲突
+        self._scratch_offset += 16
 
         record = AllocationRecord(
             name=f"_scratch_{canonical}", logical_addr=logical, role="scratch",
