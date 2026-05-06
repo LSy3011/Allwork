@@ -15,12 +15,10 @@ class MockProgram:
                 i: [np.zeros(vector_lanes, dtype=dtype) for _ in range(bank_depth)] 
                 for i in range(bank_num)
             }
-    
     def __init__(self, spec: Any, dtype: Any = np.float32):
-        # 🛸 从 spec 提取物理参数
         self.vector_width_bits = getattr(spec.params, "PARAM_SMC_VECTOR_WIDTH", 128)
-        self.element_bits = 32 # 默认为 32
-        if dtype == np.float16: self.element_bits = 16
+        # 🛸 [V6.6 FIX] 使用 numpy.dtype.itemsize 动态获取数据类型的物理位宽，彻底拆除任何 FP32/FP16 精度硬编码
+        self.element_bits = np.dtype(dtype).itemsize * 8
         
         self.vector_lanes = self.vector_width_bits // self.element_bits
         self.bank_num = getattr(spec.params, "PARAM_UR_BANK_NUM", 8)

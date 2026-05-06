@@ -29,7 +29,16 @@ class ConfigurableOperator(BaseOperator):
 
     @property
     def element_bits(self) -> int:
-        return 32 # 默认 32
+        # 🛸 [V6.5 FIX] 动态解析 YAML 精度配置，解决 FP16/INT8 等多精度混合场景下的硬编码问题
+        for name, config in self.tensors_cfg.items():
+            prec = config.get("precision") or config.get("element_bits")
+            if prec:
+                if isinstance(prec, int): return prec
+                prec = str(prec).lower()
+                if "16" in prec: return 16
+                if "8" in prec: return 8
+                if "4" in prec: return 4
+        return 32
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
         # 1. 解析公式

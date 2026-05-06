@@ -69,11 +69,36 @@ class Auditor:
             
         return all_passed
 
-    def _evaluate_expected_values(self, ops, input_data, iter_idx, vector_lanes=4):
+    def _evaluate_expected_values(self, ops, input_data, iter_idx, vector_lanes=None):
         import numpy as np
         env = {}
         if not ops or not input_data:
             return env
+            
+        # 🛸 [V6.4 FIX] 统一且鲁棒的动态 SIMD 物理通道（vector_lanes）计算，拒绝硬编码 4
+        if vector_lanes is None:
+            element_bits = 32
+            for op in ops:
+                p = op.metadata.get("precision") or op.metadata.get("element_bits")
+                if p:
+                    if isinstance(p, int): 
+                        element_bits = p
+                        break
+                    p_str = str(p).lower()
+                    if "16" in p_str: 
+                        element_bits = 16
+                        break
+                    if "8" in p_str: 
+                        element_bits = 8
+                        break
+                    if "4" in p_str: 
+                        element_bits = 4
+                        break
+            
+            vector_width_bits = 128 # default fallback
+            if self.spec and hasattr(self.spec, "params"):
+                vector_width_bits = getattr(self.spec.params, "PARAM_SMC_VECTOR_WIDTH", 128)
+            vector_lanes = vector_width_bits // element_bits
             
         op_map = {op.trace_id: op for op in ops}
         

@@ -11,6 +11,7 @@ TensorObj = namedtuple("TensorObj", ["bank", "offset", "shape", "role"])
 
 class PipelineRunner:
     def __init__(self, hw_config_name: str = "hw_config", show_review: bool = True, show_model: bool = False):
+        self.hw_config_name = hw_config_name
         self.spec = HardwareSpec.load(hw_config_name)
         self.show_review = show_review
         self.show_model = show_model
@@ -81,7 +82,7 @@ class PipelineRunner:
             print(f"[RUNNER] Dynamic Max Cycles set to: {safe_max_cycles}")
 
         v_level = 3 if self.show_model else (2 if self.show_review else 1)
-        packer = LIRPacker("hw_config", verbosity=v_level)
+        packer = LIRPacker(self.hw_config_name, verbosity=v_level)
         packer.emit_from_instructions(physical_instrs, output_dir, program=program)
         self._patch_max_cycles(output_dir, safe_max_cycles)
         

@@ -87,16 +87,29 @@ class LIRPacker:
     def _handle_program_data(self, program, ur_dir, sim_conf):
         """处理 Bank 数据初始化与 Tensor 元数据映射。"""
         v_lanes = program.vector_lanes
+        element_bits = getattr(program, "element_bits", 32)
+        
+        # 🛸 [V6.7 FIX] 动态选择打包格式与移位参数，支持 FP32/FP16/INT8 等全精度类型，彻底拆除硬件打包硬编码
+        if element_bits == 32:
+            pack_fmt, unpack_fmt, bit_shift, hex_len_factor = '<f', '<I', 32, 8
+        elif element_bits == 16:
+            # Python 3.6+ 支持 '<e' 表达 16-bit 浮点数，'<H' 表达 16-bit 无符号短整型
+            pack_fmt, unpack_fmt, bit_shift, hex_len_factor = '<e', '<H', 16, 4
+        elif element_bits == 8:
+            pack_fmt, unpack_fmt, bit_shift, hex_len_factor = '<b', '<B', 8, 2
+        else:
+            pack_fmt, unpack_fmt, bit_shift, hex_len_factor = '<f', '<I', 32, 8 # fallback
+
         for b_id, storage in program.memory_allocator.banks.items():
             with open(ur_dir / f"bank{b_id}.hex", "w") as f:
                 for entry in storage:
                     # 假定每个 word 是 v_lanes 个元素
-                    # 🛸 动态打包 128bit/256bit 向量
+                    # 🛸 动态打包各精度向量
                     hex_val = 0
                     for i in range(v_lanes):
-                        val_bits = struct.unpack('<I', struct.pack('<f', entry[v_lanes-1-i]))[0]
-                        hex_val = (hex_val << 32) | val_bits
-                    f.write(f"{hex_val:0{v_lanes*8}x}\n")
+                        val_bits = struct.unpack(unpack_fmt, struct.pack(pack_fmt, entry[v_lanes-1-i]))[0]
+                        hex_val = (hex_val << bit_shift) | val_bits
+                    f.write(f"{hex_val:0{v_lanes*hex_len_factor}x}\n")
         
         for name, obj in program.tensors.items():
             sim_conf["tensors"].append({
