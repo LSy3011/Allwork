@@ -54,10 +54,12 @@ class Auditor:
             vld       = (header_val >> 40) & 0x1
             
             if vld == 1:
-                if self.show_review:
+                if self.show_model:
                     print(f"  Unit: {unit_name:<12} | EMB:{embed} | INC_E:{inc_embed} | LOOPS:{loops} [PASS]")
                 
                 if embed == 0 or ("ur-" in unit_name and inc_embed == 0):
+                    if not self.show_model:
+                        print(f"  Unit: {unit_name:<12} | EMB:{embed} | INC_E:{inc_embed} | LOOPS:{loops} [FAIL]")
                     print(f"    [FAIL] Unit {unit_name} misconfigured.")
                     all_passed = False
         
@@ -212,9 +214,12 @@ class Auditor:
 
     def audit_truth_alignment(self, log_path: str, num_iterations: int = 1, ops: List[Any] = None, input_data: Dict[str, np.ndarray] = None):
         """进行时序对齐与数值审计（智能静默模式）。"""
-        if self.show_review:
+        # 🛸 延迟/调试模式控制头信息打印
+        self._header_printed = False
+        if self.show_model:
             print("\n" + "="*20 + " SMT-DRIVEN RIGID AUDIT REPORT (V27.5) " + "="*20)
             print(f"  [CONTRACT] Physical_Cycle = 2 + SMT_t | Iters: {num_iterations}")
+            self._header_printed = True
         
         # 1. 加载元数据
         schedule_path = self.output_dir / "compiler_schedule.json"
@@ -349,12 +354,18 @@ class Auditor:
                             msg += f"\n    [DIAGNOSIS] Found at {found_at}, Offset should be {found_at - t_base}"
                 debug_buffer.append(msg)
 
-            # --- 智能打印策略 ---
+            # --- 智能分级打印策略 ---
             if op_failed:
                 all_matched = False
+                # 失败时若之前未打印头，则懒加载打印头信息
+                if not self._header_printed:
+                    print("\n" + "="*20 + " SMT-DRIVEN RIGID AUDIT REPORT (V27.5) " + "="*20)
+                    print(f"  [CONTRACT] Physical_Cycle = 2 + SMT_t | Iters: {num_iterations}")
+                    self._header_printed = True
                 print(f"\n[FAIL] Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base} [FAILED]")
                 for line in debug_buffer: print(line)
-            elif self.show_review:
+            elif self.show_model:
+                # 仅在使能 show_model (debug) 模式时，才打印通过单元的全部时序与数值对比
                 print(f"\n>>> Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base}")
                 for line in debug_buffer: print(line)
 

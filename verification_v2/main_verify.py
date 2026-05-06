@@ -71,7 +71,7 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     # 解析实际轨迹用于对齐图 (下沉到 PipelineRunner)
     actual_activity = runner.parse_simulation_timeline(ctx["output_dir"])
 
-    print_aligned_timeline(ctx["schedule"], actual_activity, ctx["II"], max_cycles=50, show_review=show_r)
+    print_aligned_timeline(ctx["schedule"], actual_activity, ctx["II"], max_cycles=50, show_review=show_m)
 
     # 4. 分阶段审计 (Fail-Fast)
     auditor = Auditor(ctx["output_dir"], runner.spec, show_review=show_r, show_model=show_m)
