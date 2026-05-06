@@ -81,7 +81,12 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
         return False
         
     sim_ok = ctx.get("sim_success", True)
-    align_ok = auditor.audit_truth_alignment(ctx["log_path"], num_iterations=ctx["num_iterations"])
+    align_ok = auditor.audit_truth_alignment(
+        ctx["log_path"], 
+        num_iterations=ctx["num_iterations"],
+        ops=ctx.get("ops"),
+        input_data=input_data
+    )
     
     if align_ok and sim_ok:
         print("\n" + "*"*10 + f" ALL PHYSICAL CHECKS PASSED FOR {op_name.upper()} " + "*"*10)

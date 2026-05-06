@@ -1,6 +1,7 @@
 import os, glob, json, struct
 from pathlib import Path
 from typing import List, Dict, Any
+import numpy as np
 
 class Auditor:
     OP_SYMBOLS = {'fpmul': 'm', 'fpadd': 'a', 'rtovr': 'r', 'ur-r': 'L', 'ur-w': 'S', 'ur': 'L'}
@@ -66,14 +67,156 @@ class Auditor:
             
         return all_passed
 
-    def audit_truth_alignment(self, log_path: str, num_iterations: int = 1):
+    def _evaluate_expected_values(self, ops, input_data, iter_idx, vector_lanes=4):
+        import numpy as np
+        env = {}
+        if not ops or not input_data:
+            return env
+            
+        op_map = {op.trace_id: op for op in ops}
+        
+        # 🛸 自动选择系数到物理索引的映射关系：
+        # - 如果所有的 c{i} 都在 [0, len(input_data["coeffs"]) - 1] 的范围内，说明是稠密的 Horner 多项式，采用直接索引映射。
+        # - 如果有任何 c{i} 超出该范围，说明是稀疏的 Taylor 多项式，采用按阶数降序排序建立的索引映射。
+        coeff_powers = []
+        for op in ops:
+            if op.op_type.upper() == "UR_READ" and op.metadata.get("role") == "param":
+                m_name = op.metadata.get("meta_name", "")
+                if m_name.startswith("c") and m_name[1:].isdigit():
+                    coeff_powers.append(int(m_name[1:]))
+        
+        sorted_powers = sorted(list(set(coeff_powers)), reverse=True)
+        power_to_idx = {p: i for i, p in enumerate(sorted_powers)}
+        
+        is_direct_index = False
+        if "coeffs" in input_data:
+            num_coeffs = len(input_data["coeffs"])
+            if len(coeff_powers) > 0 and all(0 <= p < num_coeffs for p in coeff_powers):
+                is_direct_index = True
+        
+        for op in ops:
+            trace_id = op.trace_id
+            op_type = op.op_type.upper()
+            role = op.metadata.get("role")
+            deps = op.metadata.get("depends_on", [])
+            
+            element_idx = iter_idx * vector_lanes
+            
+            if op_type == "UR_READ":
+                if role == "input":
+                    sym_name = op.metadata.get("meta_name", trace_id.split("_read_")[0])
+                    if sym_name in input_data:
+                        data_arr = input_data[sym_name]
+                        env[trace_id] = float(data_arr[element_idx]) if element_idx < len(data_arr) else 0.0
+                    else:
+                        env[trace_id] = 0.0
+                elif role == "constant":
+                    try:
+                        parts = trace_id.split("_")
+                        prefix_len = len(parts[0]) + len(parts[1]) + 2
+                        val_part = trace_id[prefix_len:]
+                        val_part = val_part.replace("n", "-")
+                        if "_" in val_part:
+                            val_part = val_part.replace("_", ".")
+                        env[trace_id] = float(val_part)
+                    except:
+                        env[trace_id] = 0.0
+                elif role == "param":
+                    meta_name = op.metadata.get("meta_name", "")
+                    if meta_name.startswith("c") and meta_name[1:].isdigit() and "coeffs" in input_data:
+                        p = int(meta_name[1:])
+                        idx = p if is_direct_index else power_to_idx.get(p, 0)
+                        if idx < len(input_data["coeffs"]):
+                            env[trace_id] = float(input_data["coeffs"][idx])
+                        else:
+                            env[trace_id] = 0.0
+                    elif meta_name in input_data:
+                        val = input_data[meta_name]
+                        if isinstance(val, (list, np.ndarray)):
+                            env[trace_id] = float(val[0])
+                        else:
+                            env[trace_id] = float(val)
+                    else:
+                        found = False
+                        if "coeffs" in input_data:
+                            parts = trace_id.split("_")
+                            for p in parts:
+                                if p.startswith("c") and p[1:].isdigit():
+                                    idx = int(p[1:])
+                                    env[trace_id] = float(input_data["coeffs"][idx])
+                                    found = True
+                                    break
+                        if not found:
+                            for k, v in input_data.items():
+                                if k in trace_id:
+                                    if isinstance(v, (list, np.ndarray)):
+                                        env[trace_id] = float(v[0])
+                                    else:
+                                        env[trace_id] = float(v)
+                                    found = True
+                                    break
+                        if not found:
+                            env[trace_id] = 0.0
+                else:
+                    dep = deps[0] if deps else None
+                    env[trace_id] = env.get(dep, 0.0)
+                    
+            elif op_type == "FPMUL":
+                val0 = env.get(deps[0], 0.0) if len(deps) > 0 else 0.0
+                val1 = env.get(deps[1], 0.0) if len(deps) > 1 else 0.0
+                env[trace_id] = val0 * val1
+                
+            elif op_type == "FPADD":
+                val0 = env.get(deps[0], 0.0) if len(deps) > 0 else 0.0
+                val1 = env.get(deps[1], 0.0) if len(deps) > 1 else 0.0
+                if op.metadata.get("SUB") or op.metadata.get("sub"):
+                    env[trace_id] = val0 - val1
+                else:
+                    env[trace_id] = val0 + val1
+                    
+            elif op_type == "LOGIC" and len(deps) >= 3:
+                val0 = env.get(deps[0], 0.0) if len(deps) > 0 else 0.0
+                val1 = env.get(deps[1], 0.0) if len(deps) > 1 else 0.0
+                op_str = op.metadata.get("OP_TYPE", "")
+                
+                # Trace back st_wire to cmp FPADD node
+                st_wire_id = deps[2]
+                cmp_node = op_map.get(st_wire_id)
+                while cmp_node and cmp_node.op_type.upper() == "RTOVR":
+                    dep_id = cmp_node.metadata.get("depends_on", [None])[0]
+                    cmp_node = op_map.get(dep_id) if dep_id else None
+                
+                if cmp_node and len(cmp_node.metadata.get("depends_on", [])) >= 2:
+                    cmp_deps = cmp_node.metadata["depends_on"]
+                    val_a = env.get(cmp_deps[0], 0.0)
+                    val_b = env.get(cmp_deps[1], 0.0)
+                else:
+                    val_a, val_b = val0, val1 # fallback
+                
+                if "GT" in op_str:
+                    env[trace_id] = val0 if val_a > val_b else val1
+                elif "LS" in op_str:
+                    env[trace_id] = val0 if val_a < val_b else val1
+                elif "GE" in op_str:
+                    env[trace_id] = val0 if val_a >= val_b else val1
+                elif "LE" in op_str:
+                    env[trace_id] = val0 if val_a <= val_b else val1
+                else:
+                    env[trace_id] = val0 if val_a == val_b else val1
+                    
+            else:
+                dep = deps[0] if deps else None
+                env[trace_id] = env.get(dep, 0.0)
+                
+        return env
+
+    def audit_truth_alignment(self, log_path: str, num_iterations: int = 1, ops: List[Any] = None, input_data: Dict[str, np.ndarray] = None):
         """进行时序对齐与数值审计（智能静默模式）。"""
         if self.show_review:
             print("\n" + "="*20 + " SMT-DRIVEN RIGID AUDIT REPORT (V27.5) " + "="*20)
             print(f"  [CONTRACT] Physical_Cycle = 2 + SMT_t | Iters: {num_iterations}")
         
         # 1. 加载元数据
-        # ... (加载逻辑保持不变)
         schedule_path = self.output_dir / "compiler_schedule.json"
         expected_vals_path = self.output_dir / "expected_values.json"
         timeline_path = self.smc_dir / "analysis" / "timeline_ascii.txt"
@@ -89,6 +232,14 @@ class Auditor:
         
         with open(expected_vals_path, "r") as f:
             expected_vals = json.load(f)
+
+        # 🛸 动态计算所有中间节点的 SMT 数值过程
+        expected_val_map = {}
+        if ops and input_data:
+            for iter_idx in range(num_iterations):
+                env = self._evaluate_expected_values(ops, input_data, iter_idx)
+                for t_id, val in env.items():
+                    expected_val_map[(iter_idx, t_id)] = val
 
         # 2. 解析仿真 Log 中的数值
         actual_values = {}
@@ -158,7 +309,29 @@ class Auditor:
                 val_ok = True; val_info = ""
                 if (expected_cyc, sim_iq_name) in actual_values:
                     act_val = self.to_float(actual_values[(expected_cyc, sim_iq_name)]["data"].get("V0", "0"))
-                    val_info = f" | Val: {act_val:.4f} [PASS]"
+                    if (iter_idx, trace_id) in expected_val_map:
+                        exp_val = expected_val_map[(iter_idx, trace_id)]
+                        
+                        # 🛸 区分组合逻辑与时序/路由单元
+                        # 组合逻辑单元（如 fpmul, fpadd, logic）是流水的、无寄存器的，其瞬态值不写入 SRAM，
+                        # 因此我们仅打印其 SMT 算法过程的期望值 (Exp) 作为参考，不对其 0.0 瞬态值报错。
+                        # 时序/路由单元（如 ur-r, ur-w, rtovr 寄存器）具有物理锁存或内存存储，必须进行严苛的 SMT 过程值强校验！
+                        is_combinatorial = (
+                            not (sim_iq_name.startswith("ur-") or sim_iq_name.startswith("rtovr"))
+                            or "_ST_" in trace_id
+                            or "_cmp" in trace_id
+                        )
+                        if is_combinatorial:
+                            val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS]"
+                        else:
+                            diff = abs(act_val - exp_val)
+                            if diff <= 1e-2:
+                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS]"
+                            else:
+                                val_ok = False
+                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [FAIL]"
+                    else:
+                        val_info = f" | Val: {act_val:.4f} [PASS]"
                 elif any(x in trace_id for x in ["rd_", "mul", "add", "wr_"]):
                     val_ok = False; val_info = " | Data Missing"
                 

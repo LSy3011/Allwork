@@ -136,7 +136,8 @@ class PipelineRunner:
             "II": II,
             "physical_instrs": physical_instrs,
             "num_iterations": num_loop_iters,
-            "sim_success": (res.returncode == 0)
+            "sim_success": (res.returncode == 0),
+            "ops": ops
         }
 
     def _patch_max_cycles(self, output_dir: str, max_cycles: int):
