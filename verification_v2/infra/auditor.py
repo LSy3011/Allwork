@@ -142,6 +142,8 @@ class Auditor:
                         parts = trace_id.split("_")
                         prefix_len = len(parts[0]) + len(parts[1]) + 2
                         val_part = trace_id[prefix_len:]
+                        if "_dup" in val_part:
+                            val_part = val_part.split("_dup")[0]
                         val_part = val_part.replace("n", "-")
                         if "_" in val_part:
                             val_part = val_part.replace("_", ".")
