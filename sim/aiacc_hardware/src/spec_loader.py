@@ -51,9 +51,17 @@ class SpecLoader:
     负责加载增强型的硬件规格文件，并提供类型安全的数据访问。
     """
     def __init__(self):
-        # Dynamically determine the specs directory relative to this file's location
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        self.base_dir = os.path.join(os.path.dirname(current_dir), "specs")
+        specs_ptr = os.path.join(os.path.dirname(current_dir), "specs")
+        
+        # 🛸 [V5.4 FIX] Handle "redirect file" for specs directory (common on Windows dev environments)
+        if os.path.isfile(specs_ptr):
+            with open(specs_ptr, "r") as f:
+                rel_path = f.read().strip()
+                self.base_dir = os.path.abspath(os.path.join(os.path.dirname(specs_ptr), rel_path))
+        else:
+            self.base_dir = specs_ptr
+            
         self.units_dir = os.path.join(self.base_dir, "units")
         self.system_dir = os.path.join(self.base_dir, "system")
 

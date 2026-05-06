@@ -108,12 +108,14 @@ class PhysicalAssembler:
                     header = SMIHeader(vld=1, inc=0, dly=0, inc_embed=op_mask)
                     payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
                     
-                    bank_depth = getattr(self.hw_spec.params, "PARAM_UR_BANK_DEPTH", 256)
-                    bank_num = getattr(self.hw_spec.params, "PARAM_UR_BANK_NUM", 8)
-
-                    if "ADDR" in payload:
-                        payload["ADDR"] = addr % bank_depth
-                        payload["BANK"] = (addr // bank_depth) % bank_num
+                    # [Phase 2 SSoT] 统一使用 PhysicalMemoryLayout 解析地址
+                    is_ur_iq = "ur-" in iq_name.lower()
+                    if is_ur_iq:
+                        from src.core.memory_layout import PhysicalMemoryLayout
+                        layout = PhysicalMemoryLayout.from_spec(self.hw_spec)
+                        bank_id, offset = layout.resolve(int(addr))
+                        payload["BANK"] = bank_id
+                        payload["ADDR"] = offset
                     trace_id = op.trace_id
                 else:
                     header = SMIHeader(vld=0, inc=0, dly=0, inc_embed=0)
@@ -129,46 +131,8 @@ class PhysicalAssembler:
         return physical_instructions
 
     def _resolve_physical_payload(self, op: Any, trace_to_slot: Dict[str, int], trace_to_type: Dict[str, str]) -> Dict[str, Any]:
-        res = copy.deepcopy(op.metadata.get("physical_attrs", {}))
-        m_type = str(op.op_type).upper().strip()
-        res["SRC_PREC"] = 1; res["DST_PREC"] = 1
-        
-        if m_type in ["FPADD", "FPMUL"]:
-            res["VALID"] = 1
-            if m_type == "FPADD":
-                res["SUB"] = 1 if (op.metadata.get("logic_op") == "SUB" or op.trace_id.startswith("sub")) else 0
-                res["UPDATE_ST"] = 1
-            
-        if m_type in ["UR_READ", "UR_WRITE"]:
-            res["VALID"] = 1
-            addr = op.metadata.get("logical_addr")
-            if addr is not None:
-                bank_depth = getattr(self.hw_spec.params, "PARAM_UR_BANK_DEPTH", 256)
-                bank_num = getattr(self.hw_spec.params, "PARAM_UR_BANK_NUM", 8)
-                res["ADDR"] = addr % bank_depth
-                res["BANK"] = (addr // bank_depth) % bank_num
-            if m_type == "UR_WRITE":
-                res["WBE"] = 0xFFFF
-
-        if "RTOVR" in m_type:
-            inputs = op.metadata.get("depends_on", [])
-            if inputs:
-                src_tid = self._get_clean_id(inputs[0])
-                src_type = trace_to_type.get(src_tid, "UNKNOWN")
-                src_slot = trace_to_slot.get(src_tid, 0)
-                res["VALID"] = 1
-                dr_map = self.hw_spec.get_dr_map()
-                if src_type in dr_map:
-                    res["SEL"] = dr_map[src_type].get("D", 0)
-                elif src_type == "UR_READ":
-                    base_ur = self._get_registry_val("UR_READ")
-                    idx = src_slot - base_ur
-                    unit_key = f"UR_READ_{idx}"
-                    res["SEL"] = dr_map.get(unit_key, {}).get("D", base_ur + idx)
-                else:
-                    res["SEL"] = 0
-            else:
-                res["SEL"] = 0
-        if m_type not in ["RTOVR"]:
-            res["SMC_ID"] = 0
-        return res
+        """
+        [Phase 3] 代理至 UnitPayloadFactory 处理，摒弃硬编码字典。
+        """
+        from src.driver.payload_factory import UnitPayloadFactory
+        return UnitPayloadFactory.build(op, trace_to_slot, trace_to_type, self.hw_spec)

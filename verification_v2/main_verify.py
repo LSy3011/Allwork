@@ -11,14 +11,24 @@ from verification_v2.infra.pipeline_runner import PipelineRunner
 from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
+from verification_v2.ops.configurable import ConfigurableOperator
 
-# 算子注册表：未来新增算子只需在此添加映射
 OPERATOR_MAP = {
     "horner": HornerOperator,
     "sin3":   HornerOperator,
     "sin5":   HornerOperator,
     "sin5_taylor": TaylorOperator
 }
+
+# 🛸 [V5.0] 自动扫描 YAML 算子配置并注册
+OPS_DIR = os.path.join(os.path.dirname(__file__), "ops")
+if os.path.exists(OPS_DIR):
+    for f in os.listdir(OPS_DIR):
+        if f.endswith(".yaml"):
+            op_name = f.replace(".yaml", "")
+            yaml_path = os.path.join(OPS_DIR, f)
+            # 使用 lambda 延迟加载，模拟类构造行为
+            OPERATOR_MAP[op_name] = lambda path=yaml_path, **kwargs: ConfigurableOperator(path)
 
 # 默认批处理算子参数
 DEFAULT_OP_ARGS = {
@@ -39,7 +49,7 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
 
     # 1. 动态准备算子与数据
     if op_name not in OPERATOR_MAP:
-        print(f"❌ [ERROR] Operator '{op_name}' not found in registry.")
+        print(f"[ERROR] Operator '{op_name}' not found in registry.")
         return False
 
     # 实例化算子（通过参数注入实现去硬编码）
@@ -67,14 +77,14 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     auditor = Auditor(ctx["output_dir"], runner.spec, show_review=show_r, show_model=show_m)
     
     if not auditor.audit_physical_headers():
-        print("\n❌ [FAIL-FAST] Header Audit failed. Stopping pipeline.")
+        print("\n[FAIL-FAST] Header Audit failed. Stopping pipeline.")
         return False
         
     if auditor.audit_truth_alignment(ctx["log_path"], num_iterations=ctx["num_iterations"]):
-        print("\n" + "✨"*10 + f" ALL PHYSICAL CHECKS PASSED FOR {op_name.upper()} " + "✨"*10)
+        print("\n" + "*"*10 + f" ALL PHYSICAL CHECKS PASSED FOR {op_name.upper()} " + "*"*10)
         return True
     else:
-        print("\n" + "❌"*10 + f" VERIFICATION FAILED FOR {op_name.upper()} " + "❌"*10)
+        print("\n" + "!"*10 + f" VERIFICATION FAILED FOR {op_name.upper()} " + "!"*10)
         return False
 
 def main():
@@ -106,7 +116,7 @@ def main():
         print("\n" + "="*20 + " BATCH VERIFICATION REPORT " + "="*20)
         all_passed = True
         for op, success in results.items():
-            status = "✅ PASS" if success else "❌ FAIL"
+            status = "[PASS]" if success else "[FAIL]"
             print(f"[{op.upper()}]: {status}")
             if not success: all_passed = False
         sys.exit(0 if all_passed else 1)

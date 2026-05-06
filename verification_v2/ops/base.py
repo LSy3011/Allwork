@@ -51,7 +51,7 @@ class BaseOperator(ABC):
         config = self.tensor_configs.get(name)
         if not config:
             raise ValueError(f"Tensor '{name}' not found in tensor_configs.")
-        return config["bank"] * bank_depth
+        return config["bank"] * bank_depth + config.get("offset", 0)
 
     def _find_free_bank(self, spec: Any) -> int:
         used_banks = {cfg["bank"] for cfg in self.tensor_configs.values() if "bank" in cfg}
@@ -68,41 +68,83 @@ class BaseOperator(ABC):
             config = self.tensor_configs[name]
             default_stride = 1 if config.get("role") == "input" else 0
             stride = config.get("stride", default_stride)
+            
+            # 提取基础元数据
+            meta_data = {
+                "logical_addr": addr_base, 
+                "stride": stride, 
+                "role": config.get("role", "operand")
+            }
+            
+            # [Phase 4] 提取 YAML 中用户自定义的所有其它扩展属性 (如 shape, cast_to, loop_bind)
+            for k, v in config.items():
+                if k not in ["bank", "offset", "stride", "role"]:
+                    meta_data[k] = v
+
             if isinstance(symbol, list):
                 for i, sym in enumerate(symbol):
-                    meta[sym] = {"logical_addr": addr_base + i, "stride": stride, "role": "operand"}
+                    meta_i = dict(meta_data)
+                    meta_i["logical_addr"] = addr_base + i
+                    meta[sym] = meta_i
             else:
-                meta[symbol] = {"logical_addr": addr_base, "stride": stride, "role": "operand"}
+                meta[symbol] = meta_data
         return meta
 
     def compile_with_adpc(self, formula, inputs_meta: Dict, out_name: str = "y", out_addr: int = None, spec: Any = None) -> List[Any]:
         from src.frontend.compiler import GraphCompiler
-        compiler = GraphCompiler()
-        ops = compiler.compile(inputs_meta, formula, out_name=out_name)
-        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
-        free_bank = self._find_free_bank(spec)
-        temp_base = free_bank * bank_depth 
+        from src.core.memory_layout import PhysicalMemoryLayout
+        from src.frontend.optimizer import PhysicalGraphOptimizer
+
+        # [Phase 2] 构建统一地址仲裁者
+        layout = PhysicalMemoryLayout.from_spec(spec)
+
+        # 登记所有已知 tensor（输入、输出、常数）
+        for name, cfg in self.tensor_configs.items():
+            if "bank" in cfg:
+                layout.declare_tensor(
+                    name=name,
+                    bank=cfg["bank"],
+                    offset=cfg.get("offset", 0),
+                    role=cfg.get("role", "input")
+                )
+
+        # scratch bank 选择第一个未被占用的 bank
+        scratch_bank = layout.find_free_bank()
+        layout._scratch_bank = scratch_bank
+
+        # 将 layout 传入 optimizer（optimizer 内部使用 layout.allocate_scratch）
+        bank_depth = layout.bank_depth
+        optimizer = PhysicalGraphOptimizer(
+            scratch_bank=scratch_bank,
+            bank_depth=bank_depth,
+            layout=layout
+        )
+
+        compiler = GraphCompiler(optimizer=optimizer)
+        ops = compiler.compile(inputs_meta, formula, out_name=out_name, spec=spec)
+
         sym_to_addr = {}
-        temp_offset = 0
         for op in ops:
-            if op.op_type == "UR_WRITE" and op.metadata.get("role") == "intermediate":
-                sym_name = op.metadata.get("meta_name")
-                if sym_name not in sym_to_addr:
-                    sym_to_addr[sym_name] = temp_base + temp_offset
-                    temp_offset += 1
-                op.metadata["logical_addr"] = sym_to_addr[sym_name]
+            role = op.metadata.get("role")
+            if role == "intermediate" and op.op_type in ["UR_WRITE", "UR_READ"]:
+                # optimizer 已通过 layout 写入 logical_addr，这里只做同步检查
+                if "logical_addr" not in op.metadata:
+                    # 回退：以前的逻辑
+                    if op.op_type == "UR_WRITE":
+                        sym_name = op.trace_id.replace("spill_", "")
+                    else:
+                        spill_node_id = op.metadata.get("depends_on", [None])[0]
+                        sym_name = spill_node_id.replace("spill_", "") if spill_node_id else "anon"
+                    if sym_name not in sym_to_addr:
+                        sym_to_addr[sym_name] = layout.allocate_scratch(sym_name)
+                    op.metadata["logical_addr"] = sym_to_addr[sym_name]
                 op.metadata["stride"] = 1
+
             elif out_addr is not None and op.op_type == "UR_WRITE" and op.metadata.get("role") == "output":
                 op.metadata["logical_addr"] = out_addr
                 op.metadata["stride"] = 1
                 op.metadata["is_output"] = True
-        for op in ops:
-            if op.op_type == "UR_READ" and "logical_addr" not in op.metadata:
-                for sym_name, addr in sym_to_addr.items():
-                    if f"_{sym_name}_" in op.trace_id or op.trace_id.startswith(f"{sym_name}_"):
-                        op.metadata["logical_addr"] = addr
-                        op.metadata["stride"] = 1
-                        break
+
             if op.op_type.upper() == "RTOVR":
                 prod_ids = op.metadata.get("depends_on", [])
                 if prod_ids:
@@ -113,6 +155,14 @@ class BaseOperator(ABC):
                                 "dvr": op.metadata.get("dvr", -1),
                                 "sel": op.metadata.get("sel", -1)
                             }
+
+        # 编译期冲突检测——小问题将报警而非崩溃
+        conflicts = layout.validate_no_overlap()
+        if conflicts:
+            import warnings
+            for c in conflicts:
+                warnings.warn(f"[MemoryLayout] {c}", stacklevel=2)
+
         return ops
 
     def inject_data(self, program: Any, input_data: Dict[str, np.ndarray], vector_lanes: int, spec: Any = None):

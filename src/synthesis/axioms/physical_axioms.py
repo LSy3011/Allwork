@@ -129,8 +129,12 @@ class PhysicalAxioms(AxiomBase):
             deps = op.metadata.get("depends_on", [])
             if not deps: continue
             
-            port_names = ["S0", "S1", "S2", "S3", "D", "ST"]
-            if u_type == "UR_WRITE": port_names = ["D"]
+            # 🛸 [ENGINEERING] 修正模块信息查找路径：从 spec.modules 获取
+            unit_info = spec.modules.get(u_type, {})
+            if hasattr(unit_info, "dict"): unit_info = unit_info.dict()
+            port_names = [p.split("-")[-1] for p in unit_info.get("inputs", [])]
+            if not port_names:
+                port_names = ["S0", "S1", "S2", "S3", "ST"] # Fallback
             
             for i, dep_id in enumerate(deps):
                 producer = next((o for o in ops if o.trace_id == dep_id), None)
@@ -143,15 +147,32 @@ class PhysicalAxioms(AxiomBase):
                     # 或者根据 u_vars 进行条件绑定
                     
                     valid_iqs = spec.get_iq_ids(u_type)
+                    dr_map = spec.get_dr_map() # Unit -> Port -> ID
+                    dep_port = producer.metadata.get("dep_port", "D")
+                    
                     for idx, iq_id in enumerate(valid_iqs):
                         inst_name = f"{u_type}_{idx}" if len(valid_iqs) > 1 else u_type
                         if inst_name in dvr_map and p_name in dvr_map[inst_name]:
                             target_slot = dvr_map[inst_name][p_name]
+                            
+                            # 🛸 [ENGINEERING] 物理入口绑定：支持多端口生产者
+                            # 需要找到 RTOVR 的输入源（真正的生产者）
+                            real_producer_id = producer.metadata.get("depends_on", [None])[0]
+                            real_producer = next((o for o in ops if o.trace_id == real_producer_id), None)
+                            rp_type = real_producer.op_type.upper() if real_producer else "UNKNOWN"
+                            
+                            # 注意：在 SMT 阶段我们不知道 real_producer 最终分配到哪个实例
+                            # 但对于 RTOVR SEL 映射，通常同一类型的不同实例有规律的 SEL ID
+                            # 这里优先查找类型级别的映射，或者根据 producer 的 metadata 预设
+                            sel_id = dr_map.get(rp_type, {}).get(dep_port, 0)
+                            
                             label = f"bind_{producer.trace_id}_{inst_name}_{p_name}"
                             PhysicalAxioms._add_constraint(
                                 solver,
                                 z3.Implies(u_vars[op.trace_id] == iq_id, 
-                                           u_vars[producer.trace_id] == base_rt + target_slot),
+                                           z3.And(u_vars[producer.trace_id] == base_rt + target_slot,
+                                                  # u_vars_sel[producer.trace_id] == sel_id # 如果有 SEL 变量
+                                                  )),
                                 label
                             )
 

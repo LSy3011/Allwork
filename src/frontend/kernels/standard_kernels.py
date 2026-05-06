@@ -97,6 +97,59 @@ def lower_comparison(c, sym, expr):
     
     c.mir_env[sym] = c.b.make_op("LOGIC", str(sym), RT.LOGIC, [c._route(r0, PS.LOGIC_S0), c._route(r1, PS.LOGIC_S1), st_wire], OP_TYPE=op_type, VALID=1)
 
+@KernelRegistry.register(lambda e: isinstance(e, sp.Piecewise))
+def lower_piecewise(c, sym, expr):
+    # args 格式: [(val1, cond1), (val2, cond2), ..., (val_n, True)]
+    args = expr.args
+    if len(args) < 2 or args[-1][1] != True:
+        raise ValueError(f"Piecewise must have at least 2 branches and end with (val, True): {expr}")
+    
+    # 从后往前构建选择链 (MUX Chain)
+    # 初始默认值
+    current_op = c._get_op(args[-1][0])
+    
+    for i in range(len(args) - 2, -1, -1):
+        val_expr, cond_expr = args[i]
+        
+        # 1. 解析比较条件
+        if isinstance(cond_expr, sp.StrictGreaterThan):
+            a, b = cond_expr.args
+            op_type = "SELECT_GT"
+        elif isinstance(cond_expr, sp.GreaterThan):
+            a, b = cond_expr.args
+            op_type = "SELECT_GE"
+        elif isinstance(cond_expr, sp.StrictLessThan):
+            a, b = cond_expr.args
+            op_type = "SELECT_LS"
+        elif isinstance(cond_expr, sp.LessThan):
+            a, b = cond_expr.args
+            op_type = "SELECT_LE"
+        elif isinstance(cond_expr, sp.Eq):
+            a, b = cond_expr.args
+            op_type = "SELECT_EQ"
+        else:
+            raise ValueError(f"Unsupported condition in Piecewise: {cond_expr}")
+        
+        # 2. 生成状态对比节点 (a - b)
+        op_a = c._get_op(a)
+        op_b = c._get_op(b)
+        r0_cmp = c._route(op_a, PS.FPADD_S0)
+        r1_cmp = c._route(op_b, PS.FPADD_S1)
+        cmp_node = c.b.make_op("FPADD", f"{sym}_cmp_{i}", RT.FPADD, [r0_cmp, r1_cmp], 
+                                  UPDATE_ST=1, SUB=1)
+        
+        # 3. 生成逻辑选择节点 (IF cond_i THEN val_i ELSE current_op)
+        op_v1 = c._get_op(val_expr)
+        st_wire = c._route(cmp_node, PS.LOGIC_ST, dep_port="ST")
+        r0_sel = c._route(op_v1, PS.LOGIC_S0)
+        r1_sel = c._route(current_op, PS.LOGIC_S1)
+        
+        current_op = c.b.make_op("LOGIC", f"{sym}_mux_{i}", RT.LOGIC, 
+                                    [r0_sel, r1_sel, st_wire], 
+                                    OP_TYPE=op_type, VALID=1)
+    
+    c.mir_env[sym] = current_op
+
 # --- 3. 舍入内核 (floor, ceiling, round) ---
 
 @KernelRegistry.register(lambda e: isinstance(e, (sp.floor, sp.ceiling)))
@@ -116,7 +169,7 @@ def lower_rounding(c, sym, expr):
 
 # --- 4. 硬件函数直接映射 ---
 
-@KernelRegistry.register(lambda e: isinstance(e, sp.Function))
+@KernelRegistry.register(lambda e: isinstance(e, sp.Function) and type(e) not in (sp.Abs, sp.Max, sp.Min, sp.floor, sp.ceiling, sp.Piecewise))
 def lower_function(c, sym, expr):
     func_name = str(expr.func)
     if hasattr(RT, func_name):

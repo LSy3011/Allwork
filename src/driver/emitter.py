@@ -78,14 +78,11 @@ class LIRPacker:
             json.dump(sim_conf, f, indent=2)
 
     def _get_lookup_type(self, iq_name: str) -> str:
-        """根据 IQ 名称反查算力单元类型"""
-        iq_name = iq_name.lower()
-        if "fpmul" in iq_name: return "FPMUL"
-        if "fpadd" in iq_name: return "FPADD"
-        if "ur-r" in iq_name: return "UR_READ"
-        if "ur-w" in iq_name: return "UR_WRITE"
-        if "rtovr" in iq_name: return "RTOVR"
-        return "UNKNOWN"
+        """
+        [Phase 3] 代理至 UnitPayloadFactory 处理，摒弃硬编码字典。
+        """
+        from src.driver.payload_factory import UnitPayloadFactory
+        return UnitPayloadFactory.resolve_iq_type(iq_name, self.hw_spec)
 
     def _handle_program_data(self, program, ur_dir, sim_conf):
         """处理 Bank 数据初始化与 Tensor 元数据映射。"""
