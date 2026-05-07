@@ -144,8 +144,8 @@ def main():
                         help="JSON string for operator kwargs")
     parser.add_argument("--hw-config", type=str, default="hw_config",
                         help="Hardware configuration name")
-    parser.add_argument("--n-rows", type=int, default=16,
-                        help="Number of data rows to verify (Default: 16)")
+    parser.add_argument("--n-rows", type=int, default=256,
+                        help="Number of data rows to verify (Default: 256)")
     parser.add_argument("--review", action="store_true", default=True)
     parser.add_argument("--no-review", action="store_false", dest="review")
     parser.add_argument("--model", action="store_true", default=False)
