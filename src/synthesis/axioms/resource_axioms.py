@@ -195,6 +195,17 @@ class ResourceAxioms(AxiomBase):
                                     get_mod_val_legacy(op_i) != get_mod_val_legacy(op_j), 
                                     label
                                 )
+                            else:
+                                # 相同物理地址：
+                                label = f"bank_gap_R_same_{bid}_{op_i.trace_id}_{op_j.trace_id}"
+                                ResourceAxioms._add_constraint(
+                                    solver,
+                                    z3.Implies(
+                                        t_vars[op_i.trace_id] != t_vars[op_j.trace_id],
+                                        get_mod_val_legacy(op_i) != get_mod_val_legacy(op_j)
+                                    ),
+                                    label
+                                )
         else:
             # 🚀 [SMT-REFACTOR Step 1.2] 全局消除 % II 原生取模
             conflict_ops = []
@@ -233,6 +244,18 @@ class ResourceAxioms(AxiomBase):
                                 ResourceAxioms._add_constraint(
                                     solver, get_mod_val(read_ops[i]) != get_mod_val(read_ops[j]), 
                                     f"bank_gap_R_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
+                                )
+                            else:
+                                # 🚀 [CROSS-ITERATION BANK CONFLICT SOLUTION]
+                                # 相同物理 Bank 的相同逻辑地址读取，只有在物理时钟周期完全一致 (t_i == t_j) 时，才能共享/广播读取。
+                                # 否则如果落在不同的物理周期 (t_i != t_j)，它们的模槽 (modulo slot) 必须严格互斥，防止跨迭代物理碰撞！
+                                ResourceAxioms._add_constraint(
+                                    solver,
+                                    z3.Implies(
+                                        t_vars[read_ops[i].trace_id] != t_vars[read_ops[j].trace_id],
+                                        get_mod_val(read_ops[i]) != get_mod_val(read_ops[j])
+                                    ),
+                                    f"bank_gap_R_same_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
                                 )
 
     @staticmethod
