@@ -159,8 +159,6 @@ class ResourceAxioms(AxiomBase):
                 if u_type == "UR_WRITE":
                     bank_writes.setdefault(bid, []).append(op)
                 elif u_type == "UR_READ":
-                    if op.metadata.get("stride") == 0:
-                        continue
                     bank_reads.setdefault(bid, []).append(op)
 
         if is_legacy:

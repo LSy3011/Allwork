@@ -179,9 +179,30 @@ class GraphCompiler:
         if hasattr(self, "loop_context"):
             metadata["inc"] = 0 
             
-        # 🛸 关键修复：支持多个唯一常量的地址偏移
-        if "logical_addr" in metadata:
-            metadata["logical_addr"] += len(self.const_pool)
+        # 🛸 [ALGORITHM OPTIMIZATION] 算法专家级多 Bank 自动平摊：
+        # 支持 YAML 显式指定常量分 Bank (logical_addr_list)；
+        # 若未指定，则默认采用 Bank 7 和 Bank 6 自动交替分配，消除同一 Bank 1 读端口冲突瓶颈。
+        if "logical_addr_list" in metadata:
+            addr_list = metadata["logical_addr_list"]
+            idx = len(self.const_pool)
+            bank_idx = idx % len(addr_list)
+            addr_offset = idx // len(addr_list)
+            metadata["logical_addr"] = addr_list[bank_idx] + addr_offset
+        elif "logical_addr" in metadata:
+            base_addr = metadata["logical_addr"]
+            idx = len(self.const_pool)
+            
+            # 动态获取硬件 Bank 深度，默认 256
+            depth = 256
+            if hasattr(self, "spec") and self.spec is not None and hasattr(self.spec, "params"):
+                depth = getattr(self.spec.params, "PARAM_UR_BANK_DEPTH", 256)
+            
+            # 使用交替分配，即便只有 2 个常量也能平摊到不同 Bank，极大降低 Bank 冲突概率
+            bank_offset = idx % 2
+            addr_offset = idx // 2
+            
+            # 从 base_addr (通常是 Bank 7) 向下交替分配到 Bank 7 和 Bank 6
+            metadata["logical_addr"] = (base_addr - bank_offset * depth) + addr_offset
             
         # 🛸 关键修复：防止重复传递 meta_name 和 role
         m_name = metadata.pop("meta_name", "constants")

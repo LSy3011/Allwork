@@ -67,11 +67,20 @@ class ConfigurableOperator(BaseOperator):
                 offset = 0
                 
             bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+            if isinstance(const_bank, list):
+                logical_addr = const_bank[0] * bank_depth + offset
+                logical_addr_list = [b * bank_depth + offset for b in const_bank]
+            else:
+                logical_addr = const_bank * bank_depth + offset
+                logical_addr_list = None
+                
             inputs_meta["constants"] = {
-                "logical_addr": const_bank * bank_depth + offset,
+                "logical_addr": logical_addr,
                 "stride": 0,
                 "role": "constant"
             }
+            if logical_addr_list is not None:
+                inputs_meta["constants"]["logical_addr_list"] = logical_addr_list
         
         # 3. 编译
         out_name = "y" 
@@ -109,8 +118,8 @@ class ConfigurableOperator(BaseOperator):
         for name, cfg in self.tensors_cfg.items():
             if cfg["role"] == "output": continue
             
-            # Group by physical address to share data!
-            addr_key = (cfg["bank"], cfg.get("offset", 0))
+            bank_key = tuple(cfg["bank"]) if isinstance(cfg["bank"], list) else cfg["bank"]
+            addr_key = (bank_key, cfg.get("offset", 0))
             if addr_key in addr_to_data:
                 inputs[name] = addr_to_data[addr_key]
                 continue

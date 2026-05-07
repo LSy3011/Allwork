@@ -409,10 +409,67 @@ class Auditor:
                 print(f"\n>>> Op: {trace_id:<12} | IQ: {sim_iq_name} | SMT_t: {t_base}")
                 for line in debug_buffer: print(line)
 
+        # 🛸 [PHYSICAL ALIGNMENT] 物理 Bank 冲突审计
+        bank_ok = self.audit_bank_conflicts(log_path)
+        all_matched = all_matched and bank_ok
+
         if self.show_review:
             print(f"\n  [RESULT] Truth Audit: {'SUCCESS' if all_matched else 'FAILED'}")
             
         return all_matched
+
+    def audit_bank_conflicts(self, log_path: str) -> bool:
+        """物理 Bank 冲突审计器：确保同一时钟周期（Cycle）内没有任何物理 Bank 读/写端口冲突"""
+        if not log_path or not os.path.exists(log_path):
+            return True
+            
+        # 物理 SRAM 读/写端口限制从 spec 动态拉取
+        read_ports_limit = 1
+        if self.spec and hasattr(self.spec, "params"):
+            read_ports_limit = getattr(self.spec.params, "PARAM_UR_BANK_READ_PORTS", 1)
+            
+        cycle_reads = {}
+        import re
+        pattern = re.compile(r"Cyc:(\d+)\s+Unit:UR-READ\s+Tag:READ\s+Port:(\d+)\s+Bank:(\d+)\s+Addr:(\d+)")
+        
+        with open(log_path, "r") as f:
+            for line in f:
+                match = pattern.search(line)
+                if match:
+                    cyc = int(match.group(1))
+                    port = int(match.group(2))
+                    bank = int(match.group(3))
+                    addr = int(match.group(4))
+                    cycle_reads.setdefault(cyc, []).append((port, bank, addr))
+                    
+        all_ok = True
+        collisions_count = 0
+        for cyc, reads in sorted(cycle_reads.items()):
+            bank_to_addr = {}
+            for port, bank, addr in reads:
+                bank_to_addr.setdefault(bank, []).append((port, addr))
+                
+            for bank, addr_list in bank_to_addr.items():
+                if len(addr_list) > read_ports_limit:
+                    # 相同 Bank 读超过限制时，检查是否是相同的地址（支持广播）。
+                    # 如果地址不同，则是物理读碰撞。
+                    unique_addrs = set(addr for port, addr in addr_list)
+                    if len(unique_addrs) > 1:
+                        all_ok = False
+                        collisions_count += 1
+                        if collisions_count <= 5:
+                            print(f"    [FAIL] Physical Bank Read Collision at Cycle {cyc} on Bank {bank}:")
+                            for port, addr in addr_list:
+                                print(f"      - Port {port} accessed Addr {addr}")
+                                
+        if collisions_count > 5:
+            print(f"    [FAIL] ... and {collisions_count - 5} more Bank read collisions omitted.")
+            
+        if self.show_review:
+            status = "SUCCESS" if all_ok else f"FAILED ({collisions_count} collisions)"
+            print(f"  [RESULT] Physical Bank Conflict Audit: {status}")
+            
+        return all_ok
 
     @staticmethod
     def to_float(hex_str):

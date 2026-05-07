@@ -51,10 +51,17 @@ class BaseOperator(ABC):
         config = self.tensor_configs.get(name)
         if not config:
             raise ValueError(f"Tensor '{name}' not found in tensor_configs.")
-        return config["bank"] * bank_depth + config.get("offset", 0)
+        bank_val = config["bank"][0] if isinstance(config["bank"], list) else config["bank"]
+        return bank_val * bank_depth + config.get("offset", 0)
 
     def _find_free_bank(self, spec: Any) -> int:
-        used_banks = {cfg["bank"] for cfg in self.tensor_configs.values() if "bank" in cfg}
+        used_banks = set()
+        for cfg in self.tensor_configs.values():
+            if "bank" in cfg:
+                if isinstance(cfg["bank"], list):
+                    used_banks.update(cfg["bank"])
+                else:
+                    used_banks.add(cfg["bank"])
         max_banks = self._get_hw_param(spec, "PARAM_UR_BANK_NUM", 8)
         for b in range(max_banks):
             if b not in used_banks:
@@ -101,12 +108,15 @@ class BaseOperator(ABC):
         # 登记所有已知 tensor（输入、输出、常数）
         for name, cfg in self.tensor_configs.items():
             if "bank" in cfg:
-                layout.declare_tensor(
-                    name=name,
-                    bank=cfg["bank"],
-                    offset=cfg.get("offset", 0),
-                    role=cfg.get("role", "input")
-                )
+                banks = cfg["bank"] if isinstance(cfg["bank"], list) else [cfg["bank"]]
+                for idx, b in enumerate(banks):
+                    t_name = name if idx == 0 else f"{name}_{idx}"
+                    layout.declare_tensor(
+                        name=t_name,
+                        bank=b,
+                        offset=cfg.get("offset", 0),
+                        role=cfg.get("role", "input")
+                    )
 
         # scratch bank 选择第一个未被占用的 bank
         scratch_bank = layout.find_free_bank()
