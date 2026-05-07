@@ -105,20 +105,30 @@ class ConfigurableOperator(BaseOperator):
 
     def prepare_input(self, n_rows: int) -> Dict[str, np.ndarray]:
         inputs = {}
+        addr_to_data = {}
         for name, cfg in self.tensors_cfg.items():
             if cfg["role"] == "output": continue
+            
+            # Group by physical address to share data!
+            addr_key = (cfg["bank"], cfg.get("offset", 0))
+            if addr_key in addr_to_data:
+                inputs[name] = addr_to_data[addr_key]
+                continue
             
             t_cfg = self.test_cfg.get(name, {})
             if isinstance(t_cfg, list):
                 # 固定参数
-                inputs[name] = np.array(t_cfg).astype(self.dtype)
+                data = np.array(t_cfg).astype(self.dtype)
             elif isinstance(t_cfg, dict) and "range" in t_cfg:
                 # 范围生成
                 r = t_cfg["range"]
-                inputs[name] = np.linspace(r[0], r[1], n_rows).astype(self.dtype)
+                data = np.linspace(r[0], r[1], n_rows).astype(self.dtype)
             else:
                 # 默认随机
-                inputs[name] = np.random.randn(n_rows).astype(self.dtype)
+                data = np.random.randn(n_rows).astype(self.dtype)
+                
+            inputs[name] = data
+            addr_to_data[addr_key] = data
         return inputs
 
     def inject_data(self, program: Any, input_data: Dict[str, np.ndarray], vector_lanes: int, spec: Any = None):
