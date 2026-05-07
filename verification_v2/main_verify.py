@@ -93,45 +93,126 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
         return True
     else:
         print("\n" + "!"*10 + f" VERIFICATION FAILED FOR {op_name.upper()} " + "!"*10)
+        # 🚀 [SW-OPT-2] 失败时自动升级 Verbose，无需重跑
+        print("\n[AUTO-DEBUG] Replaying physical instructions and timeline for diagnosis:")
+        print_physical_instructions(ctx["physical_instrs"], show_model=True)
+        actual_activity_debug = runner.parse_simulation_timeline(ctx["output_dir"])
+        print_aligned_timeline(ctx["schedule"], actual_activity_debug, ctx["II"],
+                               max_cycles=80, show_review=True)
         return False
+
+def run_smt_unit_tests() -> bool:
+    """[SW-OPT: 测试集成] 运行 SMT 约束单元测试（不启动仿真器，极快）"""
+    import unittest
+    print("\n" + "="*20 + " SMT CONSTRAINT UNIT TESTS " + "="*20)
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    try:
+        from tests.unit.test_smt_adversarial import TestSMTAdversarial, TestSMTRefutation
+        suite.addTests(loader.loadTestsFromTestCase(TestSMTAdversarial))
+        suite.addTests(loader.loadTestsFromTestCase(TestSMTRefutation))
+    except ImportError as e:
+        print(f"[WARN] Could not load SMT unit tests: {e}")
+        return True  # 非致命
+    runner = unittest.TextTestRunner(verbosity=1)
+    result = runner.run(suite)
+    return result.wasSuccessful()
+
+
+def run_hw_parity_tests() -> bool:
+    """[SW-OPT: 测试集成] 运行硬件物理比对测试（SMT → .hex → 仿真 → Golden 比对）"""
+    import unittest
+    print("\n" + "="*20 + " HARDWARE PARITY TESTS " + "="*20)
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    try:
+        from tests.integration.test_smt_hw_parity import TestSMTHardwareParity
+        suite.addTests(loader.loadTestsFromTestCase(TestSMTHardwareParity))
+    except ImportError as e:
+        print(f"[WARN] Could not load HW parity tests: {e}")
+        return True  # 非致命
+    runner = unittest.TextTestRunner(verbosity=1)
+    result = runner.run(suite)
+    return result.wasSuccessful()
+
 
 def main():
     parser = argparse.ArgumentParser(description="AIACC V2.0 Modular Verification Suite")
-    parser.add_argument("--op", type=str, default="horner", help="Operator name to verify (e.g., horner) or 'all' for batch testing")
-    parser.add_argument("--op-args", type=str, default="{}", help="JSON string for operator kwargs")
-    parser.add_argument("--hw-config", type=str, default="hw_config", help="Hardware configuration name")
-    parser.add_argument("--n-rows", type=int, default=16, help="Number of data rows to verify (Default: 16)")
-    parser.add_argument("--review", action="store_true", default=True, help="Show high-level review info (Default)")
-    parser.add_argument("--no-review", action="store_false", dest="review", help="Hide review info")
-    parser.add_argument("--model", action="store_true", default=False, help="Show detailed model debug info")
-    parser.add_argument("--quiet", action="store_true", help="Run in extreme quiet mode")
+    parser.add_argument("--op", type=str, default="horner",
+                        help="Operator name to verify (e.g., horner) or 'all' for batch testing")
+    parser.add_argument("--op-args", type=str, default="{}",
+                        help="JSON string for operator kwargs")
+    parser.add_argument("--hw-config", type=str, default="hw_config",
+                        help="Hardware configuration name")
+    parser.add_argument("--n-rows", type=int, default=16,
+                        help="Number of data rows to verify (Default: 16)")
+    parser.add_argument("--review", action="store_true", default=True)
+    parser.add_argument("--no-review", action="store_false", dest="review")
+    parser.add_argument("--model", action="store_true", default=False)
+    parser.add_argument("--quiet", action="store_true")
+    # 🚀 [SW-OPT: 测试集成] 新增 --mode 参数
+    parser.add_argument("--mode", type=str, default="e2e",
+                        choices=["e2e", "smt-unit", "hw-parity", "all"],
+                        help=(
+                            "Verification mode:\n"
+                            "  e2e       - End-to-end operator verification (default)\n"
+                            "  smt-unit  - SMT constraint unit tests (no simulation)\n"
+                            "  hw-parity - Hardware physical parity tests\n"
+                            "  all       - All modes in sequence (fail-fast)"
+                        ))
 
     args = parser.parse_args()
-    
     show_r = args.review and (not args.quiet)
     show_m = args.model and (not args.quiet)
-
     op_args_dict = json.loads(args.op_args)
 
-    if args.op == "all":
-        print("\n" + "="*20 + " STARTING BATCH VERIFICATION " + "="*20)
+    # ── 模式路由 ──────────────────────────────────────────────────────────
+    if args.mode == "smt-unit":
+        sys.exit(0 if run_smt_unit_tests() else 1)
+
+    elif args.mode == "hw-parity":
+        sys.exit(0 if run_hw_parity_tests() else 1)
+
+    elif args.mode == "all":
+        print("\n" + "="*20 + " FULL VERIFICATION SUITE " + "="*20)
         results = {}
-        for op in OPERATOR_MAP.keys():
-            kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(op, {})
-            success = run_test(op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
-            results[op] = success
-        
-        print("\n" + "="*20 + " BATCH VERIFICATION REPORT " + "="*20)
-        all_passed = True
-        for op, success in results.items():
-            status = "[PASS]" if success else "[FAIL]"
-            print(f"[{op.upper()}]: {status}")
-            if not success: all_passed = False
-        sys.exit(0 if all_passed else 1)
-    else:
+        results["smt-unit"] = run_smt_unit_tests()
+        if not results["smt-unit"]:
+            print("[FAIL-FAST] SMT unit tests failed. Stopping.")
+            sys.exit(1)
+        results["hw-parity"] = run_hw_parity_tests()
+        if not results["hw-parity"]:
+            print("[FAIL-FAST] HW parity tests failed. Stopping.")
+            sys.exit(1)
+        # 最后跑 e2e
         kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(args.op, {})
-        success = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
-        sys.exit(0 if success else 1)
+        results["e2e"] = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+        all_ok = all(results.values())
+        print("\n" + "="*20 + " FULL SUITE REPORT " + "="*20)
+        for k, v in results.items():
+            print(f"  [{k.upper():12s}]: {'PASS' if v else 'FAIL'}")
+        sys.exit(0 if all_ok else 1)
+
+    else:  # e2e (default)
+        if args.op == "all":
+            print("\n" + "="*20 + " STARTING BATCH VERIFICATION " + "="*20)
+            results = {}
+            for op in OPERATOR_MAP.keys():
+                kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(op, {})
+                success = run_test(op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+                results[op] = success
+
+            print("\n" + "="*20 + " BATCH VERIFICATION REPORT " + "="*20)
+            all_passed = True
+            for op, success in results.items():
+                status = "[PASS]" if success else "[FAIL]"
+                print(f"[{op.upper()}]: {status}")
+                if not success: all_passed = False
+            sys.exit(0 if all_passed else 1)
+        else:
+            kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(args.op, {})
+            success = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+            sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

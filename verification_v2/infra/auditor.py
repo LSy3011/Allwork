@@ -356,12 +356,25 @@ class Auditor:
                         if is_combinatorial:
                             val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS]"
                         else:
+                            # 🚀 [SAT-OPT-3] 分级容差：按单元类型匹配物理精度
+                            _TOLERANCES = {
+                                "ur-r":   1e-5,   # 内存读，与 Golden 精确一致
+                                "ur-w":   1e-5,   # 内存写，同上
+                                "rtovr":  1e-5,   # 寄存器路由，同上
+                                "fpmul":  1e-4,   # FP32 乘法精度
+                                "fpadd":  1e-4,   # FP32 加法精度
+                                "logic":  0.0,    # 比较/选择，必须 bit-exact
+                            }
+                            tol = next(
+                                (v for k, v in _TOLERANCES.items() if sim_iq_name.startswith(k)),
+                                1e-4  # 默认 FP32 精度
+                            )
                             diff = abs(act_val - exp_val)
-                            if diff <= 1e-2:
-                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS]"
+                            if diff <= tol:
+                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS] (tol={tol:.0e})"
                             else:
                                 val_ok = False
-                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [FAIL]"
+                                val_info = f" | Val: {act_val:.6f} (Exp: {exp_val:.6f}) [FAIL] diff={diff:.2e} > tol={tol:.0e}"
                     else:
                         val_info = f" | Val: {act_val:.4f} [PASS]"
                 elif any(x in trace_id for x in ["rd_", "mul", "add", "wr_"]):

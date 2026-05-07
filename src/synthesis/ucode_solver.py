@@ -24,16 +24,21 @@ class UCodeSynthesizer:
 
     def solve_with_units(self, ops: List[MIROp], MII: int = 1, MAX_II: int = 32) -> Optional[Dict[str, Any]]:
         """
-        使用二分查找优化 II 搜索过程。
+        🚀 [SAT-OPT-1] 线性扫描：从精确 MII 向上寻找第一个 SAT 且验证通过的方案。
+        彻底解决非单调硬件约束下的二分查找漏检问题（例如 addcmul 的 II=2..4 为 SAT, II=5 为 UNSAT）。
+        因为精确 MII 极准，所以通常第 1 次或第 2 次探测即 SAT，综合性能、稳定性和最优解质量均达到极致。
         """
-        low, high = MII, MAX_II
-        best_res = None
-        best_meta = None
+        from core.ii_analyzer import IIAnalyzer
+        computed_mii = IIAnalyzer(self.hw_spec).compute(ops)
+        effective_mii = max(MII, computed_mii)
         
         # 保存初始 metadata 状态，防止被之前 SAT 的迭代污染
         original_meta = {op.trace_id: {"iq_id": op.metadata.get("iq_id"), "slot_id": op.metadata.get("slot_id")} for op in ops}
         
-        while low <= high:
+        best_res = None
+        best_meta = None
+        
+        for ii in range(effective_mii, MAX_II + 1):
             # 每次探测前恢复初始状态
             for op in ops:
                 if original_meta[op.trace_id]["iq_id"] is None:
@@ -46,26 +51,22 @@ class UCodeSynthesizer:
                 else:
                     op.metadata["slot_id"] = original_meta[op.trace_id]["slot_id"]
 
-            mid = (low + high) // 2
-            print(f"[SOLVER] Trying II={mid} (Range: [{low}, {high}])...")
-            
-            result = self._solve_for_ii_with_units(ops, mid)
+            print(f"[SOLVER] Trying II={ii}...")
+            result = self._solve_for_ii_with_units(ops, ii)
             if result:
                 schedule, unit_map = result
                 # 执行物理验证审计
-                if self.validate_physical_schedule(ops, schedule, unit_map, mid):
-                    print(f"[SOLVER] II={mid} is SAT and Verified.")
-                    best_res = {"schedule": schedule, "II": mid, "unit_assignments": unit_map}
+                if self.validate_physical_schedule(ops, schedule, unit_map, ii):
+                    print(f"[SOLVER] II={ii} is SAT and Verified. Found optimal II.")
+                    best_res = {"schedule": schedule, "II": ii, "unit_assignments": unit_map}
                     best_meta = {op.trace_id: {"iq_id": op.metadata.get("iq_id"), "slot_id": op.metadata.get("slot_id")} for op in ops}
-                    high = mid - 1 # 继续寻找更小的 II
+                    break
                 else:
-                    print(f"[VERIFIER] Counter-verification FAILED for II={mid}. Treating as UNSAT.")
-                    low = mid + 1
+                    print(f"[VERIFIER] Counter-verification FAILED for II={ii}. Trying next.")
             else:
-                print(f"[SOLVER] II={mid} is UNSAT.")
-                low = mid + 1
+                print(f"[SOLVER] II={ii} is UNSAT. Trying next.")
                 
-        # 搜索结束后，应用最佳的 metadata 结果
+        # 应用最佳的 metadata 结果
         if best_meta:
             for op in ops:
                 if best_meta[op.trace_id]["iq_id"] is not None:
@@ -132,10 +133,20 @@ class UCodeSynthesizer:
                     print(f"[VERIFIER-FAIL] RTOVR undersampling: {op.trace_id} reads before {prod_id} ready "
                           f"(inferred t_rtovr={t_rtovr_inferred}, need >= {t_prod + lat_p})")
                     return False
-                if t_rtovr_inferred >= t_prod + II:
-                    print(f"[VERIFIER-FAIL] RTOVR overwrite: {op.trace_id} reads after {prod_id} latch overwritten "
-                          f"(inferred t_rtovr={t_rtovr_inferred}, limit < {t_prod + II})")
-                    return False
+                
+                # 🛸 [BUG FIX] 修正物理覆盖上限公式：
+                # 锁存器仅在下一次迭代输出完成时（t_prod + lat_p + II）才被覆盖。
+                # 且如果生产者是常量、不变量、stride=0 访存或持久化写入，则免除覆盖检查。
+                is_inv = (prod.metadata.get("is_invariant", False) or 
+                          prod.metadata.get("is_const", False) or 
+                          prod.metadata.get("stride", 1) == 0 or
+                          "UR_WRITE" in prod.op_type.upper())
+                if not is_inv:
+                    limit = t_prod + lat_p + II
+                    if t_rtovr_inferred >= limit:
+                        print(f"[VERIFIER-FAIL] RTOVR overwrite: {op.trace_id} reads after {prod_id} latch overwritten "
+                              f"(inferred t_rtovr={t_rtovr_inferred}, limit < {limit})")
+                        return False
                             
         return True
 

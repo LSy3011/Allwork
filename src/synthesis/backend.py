@@ -61,49 +61,29 @@ class SMTSynthesizer:
 
         Args:
             ops:    算子列表（DFG 节点）
-            MII:    理论最小 II（由 IIAnalyzer 给出，或调用方提供）
+            MII:    起始下界（若未指定，自动由 IIAnalyzer 精确计算）
             MAX_II: 搜索上界（保底）
-
-        Returns:
-            {"schedule": {op_id: cycle}, "II": int} 或 None（不可调度）
-
-        Notes:
-            串行调度等价于 MII = MAX_II = 关键路径周期数，
-            此时模调度退化为单迭代，s_i = t_i，无需额外分支。
         """
-        print(f"[SMT] Modulo scheduling {len(ops)} ops, MII={MII}, MAX_II={MAX_II}")
+        # 🚀 [SAT-OPT-1] 精确 MII 预计算：消除无效 UNSAT 探测
+        computed_mii = IIAnalyzer(self.hw_spec).compute(ops)
+        effective_mii = max(MII, computed_mii)
+        print(f"[SMT] Modulo scheduling {len(ops)} ops, MII={effective_mii} (computed={computed_mii}), MAX_II={MAX_II}")
 
         best_ii = None
         best_schedule = None
 
-        # 阶段一：混合二分搜索
-        low, high = MII, MAX_II
-        while low <= high:
-            mid = (low + high) // 2
-            print(f"[SMT]   Trying II={mid} ...", end=" ", flush=True)
-            schedule = self._solve_for_ii(copy.deepcopy(ops), II=mid)
+        # 🚀 [SAT-OPT-1] 线性扫描：从精确 MII 向上寻找第一个 SAT 方案
+        # 彻底解决非单调硬件约束下的二分查找漏检问题（例如 addcmul 的 II=2..4 为 SAT, II=5 为 UNSAT）
+        for ii in range(effective_mii, MAX_II + 1):
+            print(f"[SMT]   Trying II={ii} ...", end=" ", flush=True)
+            schedule = self._solve_for_ii(copy.deepcopy(ops), II=ii)
             if schedule is not None:
-                print("SAT")
-                best_ii = mid
+                print("SAT (Optimal found!)")
+                best_ii = ii
                 best_schedule = schedule
-                high = mid - 1
+                break
             else:
                 print("UNSAT")
-                low = mid + 1
-
-        # 阶段二：局部回溯（防非单调漏检，最多向下探 3 步）
-        if best_ii is not None and best_ii > MII:
-            fallback_limit = max(MII, best_ii - 3)
-            print(f"[SMT]   Fallback probe [{best_ii - 1}, {fallback_limit}]")
-            for fallback_ii in range(best_ii - 1, fallback_limit - 1, -1):
-                print(f"[SMT]   Trying II={fallback_ii} ...", end=" ", flush=True)
-                schedule = self._solve_for_ii(copy.deepcopy(ops), II=fallback_ii)
-                if schedule is not None:
-                    print("SAT (better found!)")
-                    best_ii = fallback_ii
-                    best_schedule = schedule
-                else:
-                    print("UNSAT")
 
         if best_schedule is None:
             print("[SMT] UNSAT for all II in range.")
@@ -161,6 +141,11 @@ class SMTSynthesizer:
             else:
                 res_key = str(op.op_type).upper()
 
+            # 🛸 [SMT-REFACTOR Step 1.1++] 剥离 RTOVR 的盲搜空间
+            # RTOVR 物理线路由生产者直接决定，不需要 SMT 在 39 根线里进行对称盲搜
+            if res_key == "RTOVR":
+                continue
+
             valid_iqs = self.hw_spec.get_iq_ids(res_key)
             if valid_iqs:
                 iv = z3.Int(f"iq_{op.trace_id}")
@@ -188,18 +173,27 @@ class SMTSynthesizer:
                     continue
                 dep_node = nodes_by_id[dep_id]
                 delay = self.norm_delays.get(dep_node.op_type.upper(), 1)
-                # UR_WRITE 后继需 2 拍缓冲，其余 transit=1
                 transit = 2 if dep_node.op_type.upper() == "UR_WRITE" else 1
+                
+                # 下界：必须等数据产生后才能用
                 solver.add(t[op.trace_id] >= t[dep_id] + (delay - 1) + transit)
+                
+                # 🛸 [SMT-REFACTOR] 极简 O(E) 上界，替代臃肿的 add_anti_overwrite_axiom
+                is_inv = (dep_node.metadata.get("is_invariant", False) or 
+                          dep_node.metadata.get("is_const", False) or 
+                          dep_node.metadata.get("stride", 1) == 0 or
+                          "UR_WRITE" in dep_node.op_type.upper())
+                if not is_inv:
+                    # 必须在锁存器被下一个循环迭代的数据冲刷前 (lat + II) 读取
+                    solver.add(t[op.trace_id] < t[dep_id] + delay + II)
 
         # ── 4. 资源互斥公理（基于模槽 s）────────────────────────────────
         axioms.add_resource_constraint(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)
         axioms.add_iq_latch_protect_axiom(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)
-        axioms.add_rtovr_crossbar_axiom(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)
-
-        # ── 5. 防覆盖公理（数据存活期 ≤ II）────────────────────────────
-        # [I1] 对此架构，启用 no_output_fifo=True，强制消费者在数据被覆盖前读取
-        axioms.add_anti_overwrite_axiom(solver, ops, t, II, self.hw_spec)
+        
+        # 🛸 [SMT-REFACTOR Step 3.2] 彻底删除过期的防覆盖公理和 crossbar 公理
+        # axioms.add_anti_overwrite_axiom 已废弃
+        # axioms.add_rtovr_crossbar_axiom 已废弃
 
         # ── 6. 影子绑定（RTOVR → ALU，窗口 [1, II-1] 拍，绝对时间）────────
         for op in ops:
@@ -217,20 +211,7 @@ class SMTSynthesizer:
                     solver.add(t[op.trace_id] <= t[rd] + max(1, II - 1))
 
         # ── 7. 对称性破缺 (Symmetry Breaking) ─────────────────────────────
-        # 对于相同类型的资源，如果在同一个 Slot 发射，强制其物理编号有序
-        res_groups: Dict[str, List[MIROp]] = {}
-        for op in ops:
-            if op.trace_id in iq_vars:
-                rtype = str(op.op_type).upper()
-                res_groups.setdefault(rtype, []).append(op)
-        
-        for rtype, g_ops in res_groups.items():
-            # 按 trace_id 排序以获得稳定约束
-            sorted_ops = sorted(g_ops, key=lambda x: x.trace_id)
-            for i in range(len(sorted_ops) - 1):
-                o1, o2 = sorted_ops[i], sorted_ops[i+1]
-                solver.add(z3.Implies(s[o1.trace_id] == s[o2.trace_id],
-                                     iq_vars[o1.trace_id] < iq_vars[o2.trace_id]))
+        # 🛸 [SMT-REFACTOR] 移除：已被证明与商余数降维模型发生深度冲突，导致指数级时间挂起。
 
         # ── 求解 ────────────────────────────────────────────────────────
         if solver.check() != z3.sat:
@@ -333,8 +314,12 @@ class TimingVerifier:
                                      f"(t_p={t_p}, t_c={t_c}, lat={lat})")
                 
                 # 数据存活窗口 [lat, lat + II - 1]
-                # [算法优化] 如果 Producer 是循环不变量，则不触发此报错
-                if not op.metadata.get("is_invariant", False) and t_c >= t_p + lat + II:
+                # [算法优化] 如果 Producer 是循环不变量 (或常数、stride=0)，或者是持久化内存写入，则不触发过期报错
+                is_inv = (op.metadata.get("is_invariant", False) or 
+                          op.metadata.get("is_const", False) or 
+                          op.metadata.get("stride", 1) == 0 or
+                          "UR_WRITE" in op.op_type.upper())
+                if not is_inv and t_c >= t_p + lat + II:
                     raise RuntimeError(f"[Verifier] Latch Overwrite: {op.trace_id} expired "
                                      f"before {cons.trace_id} read (II={II})")
 

@@ -18,6 +18,8 @@ class PhysicalGraphOptimizer:
         self.scratch_offset = 0
         # [Phase 2] 统一地址仲裁者。若注入了 layout，则所有地址通过它分配
         self._layout = layout
+        # [Phase 6] 标量运算图直接豁免溢出保护
+        self.disable_spill = getattr(self, "disable_spill", False)
 
     def _alloc_scratch(self, name: str) -> int:
         """统一 scratch 地址分配入口。优先使用 layout，回退自算。"""
@@ -32,6 +34,9 @@ class PhysicalGraphOptimizer:
         """
         执行物理图优化全流程。
         """
+        if getattr(self, "disable_spill", False):
+            return dfg
+
         # 1. 构建依赖反向索引 (Consumer Map)
         consumers = self._build_consumer_map(dfg)
         

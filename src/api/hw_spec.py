@@ -126,6 +126,11 @@ class HardwareSpec(BaseModel):
         registry = self.config.get("iq_registry", {})
         instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
         
+        # 🛸 [SMT-REFACTOR Step 1.1] 强行截断 RTOVR 槽位 (0-38) 避免分配到不存在的 DVR
+        if unit_type.upper() == "RTOVR":
+            base = registry.get("RTOVR", 100)
+            return [base + i for i in range(39)]
+        
         # 1. 处理 UR 特殊端口 (动态从 registry 映射地址)
         if unit_type.upper() == "UR_READ":
             base = registry.get("UR_READ", 30)

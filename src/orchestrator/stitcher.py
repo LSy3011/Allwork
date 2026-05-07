@@ -14,10 +14,11 @@ class HSTSStitcher:
         self.op_metadata: Dict[str, Dict] = {}
         self.instance_count = {}
 
-    def _check_conflict(self, stream: List, synthesis_res: Dict[str, int], offset: int) -> bool:
+    def _check_conflict(self, stream: List, synthesis_res: Dict, offset: int) -> bool:
         """物理层突发冲突审计 (IQ/Bank)"""
+        schedule = synthesis_res.get("schedule", synthesis_res)
         for op in stream:
-            local_t = synthesis_res[op.trace_id]
+            local_t = schedule[op.trace_id]
             global_t = local_t + offset
             
             # IQ 并发审计
@@ -60,8 +61,8 @@ class HSTSStitcher:
         while self._check_conflict(stream, synthesis_res, offset):
             offset += 1
             
-        # 4. 提交缝合结果 (由高保真物理持续时间驱动)
-        max_local_t = max(synthesis_res.values()) if synthesis_res else 0
+        schedule = synthesis_res.get("schedule", synthesis_res)
+        max_local_t = max(schedule.values()) if schedule else 0
         busy_cycles = 64 # 256 位宽的物理实消耗拍数
         
         self.op_metadata[instance_name] = {
@@ -70,7 +71,7 @@ class HSTSStitcher:
         }
         
         for op in stream:
-            local_t = synthesis_res[op.trace_id]
+            local_t = schedule[op.trace_id]
             global_t = local_t + offset
             
             # 属性刷新

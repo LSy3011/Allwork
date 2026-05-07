@@ -119,6 +119,11 @@ class BaseOperator(ABC):
             bank_depth=bank_depth,
             layout=layout
         )
+        
+        # 🛸 [SMT-REFACTOR Step 1.3] 纯标量图 (stride 均为 0) 直接豁免 Spill，降维 DFG
+        all_scalars = all(meta.get("stride", 1) == 0 for meta in inputs_meta.values())
+        if all_scalars:
+            optimizer.disable_spill = True
 
         self.compiler = GraphCompiler(optimizer=optimizer)
         ops = self.compiler.compile(inputs_meta, formula, out_name=out_name, spec=spec)
