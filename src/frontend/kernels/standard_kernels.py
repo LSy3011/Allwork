@@ -30,6 +30,33 @@ def lower_add(c, sym, expr):
         current = c.b.make_op("FPADD", f"{sym}_a{i}", RT.FPADD, [r0, r1])
     c.mir_env[sym] = current
 
+@KernelRegistry.register(lambda e: isinstance(e, sp.Add) and len(e.args) == 4 and all(isinstance(arg, sp.Mul) for arg in e.args))
+def lower_fp32addtree_5to1(c, sym, expr):
+    """
+    [ALGORITHM OPTIMIZATION] 乘加树硬件映射：
+    自动将形如 "a0*b0 + a1*b1 + a2*b2 + a3*b3" 的 4 路内积结构
+    直接合并并下沉为单个 FP32ADDTREE5TO1 硬件宏指令，完全绕过二叉 FPADD。
+    """
+    args = list(expr.args)
+    # 1. 获取 4 个乘积项对应的 FPMUL 运算节点 (自动触发 _get_op 的 inline Lowering)
+    mul_nodes = [c._get_op(arg) for arg in args]
+
+    # 2. 将这 4 个乘积项路由到 FP32ADDTREE5TO1 的前 4 个输入端口 (S0, S1, S2, S3)
+    r_nodes = []
+    for i, m_node in enumerate(mul_nodes):
+        slot = getattr(PS, f"FP32ADDTREE5TO1_S{i}")
+        r_nodes.append(c._route(m_node, slot))
+
+    # 3. 构造 FP32ADDTREE5TO1 节点
+    c.mir_env[sym] = c.b.make_op(
+        "FP32ADDTREE5TO1",
+        str(sym),
+        RT.FP32ADDTREE5TO1,
+        r_nodes,
+        cumulative=True,
+        reduction_per_channel=4
+    )
+
 @KernelRegistry.register(lambda e: isinstance(e, sp.Pow))
 def lower_pow(c, sym, expr):
     base, exp = expr.args

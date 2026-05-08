@@ -180,3 +180,20 @@ modules:
       - {name: vld, bits: 1}
       - {name: src_sign, bits: 1}
       - {name: smc_id_en, bits: 5}
+
+  FP32ADDTREE5TO1:
+    type: compute
+    latency: 2
+    code_bits: 6
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: smc_id_en, bits: 5}
+
+  FP32ADDTREE8TO1:
+    type: compute
+    latency: 3
+    code_bits: 8
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: DST_REG, bits: 2}
+      - {name: smc_id_en, bits: 5}

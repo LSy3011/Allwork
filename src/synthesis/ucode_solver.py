@@ -154,6 +154,16 @@ class UCodeSynthesizer:
         compute_ops = [op for op in ops if op.op_type.upper() != "RTOVR"]
         
         solver = z3.Solver()
+        orig_add = solver.add
+        _track_idx = 0
+        def tracked_add(*args, **kwargs):
+            nonlocal _track_idx
+            for arg in args:
+                _track_idx += 1
+                lbl = z3.Bool(f"lbl_{_track_idx}_{str(arg)[:80].replace(' ', '').replace('+', '_').replace('-', '_')}")
+                solver.assert_and_track(arg, lbl)
+        solver.add = tracked_add
+        
         t_vars = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in compute_ops}
         u_vars = {op.trace_id: z3.Int(f"u_{op.trace_id}") for op in compute_ops}
 
@@ -187,6 +197,7 @@ class UCodeSynthesizer:
                 solver.add(u_vars[op.trace_id] == manual_iq)
 
         if solver.check() != z3.sat:
+            print("[SMT DEBUG] UNSAT CORE:", solver.unsat_core())
             return None
         model = solver.model()
         schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in compute_ops}

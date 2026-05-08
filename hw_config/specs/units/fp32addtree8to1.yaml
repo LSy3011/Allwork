@@ -23,5 +23,8 @@ micro_instructions:
     1: VALID
 - field: DST_REG
   width: 2
+- field: smc_id_en
+  width: 5
+  default: 0
 behavioral_semantics:
   latching: pre_load_on_valid_or_nonzero # 支持“数据先到、指令后发”模式

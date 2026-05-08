@@ -107,6 +107,12 @@ class ConfigurableOperator(BaseOperator):
         
         golden_y = func(**args)
         
+        # 🛸 [ALGORITHM OPTIMIZATION] 支持多输出/矩阵算子：转换形如 (num_outputs, 1, n_rows) 的矩阵结果为 (n_rows, num_outputs) 布局
+        if isinstance(golden_y, list) or (hasattr(golden_y, "ndim") and golden_y.ndim > 1):
+            arr = np.array(golden_y)
+            if arr.ndim == 3 and arr.shape[1] == 1:
+                golden_y = np.squeeze(arr, axis=1).T
+        
         return {
             "y": golden_y, 
             "intermediates": [] 

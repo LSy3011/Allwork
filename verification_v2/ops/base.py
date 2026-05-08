@@ -156,7 +156,14 @@ class BaseOperator(ABC):
                 op.metadata["stride"] = 1
 
             elif out_addr is not None and op.op_type == "UR_WRITE" and op.metadata.get("role") == "output":
-                op.metadata["logical_addr"] = out_addr
+                # 🛸 [ALGORITHM OPTIMIZATION] 支持多输出/矩阵算子：自动提取输出节点索引（如 out_obj_i），为其分派偏移地址 out_addr + i
+                idx = 0
+                if op.trace_id.startswith("out_obj_"):
+                    try:
+                        idx = int(op.trace_id.split("_")[-1])
+                    except ValueError:
+                        pass
+                op.metadata["logical_addr"] = out_addr + idx
                 op.metadata["stride"] = 1
                 op.metadata["is_output"] = True
 

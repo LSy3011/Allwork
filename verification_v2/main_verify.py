@@ -12,12 +12,14 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
+from verification_v2.ops.manual_matmul import ManualMatmulOperator
 
 OPERATOR_MAP = {
     "horner": HornerOperator,
     "sin3":   HornerOperator,
     "sin5":   HornerOperator,
-    "sin5_taylor": TaylorOperator
+    "sin5_taylor": TaylorOperator,
+    "manual_matmul": ManualMatmulOperator
 }
 
 # 🛸 [V5.0] 自动扫描 YAML 算子配置并注册

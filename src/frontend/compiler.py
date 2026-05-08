@@ -99,7 +99,18 @@ class GraphCompiler:
         self.spec = spec  # [Phase 4] 存储 spec 以供 _route 查表证明
         
         self.inputs_meta = inputs
-        opt_nodes, final_res = sp.cse(formula)
+        
+        # 🛸 [ALGORITHM OPTIMIZATION] 支持多输出/矩阵算子（如 matmul）：自动解包并平铺为标量表达式列表进行公因子提取
+        if hasattr(formula, "tolist"):
+            formula_list = formula.tolist()
+            import itertools
+            if isinstance(formula_list[0], list):
+                formula_list = list(itertools.chain(*formula_list))
+            opt_nodes, final_res = sp.cse(formula_list)
+        elif isinstance(formula, (list, tuple)):
+            opt_nodes, final_res = sp.cse(formula)
+        else:
+            opt_nodes, final_res = sp.cse(formula)
         
         write_slots = self.slot_map["UR_WRITE"]
         num_w_ports = len(write_slots)

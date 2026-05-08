@@ -117,6 +117,15 @@ class SMTSynthesizer:
           5. 影子绑定：ALU ← RTOVR 时间窗口（1 ≤ delta ≤ 4）
         """
         solver = z3.Solver()
+        orig_add = solver.add
+        _track_idx = 0
+        def tracked_add(*args, **kwargs):
+            nonlocal _track_idx
+            for arg in args:
+                _track_idx += 1
+                lbl = z3.Bool(f"lbl_{_track_idx}_{str(arg)[:80].replace(' ', '').replace('+', '_').replace('-', '_')}")
+                solver.assert_and_track(arg, lbl)
+        solver.add = tracked_add
 
         nodes_by_id = {op.trace_id: op for op in ops}
         t = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in ops}
@@ -215,6 +224,7 @@ class SMTSynthesizer:
 
         # ── 求解 ────────────────────────────────────────────────────────
         if solver.check() != z3.sat:
+            print("[SMT DEBUG] UNSAT CORE:", solver.unsat_core())
             return None
 
         m = solver.model()

@@ -379,8 +379,16 @@ class ParallelKernel:
                     key = getattr(RtoVRInputSource, f'DR_FP16MUL_D{i}')
                     sources[key] = outputs.get(f'D{i}', 0)
             elif name == 'fp32addtree5to1':
-                sources[RtoVRInputSource.DR_FP32ADDTREE5TO1_D0] = outputs.get('D0', 0)
-                sources[RtoVRInputSource.DR_FP32ADDTREE5TO1_D1] = outputs.get('D1', 0)
+                d0_raw = outputs.get('D0', 0)
+                d1_raw = outputs.get('D1', 0)
+                reconstructed = 0
+                for j in range(4):
+                    d0_part = (d0_raw >> (j * 16)) & 0xFFFF
+                    d1_part = (d1_raw >> (j * 16)) & 0xFFFF
+                    word_out = (d1_part << 16) | d0_part
+                    reconstructed |= (word_out << (j * 32))
+                sources[RtoVRInputSource.DR_FP32ADDTREE5TO1_D0] = reconstructed
+                sources[RtoVRInputSource.DR_FP32ADDTREE5TO1_D1] = d1_raw
             else:
                 # 通用 D/ST 补全 (FPMUL, FPADD, LOGIC, etc.)
                 u_u = name.upper()
@@ -459,7 +467,7 @@ class ParallelKernel:
             port = getattr(RtoVROutput, f'DVR_FP32ADDTREE5TO1_S{i}')
             inputs_5to1[f's{i}'] = get_port_data(port)
             inputs_5to1[f's{i}_valid'] = get_port_valid(port)
-        self.units['fp32addtree5to1'].evaluate(inputs_5to1)
+        self.units['fp32addtree5to1'].evaluate(inputs_5to1, cycle=self.cycle_count)
 
         self.units['fp32addtree8to1'].evaluate({
             'ctrl': controls.get('fp32addtree8to1', 0),

@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 import numpy as np
 
 class Auditor:
-    OP_SYMBOLS = {'fpmul': 'm', 'fpadd': 'a', 'rtovr': 'r', 'ur-r': 'L', 'ur-w': 'S', 'ur': 'L'}
+    OP_SYMBOLS = {'fpmul': 'm', 'fpadd': 'a', 'fp32addtree': 'a', 'rtovr': 'r', 'ur-r': 'L', 'ur-w': 'S', 'ur': 'L'}
 
     def __init__(self, output_dir: str, spec: Any, show_review: bool = True, show_model: bool = False):
         self.output_dir = Path(output_dir)
@@ -202,6 +202,9 @@ class Auditor:
                     env[trace_id] = val0 - val1
                 else:
                     env[trace_id] = val0 + val1
+                    
+            elif op_type in ("FP32ADDTREE5TO1", "FP32ADDTREE8TO1"):
+                env[trace_id] = sum(env.get(d, 0.0) for d in deps)
                     
             elif op_type == "LOGIC" and len(deps) >= 3:
                 val0 = env.get(deps[0], 0.0) if len(deps) > 0 else 0.0
