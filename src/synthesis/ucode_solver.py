@@ -128,7 +128,19 @@ class UCodeSynthesizer:
                 t_consumer = schedule.get(op.trace_id)
                 if t_consumer is None: continue
                 
-                t_rtovr_inferred = t_consumer - 1
+                # 🛸 [V6.0 LATCH OPTIMIZATION] 优先从 schedule 中获取真实的 RTOVR 调度时间，降级退化到 t_consumer - 1
+                rtovr_node = None
+                for dep_id in deps:
+                    node = nodes_by_id.get(dep_id)
+                    if node and node.op_type.upper() == "RTOVR":
+                        if prod_id in node.metadata.get("depends_on", []):
+                            rtovr_node = node
+                            break
+                
+                if rtovr_node and schedule.get(rtovr_node.trace_id) is not None:
+                    t_rtovr_inferred = schedule[rtovr_node.trace_id]
+                else:
+                    t_rtovr_inferred = t_consumer - 1
                 if t_rtovr_inferred < t_prod + lat_p:
                     print(f"[VERIFIER-FAIL] RTOVR undersampling: {op.trace_id} reads before {prod_id} ready "
                           f"(inferred t_rtovr={t_rtovr_inferred}, need >= {t_prod + lat_p})")
@@ -154,13 +166,14 @@ class UCodeSynthesizer:
         compute_ops = [op for op in ops if op.op_type.upper() != "RTOVR"]
         
         solver = z3.Solver()
+        solver.set("timeout", 10000) # 🛸 [SMT-OPTIMIZATION] 10s timeout to fast-forward past hard UNSAT instances
         orig_add = solver.add
         _track_idx = 0
         def tracked_add(*args, **kwargs):
             nonlocal _track_idx
             for arg in args:
                 _track_idx += 1
-                lbl = z3.Bool(f"lbl_{_track_idx}_{str(arg)[:80].replace(' ', '').replace('+', '_').replace('-', '_')}")
+                lbl = z3.Bool(f"lbl_{_track_idx}")
                 solver.assert_and_track(arg, lbl)
         solver.add = tracked_add
         
@@ -177,7 +190,8 @@ class UCodeSynthesizer:
             solver.add(z3.Or([u_vars[op.trace_id] == iq_id for iq_id in valid_iqs]))
 
         # 2. 物理公理
-        axioms.add_latency_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
+        latch_vars = {}
+        axioms.add_latency_axiom(solver, compute_ops, t_vars, II, self.hw_spec, latch_vars=latch_vars)
         # axioms.add_rtovr_crossbar_axiom(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
         # axioms.add_shadow_binding_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
         # axioms.add_anti_overwrite_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
@@ -187,6 +201,8 @@ class UCodeSynthesizer:
 
         # 3. 模冲突
         axioms.add_resource_constraint(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
+        # axioms.add_rtovr_modulo_constraint(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars, latch_vars=latch_vars)
+        # axioms.add_rtovr_liveness_axiom(solver, ops, t_vars, II, self.hw_spec, u_vars=u_vars, latch_vars=latch_vars)
 
         # 4. RtoVR 物理绑定
         # axioms.add_physical_binding_axiom(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
@@ -197,10 +213,22 @@ class UCodeSynthesizer:
                 solver.add(u_vars[op.trace_id] == manual_iq)
 
         if solver.check() != z3.sat:
-            print("[SMT DEBUG] UNSAT CORE:", solver.unsat_core())
+            try:
+                core = solver.unsat_core()
+                print(f"[DEBUG-UNSAT-CORE] II={II} unsat core: {core}")
+            except Exception as e:
+                print(f"[DEBUG-UNSAT-CORE] Failed to get unsat core: {e}")
             return None
         model = solver.model()
         schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in compute_ops}
+        
+        # 🛸 [V6.0 LATCH OPTIMIZATION] 评估并提取求解出的虚拟锁存器 RTOVR 调度时间
+        latch_schedule = {}
+        if latch_vars:
+            for key, var in latch_vars.items():
+                latch_val = model.eval(var)
+                if hasattr(latch_val, "as_long"):
+                    latch_schedule[key] = latch_val.as_long()
         registry = self.hw_spec.config.get("iq_registry", {})
         
         # 🛸 [V5.3 PATCH] 动态获取基地址，移除硬编码 100
@@ -234,8 +262,13 @@ class UCodeSynthesizer:
             for i, dep_id in enumerate(deps):
                 producer = next((o for o in ops if o.trace_id == dep_id), None)
                 if producer and producer.op_type.upper() == "RTOVR":
-                    # 恢复时间：消费者 t - 1
-                    schedule[producer.trace_id] = schedule[op.trace_id] - 1
+                    # 恢复时间：优先使用 SMT 求解的 latch_schedule，否则降级回退到 t_consumer - 1
+                    prod_id = producer.metadata.get("depends_on", [None])[0]
+                    latch_time = latch_schedule.get((op.trace_id, prod_id))
+                    if latch_time is not None:
+                        schedule[producer.trace_id] = latch_time
+                    else:
+                        schedule[producer.trace_id] = schedule[op.trace_id] - 1
                     
                     # 恢复物理绑定
                     p_name = port_names[i] if i < len(port_names) else "S0"

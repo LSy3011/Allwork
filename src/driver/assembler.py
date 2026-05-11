@@ -101,7 +101,7 @@ class PhysicalAssembler:
                     op_stride = int(op.metadata.get("stride", 0))
                     logical_addr = op.metadata.get("logical_addr", 0)
                     iq_start_t = min(o.metadata.get("global_t", 0) for o in ops)
-                    relative_skip = (op.metadata.get("global_t", 0) - iq_start_t) // II
+                    relative_skip = op.metadata.get("global_t", 0) // II - iq_start_t // II
                     addr = (logical_addr - op_stride * relative_skip)
                     
                     op_mask = 0x1 if (is_memory_iq and op_stride != 0) else 0
@@ -113,9 +113,10 @@ class PhysicalAssembler:
                     if is_ur_iq:
                         from src.core.memory_layout import PhysicalMemoryLayout
                         layout = PhysicalMemoryLayout.from_spec(self.hw_spec)
-                        bank_id, offset = layout.resolve(int(addr))
-                        payload["BANK"] = bank_id
-                        payload["ADDR"] = offset
+                        orig_bank, orig_offset = layout.resolve(int(logical_addr))
+                        comp_offset = (orig_offset - op_stride * relative_skip) % layout.bank_depth
+                        payload["BANK"] = orig_bank
+                        payload["ADDR"] = comp_offset
                     trace_id = op.trace_id
                 else:
                     header = SMIHeader(vld=0, inc=0, dly=0, inc_embed=0)

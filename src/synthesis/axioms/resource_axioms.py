@@ -10,6 +10,14 @@ class ResourceAxioms(AxiomBase):
     """
 
     @staticmethod
+    def get_remainder_vars(solver, tid, t_vars, II):
+        q = z3.Int(f"q_{tid}")
+        r = z3.Int(f"r_{tid}")
+        solver.add(t_vars[tid] == q * II + r)
+        solver.add(r >= 0, r < II)
+        return q, r
+
+    @staticmethod
     def add_resource_constraint(solver, ops, t_vars, II, spec, **kwargs):
         """
         通用资源约束入口。
@@ -53,15 +61,22 @@ class ResourceAxioms(AxiomBase):
                 continue
 
             if II <= 16:
+                # Pre-create and cache remainder variables once per op to avoid redundant constraint generation
+                rem_vars = {}
+                for op in op_list:
+                    _, r = ResourceAxioms.get_remainder_vars(solver, op.trace_id, t_vars, II)
+                    rem_vars[op.trace_id] = r
+
                 for iq_id in valid_iqs:
                     # 对于每一个物理单元 iq_id，每一个模槽 slot，最多只能有一个操作映射上去
                     for slot in range(II):
                         # 构造谓词列表：(op 映射到 iq_id 且 落在 slot 槽位)
                         predicates = []
                         for op in op_list:
+                            r = rem_vars[op.trace_id]
                             cond = z3.And(
                                 u_vars[op.trace_id] == iq_id,
-                                t_vars[op.trace_id] % II == slot
+                                r == slot
                             )
                             predicates.append((cond, 1))
                         
@@ -78,10 +93,7 @@ class ResourceAxioms(AxiomBase):
                 r_vars = {}
                 for op in op_list:
                     tid = op.trace_id
-                    q = z3.Int(f"q_{tid}")
-                    r = z3.Int(f"r_{tid}")
-                    solver.add(t_vars[tid] == q * II + r)
-                    solver.add(r >= 0, r < II)
+                    q, r = ResourceAxioms.get_remainder_vars(solver, tid, t_vars, II)
                     q_vars[tid] = q
                     r_vars[tid] = r
                 
@@ -343,3 +355,208 @@ class ResourceAxioms(AxiomBase):
         """
         # 已经在 add_modulo_constraint 中通过 u_vars 处理了通用的端口/单元复用
         pass
+
+    @staticmethod
+    def add_rtovr_modulo_constraint(solver, ops, t_vars, II, spec, **kwargs):
+        """
+        Enforce that no two RTOVR instructions mapped to the same physical slot can run at the same cycle modulo II.
+        """
+        u_vars = kwargs.get("u_vars")
+        latch_vars = kwargs.get("latch_vars")
+        if not latch_vars:
+            return
+
+        # 1. Gather all RTOVR variables and their physical slots
+        dvr_map = spec.get_dvr_map()
+        registry = spec.config.get("iq_registry", {})
+        base_w = registry.get("UR_WRITE", 35)
+
+        nodes_by_id = {op.trace_id: op for op in ops}
+
+        # List of tuples: (t_latch_var, slot_expr, consumer_id, prod_id, r_latch_var)
+        rt_slots = []
+
+        for (consumer_id, prod_id), t_latch in latch_vars.items():
+            consumer = nodes_by_id.get(consumer_id)
+            if not consumer:
+                continue
+            
+            # Find the RTOVR node in DFG
+            consumer_deps = consumer.metadata.get("depends_on", [])
+            rt_node_id = None
+            for dep_id in consumer_deps:
+                rt_node = nodes_by_id.get(dep_id)
+                if rt_node and rt_node.op_type.upper() == "RTOVR":
+                    if prod_id in rt_node.metadata.get("depends_on", []):
+                        rt_node_id = dep_id
+                        break
+            if not rt_node_id:
+                continue
+
+            i = consumer_deps.index(rt_node_id)
+            u_type = consumer.op_type.upper()
+            unit_info = spec.modules.get(u_type, {})
+            if hasattr(unit_info, "dict"):
+                unit_info = unit_info.dict()
+            port_names = [p.split("-")[-1] for p in unit_info.get("inputs", [])]
+            if not port_names:
+                port_names = ["S0", "S1", "S2", "S3", "ST"]
+            p_name = port_names[i] if i < len(port_names) else "S0"
+
+            if u_type == "UR_WRITE":
+                if u_vars and consumer_id in u_vars:
+                    slot_expr = u_vars[consumer_id]
+                else:
+                    slot_expr = base_w
+            else:
+                target_slot = 0
+                if u_type in dvr_map and p_name in dvr_map[u_type]:
+                    target_slot = dvr_map[u_type][p_name]
+                slot_expr = target_slot
+
+            # Pre-calculate exact remainder for t_latch using linear Z3 constraints
+            q_l = z3.Int(f"q_latch_mod_{consumer_id}_{prod_id}")
+            r_l = z3.Int(f"r_latch_mod_{consumer_id}_{prod_id}")
+            solver.add(t_latch == q_l * II + r_l)
+            solver.add(r_l >= 0, r_l < II)
+
+            rt_slots.append((t_latch, slot_expr, consumer_id, prod_id, r_l))
+
+        # 2. Add mutual exclusion constraints
+        for i in range(len(rt_slots)):
+            for j in range(i + 1, len(rt_slots)):
+                t1, slot1, cons1, prod1, L1 = rt_slots[i]
+                t2, slot2, cons2, prod2, L2 = rt_slots[j]
+
+                is_const_equal = False
+                if isinstance(slot1, int) and isinstance(slot2, int):
+                    if slot1 == slot2:
+                        is_const_equal = True
+                    else:
+                        continue
+
+                if is_const_equal:
+                    cond = L1 != L2
+                else:
+                    cond = z3.Implies(slot1 == slot2, L1 != L2)
+
+                ResourceAxioms._add_constraint(
+                    solver,
+                    cond,
+                    f"rtovr_mod_conflict_{i}_{j}"
+                )
+
+    @staticmethod
+    def add_rtovr_liveness_axiom(solver, ops, t_vars, II, spec, **kwargs):
+        """
+        RTOVR 槽位生命期冲突公理 (Modulo-Aware Liveness Mutex):
+        在同一个物理 RTOVR 槽位内，各虚拟 RTOVR 的[Latch, Consumer_Fire]生命期在时间轴上不能发生任何重叠。
+        """
+        u_vars = kwargs.get("u_vars")
+        latch_vars = kwargs.get("latch_vars")
+        if not latch_vars:
+            return
+
+        dvr_map = spec.get_dvr_map()
+        registry = spec.config.get("iq_registry", {})
+        base_w = registry.get("UR_WRITE", 35)
+
+        nodes_by_id = {op.trace_id: op for op in ops}
+
+        # List of tuples: (t_latch_var, t_fire_var, slot_expr, consumer_id, prod_id, r_latch_var)
+        rt_lifespans = []
+
+        for (consumer_id, prod_id), t_latch in latch_vars.items():
+            consumer = nodes_by_id.get(consumer_id)
+            if not consumer:
+                continue
+            
+            # Find the RTOVR node in DFG
+            consumer_deps = consumer.metadata.get("depends_on", [])
+            rt_node_id = None
+            for dep_id in consumer_deps:
+                rt_node = nodes_by_id.get(dep_id)
+                if rt_node and rt_node.op_type.upper() == "RTOVR":
+                    if prod_id in rt_node.metadata.get("depends_on", []):
+                        rt_node_id = dep_id
+                        break
+            if not rt_node_id:
+                continue
+
+            i = consumer_deps.index(rt_node_id)
+            u_type = consumer.op_type.upper()
+            unit_info = spec.modules.get(u_type, {})
+            if hasattr(unit_info, "dict"):
+                unit_info = unit_info.dict()
+            port_names = [p.split("-")[-1] for p in unit_info.get("inputs", [])]
+            if not port_names:
+                port_names = ["S0", "S1", "S2", "S3", "ST"]
+            p_name = port_names[i] if i < len(port_names) else "S0"
+
+            if u_type == "UR_WRITE":
+                if u_vars and consumer_id in u_vars:
+                    slot_expr = u_vars[consumer_id]
+                else:
+                    slot_expr = base_w
+            else:
+                target_slot = 0
+                if u_type in dvr_map and p_name in dvr_map[u_type]:
+                    target_slot = dvr_map[u_type][p_name]
+                slot_expr = target_slot
+
+            # Pre-calculate exact remainder for t_latch using linear Z3 constraints
+            q_l = z3.Int(f"q_latch_live_{consumer_id}_{prod_id}")
+            r_l = z3.Int(f"r_latch_live_{consumer_id}_{prod_id}")
+            solver.add(t_latch == q_l * II + r_l)
+            solver.add(r_l >= 0, r_l < II)
+
+            t_fire = t_vars[consumer_id]
+            rt_lifespans.append((t_latch, t_fire, slot_expr, consumer_id, prod_id, r_l))
+
+        # Add periodic overlap exclusion
+        for i in range(len(rt_lifespans)):
+            for j in range(i + 1, len(rt_lifespans)):
+                t_latch_i, t_fire_i, slot_i, cons_i, prod_i, L_i = rt_lifespans[i]
+                t_latch_j, t_fire_j, slot_j, cons_j, prod_j, L_j = rt_lifespans[j]
+
+                is_const_equal = False
+                if isinstance(slot_i, int) and isinstance(slot_j, int):
+                    if slot_i == slot_j:
+                        is_const_equal = True
+                    else:
+                        continue
+
+                D_i = t_fire_i - t_latch_i
+                D_j = t_fire_j - t_latch_j
+
+                R_i = L_i + D_i
+                R_j = L_j + D_j
+
+                wrap_i = R_i > II
+                wrap_j = R_j > II
+
+                is_disjoint = z3.If(
+                    z3.And(wrap_i, wrap_j),
+                    False,
+                    z3.If(
+                        wrap_i,
+                        z3.And(L_j >= R_i - II, R_j <= L_i),
+                        z3.If(
+                            wrap_j,
+                            z3.And(L_i >= R_j - II, R_i <= L_j),
+                            z3.Or(R_i <= L_j, R_j <= L_i)
+                        )
+                    )
+                )
+
+                if is_const_equal:
+                    cond = is_disjoint
+                else:
+                    cond = z3.Implies(slot_i == slot_j, is_disjoint)
+
+                ResourceAxioms._add_constraint(
+                    solver,
+                    cond,
+                    f"rtovr_liveness_overlap_exclude_{cons_i}_{prod_i}_{cons_j}_{prod_j}"
+                )
+

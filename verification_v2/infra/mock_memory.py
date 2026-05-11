@@ -29,7 +29,7 @@ class MockProgram:
         )
         self.tensors = {}
         
-    def inject_vector(self, logical_addr: int, data: np.ndarray):
+    def inject_vector(self, logical_addr: int, data: np.ndarray, stride: int = 1):
         """注入矢量数据"""
         # 🛸 [V5.4 FIX] 使用动态 bank_depth 进行地址转换
         bank_id = logical_addr // self.bank_depth
@@ -40,7 +40,7 @@ class MockProgram:
             row_data = data[r*v_lanes : (r+1)*v_lanes]
             if len(row_data) < v_lanes:
                 row_data = np.pad(row_data, (0, v_lanes - len(row_data)))
-            self.memory_allocator.banks[bank_id][offset + r] = row_data
+            self.memory_allocator.banks[bank_id][offset + r * stride] = row_data
 
     def inject_broadcast(self, logical_addr: int, scalar: float):
         """将标量广播到整个 SIMD 行"""

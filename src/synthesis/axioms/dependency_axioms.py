@@ -44,16 +44,45 @@ class DependencyAxioms(AxiomBase):
                 )
 
             # === RTOVR 增广边约束（Step 2）===
+            latch_vars = kwargs.get("latch_vars")
             for prod_id, rtovr_info in op.metadata.get("rtovr_deps", {}).items():
                 producer = next((o for o in ops if o.trace_id == prod_id), None)
                 if not producer:
                     continue
                 lat_p = spec.delays.get(producer.op_type.upper(), 1)
-                # 修复 BUG: 将范围约束改为严格相等约束，防止同单元其它操作覆盖无深度的 RTOVR 锁存器
+                # 🛸 [V6.0 LATCH OPTIMIZATION - HYBRID MODEL] 异步锁存与严格对齐混合建模
+                # 创设虚拟锁存时间变量 t_latch
+                t_latch = z3.Int(f"t_latch_{op.trace_id}_{prod_id}")
+                if latch_vars is not None:
+                    latch_vars[(op.trace_id, prod_id)] = t_latch
+                
+                # 1. 严格采样约束（生产者完成输出的时刻，RTOVR 必须在 1 拍内立即采样，防寄存器覆盖溢出）
                 DependencyAxioms._add_constraint(
                     solver,
-                    t_vars[op.trace_id] == t_vars[prod_id] + lat_p + 1,
+                    t_latch == t_vars[prod_id] + lat_p,
                     f"rtovr_strict_{op.trace_id}_{prod_id}"
+                )
+                
+                # 2. 异步锁存延迟约束：
+                # - Addition trees have elastic input latch buffers, allowing them to support relaxed timing (Option A / inequality >= t_latch + 1).
+                # - Multipliers, simple ALUs, and UR_WRITE do not have elastic buffers, so they must be executed in the cycle immediately following latching (Option B / strict equality == t_latch + 1) to match RtoVR's 1-cycle latency.
+                is_elastic = op.op_type.upper() in ["FP32ADDTREE5TO1", "FP32ADDTREE8TO1"]
+                if is_elastic:
+                    latch_cond = (t_vars[op.trace_id] >= t_latch + 1)
+                else:
+                    latch_cond = (t_vars[op.trace_id] == t_latch + 1)
+
+                DependencyAxioms._add_constraint(
+                    solver,
+                    latch_cond,
+                    f"rtovr_latch_to_consumer_{op.trace_id}_{prod_id}"
+                )
+                
+                # 3. 循环生命期安全约束（由于循环按 II 重复运行，本次迭代的消费者执行时刻必须在下一次 RTOVR 重写前完成）
+                DependencyAxioms._add_constraint(
+                    solver,
+                    t_vars[op.trace_id] <= t_latch + II,
+                    f"rtovr_latch_lifecycle_{op.trace_id}_{prod_id}"
                 )
 
     @staticmethod

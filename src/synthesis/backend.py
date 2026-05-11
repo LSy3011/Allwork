@@ -224,7 +224,7 @@ class SMTSynthesizer:
 
         # ── 求解 ────────────────────────────────────────────────────────
         if solver.check() != z3.sat:
-            print("[SMT DEBUG] UNSAT CORE:", solver.unsat_core())
+            # print("[SMT DEBUG] UNSAT CORE:", solver.unsat_core())
             return None
 
         m = solver.model()

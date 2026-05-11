@@ -9,6 +9,8 @@ add_dependency_axiom = DependencyAxioms.add_dependency_axiom
 
 add_resource_constraint = ResourceAxioms.add_resource_constraint
 add_modulo_constraint = ResourceAxioms.add_modulo_constraint
+add_rtovr_modulo_constraint = ResourceAxioms.add_rtovr_modulo_constraint
+add_rtovr_liveness_axiom = ResourceAxioms.add_rtovr_liveness_axiom
 add_bank_conflict_axiom = ResourceAxioms.add_bank_conflict_axiom
 add_spill_reload_mutex_axiom = ResourceAxioms.add_spill_reload_mutex_axiom
 
@@ -46,6 +48,14 @@ class SynthesisAxioms:
     @staticmethod
     def add_modulo_constraint(*args, **kwargs):
         return add_modulo_constraint(*args, **kwargs)
+
+    @staticmethod
+    def add_rtovr_modulo_constraint(*args, **kwargs):
+        return add_rtovr_modulo_constraint(*args, **kwargs)
+
+    @staticmethod
+    def add_rtovr_liveness_axiom(*args, **kwargs):
+        return add_rtovr_liveness_axiom(*args, **kwargs)
 
     @staticmethod
     def add_bank_conflict_axiom(*args, **kwargs):
@@ -136,6 +146,8 @@ __all__ = [
     "add_dependency_axiom",
     "add_resource_constraint",
     "add_modulo_constraint",
+    "add_rtovr_modulo_constraint",
+    "add_rtovr_liveness_axiom",
     "add_bank_conflict_axiom",
     "add_spill_reload_mutex_axiom",
     "add_rtovr_alignment_axiom",

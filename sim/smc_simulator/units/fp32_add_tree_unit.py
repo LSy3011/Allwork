@@ -165,6 +165,10 @@ class FP32AddTree5To1Unit(Component):
                 res_d1 = temp_d1 & ((1 << 128) - 1)
                 print(f"    >>> [FP32ADDTREE5TO1-DEBUG] Cyc: {cycle} Strict physical hardware sum: res_d0={res_d0:032x}, res_d1={res_d1:032x}", flush=True)
 
+            # 🛸 [V5.4 FIX] 一旦触发计算，清空输入锁存寄存器，防止上一轮迭代的数据残留污染后面的计算
+            self.regs_s = [0] * 8
+
+
         # 3. 流水线压入
         self._next_pipeline = [{'d0': res_d0, 'd1': res_d1, 'valid': valid_trigger}] + self.pipeline[:-1]
         

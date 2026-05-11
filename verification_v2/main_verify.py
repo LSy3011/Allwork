@@ -13,14 +13,25 @@ from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
 from verification_v2.ops.manual_matmul import ManualMatmulOperator
+from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
     "horner": HornerOperator,
     "sin3":   HornerOperator,
     "sin5":   HornerOperator,
     "sin5_taylor": TaylorOperator,
-    "manual_matmul": ManualMatmulOperator
+    "manual_matmul": ManualMatmulOperator,
+    "manual_selu": ManualSeluOperator,
+    "selu": ManualSeluOperator
 }
+
+CATEGORIES = {
+    "math": ["add", "mul", "div", "reciprocal", "sqrt", "rsqrt", "abs", "addcdiv", "addcmul"],
+    "trig": ["horner", "sin3", "sin5", "sin5_taylor", "horner_v3", "cos4", "cosh4", "exp5", "expm1", "sinh5", "log", "log1p", "log2", "tan7", "tanh7"],
+    "activation": ["elu", "mish", "hardsigmoid", "hardswish", "gelu_approx", "silu_approx", "silu_taylor", "sigmoid_taylor", "leaky_relu", "clip", "relu6", "relu_offset", "selu"],
+    "manual": ["manual_matmul", "manual_selu", "matmul", "mini_matmul"]
+}
+
 
 # 🛸 [V5.0] 自动扫描 YAML 算子配置并注册
 OPS_DIR = os.path.join(os.path.dirname(__file__), "ops")
@@ -28,6 +39,8 @@ if os.path.exists(OPS_DIR):
     for f in os.listdir(OPS_DIR):
         if f.endswith(".yaml"):
             op_name = f.replace(".yaml", "")
+            if op_name in OPERATOR_MAP:
+                continue
             yaml_path = os.path.join(OPS_DIR, f)
             # 使用 lambda 延迟加载，模拟类构造行为
             OPERATOR_MAP[op_name] = lambda path=yaml_path, **kwargs: ConfigurableOperator(path)
@@ -141,7 +154,7 @@ def run_hw_parity_tests() -> bool:
 def main():
     parser = argparse.ArgumentParser(description="AIACC V2.0 Modular Verification Suite")
     parser.add_argument("--op", type=str, default="horner",
-                        help="Operator name to verify (e.g., horner) or 'all' for batch testing")
+                        help="Operator name to verify, 'all' for all, or category name ('math', 'trig', 'activation', 'manual')")
     parser.add_argument("--op-args", type=str, default="{}",
                         help="JSON string for operator kwargs")
     parser.add_argument("--hw-config", type=str, default="hw_config",
@@ -196,15 +209,19 @@ def main():
         sys.exit(0 if all_ok else 1)
 
     else:  # e2e (default)
-        if args.op == "all":
-            print("\n" + "="*20 + " STARTING BATCH VERIFICATION " + "="*20)
+        if args.op == "all" or args.op in CATEGORIES:
+            target_ops = list(OPERATOR_MAP.keys()) if args.op == "all" else CATEGORIES[args.op]
+            # Filter out operators not loaded in OPERATOR_MAP (to prevent key errors)
+            target_ops = [op for op in target_ops if op in OPERATOR_MAP]
+            
+            print(f"\n" + "="*20 + f" STARTING BATCH VERIFICATION ({args.op.upper()}) " + "="*20)
             results = {}
-            for op in OPERATOR_MAP.keys():
+            for op in target_ops:
                 kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(op, {})
                 success = run_test(op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
                 results[op] = success
 
-            print("\n" + "="*20 + " BATCH VERIFICATION REPORT " + "="*20)
+            print("\n" + "="*20 + f" BATCH VERIFICATION REPORT ({args.op.upper()}) " + "="*20)
             all_passed = True
             for op, success in results.items():
                 status = "[PASS]" if success else "[FAIL]"

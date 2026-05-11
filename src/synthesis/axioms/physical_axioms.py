@@ -41,10 +41,11 @@ class PhysicalAxioms(AxiomBase):
                 if op_i.op_type.upper() not in ["UR_READ", "UR_WRITE"]:
                     continue
                     
-                # 如果是 Stride=0 的常量读取，豁免隔离
+                # 如果任意一个是 Stride=0 的常量读取，豁免隔离
                 if op_i.op_type.upper() == "UR_READ" and op_i.metadata.get("stride") == 0:
-                    if op_j.op_type.upper() == "UR_READ" and op_j.metadata.get("stride") == 0:
-                        continue
+                    continue
+                if op_j.op_type.upper() == "UR_READ" and op_j.metadata.get("stride") == 0:
+                    continue
 
                 label = f"phase_iso_{op_i.trace_id}_{op_j.trace_id}"
                 same_iq = u_vars[op_i.trace_id] == u_vars[op_j.trace_id]

@@ -195,7 +195,9 @@ class BaseOperator(ABC):
             data = input_data.get(name)
             if data is None: continue
             if config["role"] == "input":
-                program.inject_vector(addr_base, data)
+                default_stride = 1 if config.get("role") == "input" else 0
+                stride = config.get("stride", default_stride)
+                program.inject_vector(addr_base, data, stride=stride)
             elif config["role"] == "param":
                 if isinstance(data, (list, np.ndarray)):
                     for i, val in enumerate(data):
