@@ -115,40 +115,137 @@ class UCodeSynthesizer:
 
     def validate_physical_schedule(self, ops: List[MIROp], schedule: Dict[str, int], unit_map: Dict[str, str], II: int) -> bool:
         """
-        全物理维度严格反证审计 (Rigid Physical Audit V5.2)。
+        全物理维度严格反证审计（ADR-017 合并 TimingVerifier 后总入口）。
+
+        ⚠️ CALLER MUST CHECK RETURN VALUE
+        失败仅 print + return False，不抛 RuntimeError。caller 必须显式分流。
+        现有 caller：solve_with_units（ucode_solver.py:94）已正确 `if validate(...):`。
+
+        校验维度（return False 早退，按顺序）：
+          1. Resource limit per slot（unit_instances）—— 含 RTOVR=64
+          2. Physical IQ ID uniqueness per slot —— op.metadata.iq_id
+          3. Bank `manual_bank` 冲突 —— 三段精确（ADR-009）：
+             W-W 互斥 / R-R 同地址豁免、异地址互斥 / W↔R 无豁免互斥
+          4. Read/Write port bandwidth（total_read_ports / total_write_ports）
+          5. Modulo Collision by iq_name（与 axiom 维度互补）
+          6. RAW + Latch overwrite（compute-to-compute 路径）
+          7. RTOVR undersampling + overwrite（RTOVR-routed 路径，原有）
         """
         nodes_by_id = {op.trace_id: op for op in ops}
         iq_to_modulo: Dict[str, set] = {}
-        iq_to_phases: Dict[str, set] = {}
-        
+        slot_iq_ids: Dict[int, set] = {}
+        slot_res_usage: Dict[int, Dict[str, int]] = {}
+        # bank 三段累积：以 (s, bank_id) 索引
+        slot_bank_writes: Dict[Tuple[int, int], List[str]] = {}
+        slot_bank_reads: Dict[Tuple[int, int], List[Tuple[str, Any]]] = {}  # (trace_id, logical_addr)
+
+        constraints = self.hw_spec.config.get("resource_constraints", {})
+        unit_limits = constraints.get("unit_instances", {})
+        max_reads = constraints.get("total_read_ports", 4)
+        max_writes = constraints.get("total_write_ports", 4)
+
         for op in ops:
-            if op.op_type.upper() == "RTOVR": continue
             t = schedule.get(op.trace_id)
             if t is None: continue
-            
-            iq_name = unit_map.get(op.trace_id)
-            if not iq_name: continue
-            
-            # 1. [资源审计] 模冲突二次确认
-            mod = t % II
-            if mod in iq_to_modulo.get(iq_name, set()):
-                print(f"[VERIFIER-FAIL] Modulo Collision in {iq_name} at Slot {mod}")
-                return False
-            iq_to_modulo.setdefault(iq_name, set()).add(mod)
+            s = t % II
+            res_type = op.op_type.upper()
+            slot_res_usage.setdefault(s, {})
 
-            # 2. [安全审计] 访存相位隔离 (Side-Effect Isolation)
-            if op.op_type.upper() in ["UR_READ", "UR_WRITE"]:
-                if not (op.op_type.upper() == "UR_READ" and op.metadata.get("stride") == 0):
-                    phase = t // II
-                    iq_to_phases.setdefault(iq_name, set()).add(phase)
-        
-        # 3. [相位审计] 检查访存单元是否跨 Phase
-        for iq_name, phases in iq_to_phases.items():
-            if len(phases) > 1:
-                # 🛸 [V6.1 PIPELINE OPT] 允许跨相复用，释放 II 极限
-                # print(f"[VERIFIER-FAIL] Phase Contamination in {iq_name}: {phases}")
-                # return False
-                pass
+            # 1. Resource limit per slot (含 RTOVR=64)
+            if res_type in unit_limits:
+                slot_res_usage[s][res_type] = slot_res_usage[s].get(res_type, 0) + 1
+                if slot_res_usage[s][res_type] > unit_limits[res_type]:
+                    print(f"[VERIFIER-FAIL] Resource Exhausted: {res_type} count "
+                          f"{slot_res_usage[s][res_type]} > limit {unit_limits[res_type]} at slot {s}")
+                    return False
+
+            # 2. Physical IQ ID uniqueness per slot
+            iq_id = op.metadata.get("iq_id")
+            if iq_id is not None:
+                slot_iq_ids.setdefault(s, set())
+                if iq_id in slot_iq_ids[s]:
+                    print(f"[VERIFIER-FAIL] Physical ID Conflict: IQ {iq_id} doubly assigned at slot {s}")
+                    return False
+                slot_iq_ids[s].add(iq_id)
+
+            # 3. Bank manual_bank 三段精确语义（ADR-009）
+            bank_id = op.metadata.get("manual_bank")
+            if bank_id is not None:
+                addr = op.metadata.get("logical_addr")
+                key = (s, bank_id)
+                if res_type == "UR_WRITE":
+                    # W-W：同 (slot, bank) 任意两 W → fail
+                    if slot_bank_writes.get(key):
+                        prev_w = slot_bank_writes[key][0]
+                        print(f"[VERIFIER-FAIL] Bank W-W Conflict: bank {bank_id} slot {s} "
+                              f"contested by {prev_w} and {op.trace_id}")
+                        return False
+                    # W↔R：同 (slot, bank) 已有 R → fail（无地址豁免）
+                    if slot_bank_reads.get(key):
+                        prev_r, _ = slot_bank_reads[key][0]
+                        print(f"[VERIFIER-FAIL] Bank W↔R Conflict: bank {bank_id} slot {s} "
+                              f"W={op.trace_id} R={prev_r} (no forwarding, ADR-009)")
+                        return False
+                    slot_bank_writes.setdefault(key, []).append(op.trace_id)
+                elif res_type == "UR_READ":
+                    # W↔R：同 (slot, bank) 已有 W → fail
+                    if slot_bank_writes.get(key):
+                        prev_w = slot_bank_writes[key][0]
+                        print(f"[VERIFIER-FAIL] Bank W↔R Conflict: bank {bank_id} slot {s} "
+                              f"R={op.trace_id} W={prev_w}")
+                        return False
+                    # R-R：同地址豁免，异地址互斥
+                    for prev_r, prev_addr in slot_bank_reads.get(key, []):
+                        if addr is None or prev_addr is None or addr != prev_addr:
+                            print(f"[VERIFIER-FAIL] Bank R-R Conflict: bank {bank_id} slot {s} "
+                                  f"addrs {prev_addr} vs {addr} ({prev_r}, {op.trace_id})")
+                            return False
+                    slot_bank_reads.setdefault(key, []).append((op.trace_id, addr))
+
+            # 4. Read/Write port bandwidth
+            if res_type == "UR_READ":
+                slot_res_usage[s]["READ_BUS"] = slot_res_usage[s].get("READ_BUS", 0) + 1
+                if slot_res_usage[s]["READ_BUS"] > max_reads:
+                    print(f"[VERIFIER-FAIL] Read Bandwidth: slot {s} count "
+                          f"{slot_res_usage[s]['READ_BUS']} > {max_reads}")
+                    return False
+            elif res_type == "UR_WRITE":
+                slot_res_usage[s]["WRITE_BUS"] = slot_res_usage[s].get("WRITE_BUS", 0) + 1
+                if slot_res_usage[s]["WRITE_BUS"] > max_writes:
+                    print(f"[VERIFIER-FAIL] Write Bandwidth: slot {s} count "
+                          f"{slot_res_usage[s]['WRITE_BUS']} > {max_writes}")
+                    return False
+
+            # ↓↓↓ 以下校验 RTOVR op 跳过（modulo by iq_name + RAW 仅 compute 路径）
+            if res_type == "RTOVR":
+                continue
+
+            iq_name = unit_map.get(op.trace_id)
+            if iq_name:
+                # 5. Modulo Collision by iq_name
+                if s in iq_to_modulo.get(iq_name, set()):
+                    print(f"[VERIFIER-FAIL] Modulo Collision in {iq_name} at Slot {s}")
+                    return False
+                iq_to_modulo.setdefault(iq_name, set()).add(s)
+
+            # 6. RAW + Latch overwrite（compute-to-compute 路径）
+            lat = self.hw_spec.delays.get(res_type, 1)
+            consumers = [o for o in ops if op.trace_id in o.metadata.get("depends_on", [])]
+            for cons in consumers:
+                t_c = schedule.get(cons.trace_id)
+                if t_c is None: continue
+                if t_c < t + lat:
+                    print(f"[VERIFIER-FAIL] RAW Violation: {op.trace_id} -> {cons.trace_id} "
+                          f"(t_p={t}, t_c={t_c}, lat={lat})")
+                    return False
+                is_inv = (op.metadata.get("is_invariant", False) or
+                          op.metadata.get("is_const", False) or
+                          op.metadata.get("stride", 1) == 0 or
+                          res_type == "UR_WRITE")
+                if not is_inv and t_c >= t + lat + II:
+                    print(f"[VERIFIER-FAIL] Latch Overwrite: {op.trace_id} expired "
+                          f"before {cons.trace_id} read (II={II})")
+                    return False
                 
         # 4. [时序审计] 生产 -> RTOVR 采样 -> ALU 消费 严格对齐
         for op in ops:
