@@ -11,3 +11,6 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Phase 0 — local-only soft constraints (cultural/political map)
+CLAUDE.md.local
