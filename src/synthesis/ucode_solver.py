@@ -1,8 +1,28 @@
+import os
+import time
 import z3
+from enum import Enum
 from typing import List, Dict, Any, Optional, Tuple
 from ir.mir.mir_op import MIROp
 from api.hw_spec import HardwareSpec
 import synthesis.axioms as axioms
+
+
+# ADR-011: tristate solver return semantics
+class SolverStatus(Enum):
+    SAT = "sat"
+    UNSAT = "unsat"
+    UNKNOWN = "unknown"
+
+
+# ADR-011 constants
+_TIMEOUT_PRIMARY_MS = 30_000   # 单次 z3 timeout（30s）
+_TIMEOUT_RETRY_MS = 15_000     # 换 seed 重试 timeout（15s）
+_SEED_PRIMARY = 0              # 主 seed（确定性）
+_SEED_RETRY = 42               # 重试 seed（换搜索路径）
+_TOTAL_BUDGET_S = int(os.environ.get("AIACC_SOLVER_BUDGET_S", "300"))
+_DEBUG_SOLVER = os.environ.get("AIACC_SOLVER_DEBUG") == "1"
+
 
 class UCodeSynthesizer:
     """
@@ -37,25 +57,40 @@ class UCodeSynthesizer:
         
         best_res = None
         best_meta = None
-        
+        budget_start = time.perf_counter()
+
         for ii in range(effective_mii, MAX_II + 1):
+            # ADR-011: total-budget cap; 病态 case 防卡死
+            if time.perf_counter() - budget_start > _TOTAL_BUDGET_S:
+                print(f"[BUDGET-EXHAUSTED] {_TOTAL_BUDGET_S}s exceeded at II={ii}; "
+                      f"set AIACC_SOLVER_BUDGET_S=N to extend")
+                break
+
             # 每次探测前恢复初始状态
             for op in ops:
                 if original_meta[op.trace_id]["iq_id"] is None:
                     op.metadata.pop("iq_id", None)
                 else:
                     op.metadata["iq_id"] = original_meta[op.trace_id]["iq_id"]
-                    
+
                 if original_meta[op.trace_id]["slot_id"] is None:
                     op.metadata.pop("slot_id", None)
                 else:
                     op.metadata["slot_id"] = original_meta[op.trace_id]["slot_id"]
 
-            print(f"[SOLVER] Trying II={ii}...")
-            result = self._solve_for_ii_with_units(ops, ii)
-            if result:
-                schedule, unit_map = result
-                # 执行物理验证审计
+            # ADR-011: 确定性 seed=0 主跑；UNKNOWN 时换 seed=42 重试一次（改搜索路径）
+            print(f"[SOLVER] Trying II={ii}, seed={_SEED_PRIMARY}, timeout={_TIMEOUT_PRIMARY_MS}ms...")
+            status, payload = self._solve_for_ii_with_units(
+                ops, ii, timeout_ms=_TIMEOUT_PRIMARY_MS, random_seed=_SEED_PRIMARY,
+            )
+            if status == SolverStatus.UNKNOWN:
+                print(f"[SOLVER]   UNKNOWN at seed={_SEED_PRIMARY}; retry seed={_SEED_RETRY}, timeout={_TIMEOUT_RETRY_MS}ms")
+                status, payload = self._solve_for_ii_with_units(
+                    ops, ii, timeout_ms=_TIMEOUT_RETRY_MS, random_seed=_SEED_RETRY,
+                )
+
+            if status == SolverStatus.SAT:
+                schedule, unit_map = payload
                 if self.validate_physical_schedule(ops, schedule, unit_map, ii):
                     print(f"[SOLVER] II={ii} is SAT and Verified. Found optimal II.")
                     best_res = {"schedule": schedule, "II": ii, "unit_assignments": unit_map}
@@ -63,8 +98,10 @@ class UCodeSynthesizer:
                     break
                 else:
                     print(f"[VERIFIER] Counter-verification FAILED for II={ii}. Trying next.")
-            else:
-                print(f"[SOLVER] II={ii} is UNSAT. Trying next.")
+            elif status == SolverStatus.UNSAT:
+                print(f"[SOLVER] II={ii} is UNSAT (proven). Trying next.")
+            else:  # UNKNOWN after both seeds
+                print(f"[SOLVER] II={ii} UNKNOWN after 2 seeds (seed=0 + seed=42); skipping")
                 
         # 应用最佳的 metadata 结果
         if best_meta:
@@ -164,22 +201,46 @@ class UCodeSynthesizer:
                             
         return True
 
-    def _solve_for_ii_with_units(self, ops: List[MIROp], II: int) -> Optional[Tuple[Dict[str, int], Dict[str, str]]]:
+    def _solve_for_ii_with_units(
+        self,
+        ops: List[MIROp],
+        II: int,
+        timeout_ms: int = _TIMEOUT_PRIMARY_MS,
+        random_seed: int = _SEED_PRIMARY,
+    ) -> Tuple[SolverStatus, Optional[Tuple[Dict[str, int], Dict[str, str]]]]:
+        """ADR-011: tristate 返回。每次调用全新建 Solver——禁止外部复用。
+        random_seed 强制确定性；外层用 seed=0 主跑、seed=42 重试以换搜索路径。
+        """
         compute_ops = [op for op in ops if op.op_type.upper() != "RTOVR"]
-        
+
         solver = z3.Solver()
-        solver.set("timeout", 10000) # 🛸 [SMT-OPTIMIZATION] 10s timeout to fast-forward past hard UNSAT instances
-        orig_add = solver.add
-        _track_idx = 0
-        def tracked_add(*args, **kwargs):
-            nonlocal _track_idx
-            desc = kwargs.pop("desc", "")
-            if desc: desc = "_" + desc.replace(" ", "_").replace("=", "eq")
-            for arg in args:
-                _track_idx += 1
-                lbl = z3.Bool(f"lbl_{_track_idx}{desc}")
-                solver.assert_and_track(arg, lbl)
-        solver.add = tracked_add
+        solver.set("timeout", timeout_ms)
+        solver.set("random_seed", random_seed)  # Phase 1：确定性
+        # ADR-011 Phase 4：使用 arith.solver=2（老 Bellman-Ford diff-logic 实现）
+        # 实测 horner e2e：default(arith.solver=6)=53s vs arith.solver=2=11s。
+        # 模调度大量约束形如 t[i] - t[j] >= c，是差分逻辑 special shape，
+        # diff-logic solver 多项式时间；通用 simplex 在此结构上走慢路径。
+        solver.set("smt.arith.solver", 2)
+        # Phase 3：生产路径用 z3 原生 solver.add；assert_and_track 仅 DEBUG 模式
+        # tracked_add 给每条约束创 Bool label 用于 unsat_core，纯调试 overhead。
+        if _DEBUG_SOLVER:
+            _track_idx = 0
+            def tracked_add(*args, **kwargs):
+                nonlocal _track_idx
+                desc = kwargs.pop("desc", "")
+                if desc:
+                    desc = "_" + desc.replace(" ", "_").replace("=", "eq")
+                for arg in args:
+                    _track_idx += 1
+                    lbl = z3.Bool(f"lbl_{_track_idx}{desc}")
+                    solver.assert_and_track(arg, lbl)
+            solver.add = tracked_add
+        else:
+            _orig_add = solver.add
+            def native_add(*args, **kwargs):
+                kwargs.pop("desc", None)  # 忽略 desc 仅为兼容签名
+                _orig_add(*args, **kwargs)
+            solver.add = native_add
         
         t_vars = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in compute_ops}
         u_vars = {op.trace_id: z3.Int(f"u_{op.trace_id}") for op in compute_ops}
@@ -224,13 +285,13 @@ class UCodeSynthesizer:
             if manual_iq is not None:
                 solver.add(u_vars[op.trace_id] == manual_iq, desc=f"manual_iq_{op.trace_id}")
 
-        if solver.check() != z3.sat:
-            try:
-                core = solver.unsat_core()
-                # print(f"[DEBUG-UNSAT-CORE] II={II} unsat core: {core}")
-            except Exception as e:
-                print(f"[DEBUG-UNSAT-CORE] Failed to get unsat core: {e}")
-            return None
+        # ADR-011: tristate 分流
+        res = solver.check()
+        if res == z3.unsat:
+            return (SolverStatus.UNSAT, None)
+        if res != z3.sat:
+            # z3.unknown — 不调 unsat_core（ADR-011 阻断项：unknown 时该 API 行为未定义）
+            return (SolverStatus.UNKNOWN, None)
         model = solver.model()
         schedule = {op.trace_id: model.eval(t_vars[op.trace_id]).as_long() for op in compute_ops}
         
@@ -312,4 +373,4 @@ class UCodeSynthesizer:
                     producer.metadata["slot_id"] = target_slot
                     producer.metadata["sel"] = sel_id
 
-        return schedule, unit_assignments
+        return (SolverStatus.SAT, (schedule, unit_assignments))

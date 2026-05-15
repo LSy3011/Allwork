@@ -125,6 +125,12 @@ class IIAnalyzer:
         II_bank = max(bank_usage.values()) if bank_usage else 1
         II_res = max(II_res, II_bank)
 
+        # ADR-011 Phase 2: Loop-carried 递归 MII (RecMII)
+        # 单边 back-edge `op -> dep with distance=1, latency=lat` 强制 II >= lat
+        # 这是合法下界（不会超过真 SAT II），对有 loop_carried_depends_on 的算子有效
+        II_rec = self._compute_recurrence_mii(ops)
+        II_final = max(II_res, II_rec, 1)
+
         # 打印分析报告
         print(f"[II-ANALYSIS] Resource breakdown:")
         for res, d in breakdown.items():
@@ -133,6 +139,25 @@ class IIAnalyzer:
         if bank_usage:
             max_b = max(bank_usage, key=bank_usage.get)
             print(f"  BANK-CONFLICT  : max_access={bank_usage[max_b]} (Bank {max_b}) → II_bank={II_bank}")
-        print(f"[II-ANALYSIS] Theoretical MII = {II_res} cycles")
+        if II_rec > 1:
+            print(f"  REC-MII (loop-carried): max_back_edge_latency={II_rec} → II_rec={II_rec}")
+        print(f"[II-ANALYSIS] Theoretical MII = {II_final} cycles (res={II_res}, rec={II_rec})")
 
-        return II_res
+        return II_final
+
+    def _compute_recurrence_mii(self, ops: List[MIROp]) -> int:
+        """
+        ADR-011 Phase 2: Loop-carried 递归下界。
+
+        对每条 back-edge `op_b ←(II carry)── op_a, lat=L`（distance=1 隐式），
+        模调度理论给出 II >= L。这是 SAT II 的合法下界。
+
+        如果算子无 loop_carried_depends_on，返回 1（无影响）。
+        多 distance 暂不支持，因 metadata schema 当前为 dep_id -> latency。
+        """
+        max_rec = 1
+        for op in ops:
+            for _dep_id, lat in op.metadata.get("loop_carried_depends_on", {}).items():
+                if lat > max_rec:
+                    max_rec = lat
+        return max_rec
