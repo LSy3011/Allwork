@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.manual_matmul import ManualMatmulOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -20,16 +20,19 @@ OPERATOR_MAP = {
     "sin3":   HornerOperator,
     "sin5":   HornerOperator,
     "sin5_taylor": TaylorOperator,
-    "manual_matmul": ManualMatmulOperator,
+
     "manual_selu": ManualSeluOperator,
-    "selu": ManualSeluOperator
+    "selu": ManualSeluOperator,
+    # matmul 使用手动 DFG（ManualMatmulOperator），不走 ConfigurableOperator 的
+    # compile_with_adpc 路径（后者对 4-operand 公式生成的 DFG 结构 SMT 不可解）
+    "matmul": ManualMatmulOperator,
 }
 
 CATEGORIES = {
     "math": ["add", "mul", "div", "reciprocal", "sqrt", "rsqrt", "abs", "addcdiv", "addcmul"],
     "trig": ["horner", "sin3", "sin5", "sin5_taylor", "horner_v3", "cos4", "cosh4", "exp5", "expm1", "sinh5", "log", "log1p", "log2", "tan7", "tanh7"],
     "activation": ["elu", "mish", "hardsigmoid", "hardswish", "gelu_approx", "silu_approx", "silu_taylor", "sigmoid_taylor", "leaky_relu", "clip", "relu6", "relu_offset", "selu"],
-    "manual": ["manual_matmul", "manual_selu", "matmul", "mini_matmul"]
+    "manual": ["manual_selu", "matmul"]
 }
 
 
@@ -53,7 +56,7 @@ DEFAULT_OP_ARGS = {
     "sin5_taylor": {"coeffs": {5: 1/120.0, 3: -1/6.0, 1: 1.0}}
 }
 
-def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show_r: bool, show_m: bool) -> bool:
+def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show_r: bool, show_m: bool, input_file: str = None) -> bool:
     if show_r:
         print("\n" + "="*20 + f" AIACC V2.0 Modular Verification: {op_name.upper()} " + "="*20)
     
@@ -70,8 +73,21 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     # 实例化算子（通过参数注入实现去硬编码）
     operator = OPERATOR_MAP[op_name](**op_args)
 
-    # 动态生成输入数据（由算子自行决定结构）
-    input_data = operator.prepare_input(n_rows)
+    # 加载自定义输入数据或动态生成
+    if input_file:
+        if not os.path.exists(input_file):
+            print(f"[ERROR] Input file '{input_file}' not found.")
+            return False
+        loaded = np.load(input_file)
+        input_data = {k: loaded[k] for k in loaded.files}
+        # 动态重设实际行数
+        first_key = next(iter(input_data))
+        n_rows = len(input_data[first_key])
+        if show_r:
+            print(f"[INFO] Loaded custom inputs from '{input_file}' ({n_rows} rows).")
+    else:
+        # 动态生成输入数据（由算子自行决定结构）
+        input_data = operator.prepare_input(n_rows)
     
     # 2. 运行流水线
     runner = PipelineRunner(hw_config_name=hw_config_name, show_review=show_r, show_model=show_m)
@@ -86,7 +102,7 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     # 解析实际轨迹用于对齐图 (下沉到 PipelineRunner)
     actual_activity = runner.parse_simulation_timeline(ctx["output_dir"])
 
-    print_aligned_timeline(ctx["schedule"], actual_activity, ctx["II"], max_cycles=50, show_review=show_m)
+    # print_aligned_timeline(ctx["schedule"], actual_activity, ctx["II"], max_cycles=50, show_review=show_m)
 
     # 4. 分阶段审计 (Fail-Fast)
     auditor = Auditor(ctx["output_dir"], runner.spec, show_review=show_r, show_model=show_m)
@@ -112,8 +128,8 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
         print("\n[AUTO-DEBUG] Replaying physical instructions and timeline for diagnosis:")
         print_physical_instructions(ctx["physical_instrs"], show_model=True)
         actual_activity_debug = runner.parse_simulation_timeline(ctx["output_dir"])
-        print_aligned_timeline(ctx["schedule"], actual_activity_debug, ctx["II"],
-                               max_cycles=80, show_review=True)
+        # print_aligned_timeline(ctx["schedule"], actual_activity_debug, ctx["II"],
+        #                        max_cycles=80, show_review=True)
         return False
 
 def run_smt_unit_tests() -> bool:
@@ -161,6 +177,8 @@ def main():
                         help="Hardware configuration name")
     parser.add_argument("--n-rows", type=int, default=256,
                         help="Number of data rows to verify (Default: 256)")
+    parser.add_argument("--input-file", type=str, default=None,
+                        help="Path to an optional .npz file containing custom input arrays")
     parser.add_argument("--review", action="store_true", default=True)
     parser.add_argument("--no-review", action="store_false", dest="review")
     parser.add_argument("--model", action="store_true", default=False)
@@ -169,11 +187,11 @@ def main():
     parser.add_argument("--mode", type=str, default="e2e",
                         choices=["e2e", "smt-unit", "hw-parity", "all"],
                         help=(
-                            "Verification mode:\n"
-                            "  e2e       - End-to-end operator verification (default)\n"
-                            "  smt-unit  - SMT constraint unit tests (no simulation)\n"
-                            "  hw-parity - Hardware physical parity tests\n"
-                            "  all       - All modes in sequence (fail-fast)"
+                             "Verification mode:\n"
+                             "  e2e       - End-to-end operator verification (default)\n"
+                             "  smt-unit  - SMT constraint unit tests (no simulation)\n"
+                             "  hw-parity - Hardware physical parity tests\n"
+                             "  all       - All modes in sequence (fail-fast)"
                         ))
 
     args = parser.parse_args()
@@ -201,7 +219,7 @@ def main():
             sys.exit(1)
         # 最后跑 e2e
         kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(args.op, {})
-        results["e2e"] = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+        results["e2e"] = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m, args.input_file)
         all_ok = all(results.values())
         print("\n" + "="*20 + " FULL SUITE REPORT " + "="*20)
         for k, v in results.items():
@@ -218,7 +236,7 @@ def main():
             results = {}
             for op in target_ops:
                 kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(op, {})
-                success = run_test(op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+                success = run_test(op, args.n_rows, kwargs, args.hw_config, show_r, show_m, args.input_file)
                 results[op] = success
 
             print("\n" + "="*20 + f" BATCH VERIFICATION REPORT ({args.op.upper()}) " + "="*20)
@@ -230,7 +248,7 @@ def main():
             sys.exit(0 if all_passed else 1)
         else:
             kwargs = op_args_dict if op_args_dict else DEFAULT_OP_ARGS.get(args.op, {})
-            success = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m)
+            success = run_test(args.op, args.n_rows, kwargs, args.hw_config, show_r, show_m, args.input_file)
             sys.exit(0 if success else 1)
 
 if __name__ == "__main__":

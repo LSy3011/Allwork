@@ -93,6 +93,34 @@ class ConfigurableOperator(BaseOperator):
         )
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        if self.name == "matmul":
+            # [V8.0] 对齐真实硬件行为：
+            # 每次外层迭代（vector_lanes 行）执行 4 次独立计算（step k, k=0..3）：
+            #   FPMUL: [ak*bk] 4-lane 向量乘法
+            #   ADDTREE 通道0: S0[0]+S0[1]+S0[2]+S0[3]+old_0
+            # pipeline latency (4 cycles) 自然将相邻 step 的 old_0 隔离为 0，
+            # 因此 4 个输出位置各自独立：
+            #   y[start+k] = sum(ak[start:end] * bk[start:end])  (k=0..3)
+            a0 = input_data["a0"]
+            a1 = input_data["a1"]
+            a2 = input_data["a2"]
+            a3 = input_data["a3"]
+            b0 = input_data["b0"]
+            b1 = input_data["b1"]
+            b2 = input_data["b2"]
+            b3 = input_data["b3"]
+
+            n_rows = len(a0)
+            golden_y = np.zeros(n_rows, dtype=np.float32)
+            for iter_idx in range(n_rows // vector_lanes):
+                start = iter_idx * vector_lanes
+                end   = start + vector_lanes
+                golden_y[start + 0] = np.sum(a0[start:end] * b0[start:end])
+                golden_y[start + 1] = np.sum(a1[start:end] * b1[start:end])
+                golden_y[start + 2] = np.sum(a2[start:end] * b2[start:end])
+                golden_y[start + 3] = np.sum(a3[start:end] * b3[start:end])
+            return {"y": golden_y, "intermediates": []}
+
         expr = self.formula
         # 获取排序后的符号列表
         sorted_symbols = sorted([str(s) for s in expr.free_symbols])

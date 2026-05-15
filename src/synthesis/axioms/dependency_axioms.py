@@ -63,14 +63,10 @@ class DependencyAxioms(AxiomBase):
                     f"rtovr_strict_{op.trace_id}_{prod_id}"
                 )
                 
-                # 2. 异步锁存延迟约束：
-                # - Addition trees have elastic input latch buffers, allowing them to support relaxed timing (Option A / inequality >= t_latch + 1).
-                # - Multipliers, simple ALUs, and UR_WRITE do not have elastic buffers, so they must be executed in the cycle immediately following latching (Option B / strict equality == t_latch + 1) to match RtoVR's 1-cycle latency.
-                is_elastic = op.op_type.upper() in ["FP32ADDTREE5TO1", "FP32ADDTREE8TO1"]
-                if is_elastic:
-                    latch_cond = (t_vars[op.trace_id] >= t_latch + 1)
-                else:
-                    latch_cond = (t_vars[op.trace_id] == t_latch + 1)
+                # Multipliers, ALUs, UR_WRITE, and addition trees do not have elastic buffers, 
+                # so they must be executed in the cycle immediately following latching (strict equality == t_latch + 1)
+                # to match RtoVR's 1-cycle latency.
+                latch_cond = (t_vars[op.trace_id] == t_latch + 1)
 
                 DependencyAxioms._add_constraint(
                     solver,

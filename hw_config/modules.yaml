@@ -183,7 +183,7 @@ modules:
 
   FP32ADDTREE5TO1:
     type: compute
-    latency: 2
+    latency: 4
     code_bits: 6
     code_fields:
       - {name: VALID, bits: 1}

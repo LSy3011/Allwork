@@ -192,9 +192,12 @@ class SMTSynthesizer:
                           dep_node.metadata.get("is_const", False) or 
                           dep_node.metadata.get("stride", 1) == 0 or
                           "UR_WRITE" in dep_node.op_type.upper())
-                if not is_inv:
-                    # 必须在锁存器被下一个循环迭代的数据冲刷前 (lat + II) 读取
-                    solver.add(t[op.trace_id] < t[dep_id] + delay + II)
+
+        # ── 3.5. 通用循环携带依赖约束 (Generic Loop-Carried Dependency Constraints) ──────
+        for op in ops:
+            for dep_id, latency in op.metadata.get("loop_carried_depends_on", {}).items():
+                if dep_id in t:
+                    solver.add(t[op.trace_id] + II >= t[dep_id] + latency)
 
         # ── 4. 资源互斥公理（基于模槽 s）────────────────────────────────
         axioms.add_resource_constraint(solver, ops, t, II, self.hw_spec, u_vars=iq_vars)

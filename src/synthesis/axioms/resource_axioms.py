@@ -11,11 +11,15 @@ class ResourceAxioms(AxiomBase):
 
     @staticmethod
     def get_remainder_vars(solver, tid, t_vars, II):
-        q = z3.Int(f"q_{tid}")
-        r = z3.Int(f"r_{tid}")
-        solver.add(t_vars[tid] == q * II + r)
-        solver.add(r >= 0, r < II)
-        return q, r
+        if not hasattr(solver, "remainder_cache"):
+            solver.remainder_cache = {}
+        if (tid, II) not in solver.remainder_cache:
+            q = z3.Int(f"q_{tid}")
+            r = z3.Int(f"r_{tid}")
+            solver.add(t_vars[tid] == q * II + r, desc=f"rem_eq_{tid}")
+            solver.add(z3.And(r >= 0, r < II), desc=f"rem_bound_{tid}")
+            solver.remainder_cache[(tid, II)] = (q, r)
+        return solver.remainder_cache[(tid, II)]
 
     @staticmethod
     def add_resource_constraint(solver, ops, t_vars, II, spec, **kwargs):
@@ -60,7 +64,7 @@ class ResourceAxioms(AxiomBase):
             if not valid_iqs:
                 continue
 
-            if II <= 16:
+            if II <= 6:
                 # Pre-create and cache remainder variables once per op to avoid redundant constraint generation
                 rem_vars = {}
                 for op in op_list:
@@ -224,18 +228,15 @@ class ResourceAxioms(AxiomBase):
             for ops_list in list(bank_writes.values()) + list(bank_reads.values()):
                 conflict_ops.extend(ops_list)
             
-            # 为这些节点建立 Quotient-Remainder (商-余数) 辅助变量
-            # t = q * II + r
+            # 为这些节点建立 / 复用 Quotient-Remainder (商-余数) 辅助变量
+            rem_vars = {}
             for op in set(conflict_ops):
                 tid = op.trace_id
-                q_var = z3.Int(f"bq_{tid}")
-                r_var = z3.Int(f"br_{tid}")
-                solver.add(t_vars[tid] == q_var * II_val + r_var)
-                solver.add(r_var >= 0)
-                solver.add(r_var < II_val)
+                _, r_var = ResourceAxioms.get_remainder_vars(solver, tid, t_vars, II_val)
+                rem_vars[tid] = r_var
                 
             def get_mod_val(op):
-                return z3.Int(f"br_{op.trace_id}")
+                return rem_vars[op.trace_id]
                 
             for bid, write_ops in bank_writes.items():
                 if len(write_ops) > 1:

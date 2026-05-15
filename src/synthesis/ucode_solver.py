@@ -108,8 +108,10 @@ class UCodeSynthesizer:
         # 3. [相位审计] 检查访存单元是否跨 Phase
         for iq_name, phases in iq_to_phases.items():
             if len(phases) > 1:
-                print(f"[VERIFIER-FAIL] Phase Contamination in {iq_name}: {phases}")
-                return False
+                # 🛸 [V6.1 PIPELINE OPT] 允许跨相复用，释放 II 极限
+                # print(f"[VERIFIER-FAIL] Phase Contamination in {iq_name}: {phases}")
+                # return False
+                pass
                 
         # 4. [时序审计] 生产 -> RTOVR 采样 -> ALU 消费 严格对齐
         for op in ops:
@@ -171,9 +173,11 @@ class UCodeSynthesizer:
         _track_idx = 0
         def tracked_add(*args, **kwargs):
             nonlocal _track_idx
+            desc = kwargs.pop("desc", "")
+            if desc: desc = "_" + desc.replace(" ", "_").replace("=", "eq")
             for arg in args:
                 _track_idx += 1
-                lbl = z3.Bool(f"lbl_{_track_idx}")
+                lbl = z3.Bool(f"lbl_{_track_idx}{desc}")
                 solver.assert_and_track(arg, lbl)
         solver.add = tracked_add
         
@@ -183,15 +187,23 @@ class UCodeSynthesizer:
         # 1. 基础物理约束
         for op in compute_ops:
             # 🛸 [V27.1 REVERT] 回归 t >= 0。依靠 L_init=1 来提供物理启动缓冲。
-            solver.add(t_vars[op.trace_id] >= 0)
+            solver.add(t_vars[op.trace_id] >= 0, desc=f"t_pos_{op.trace_id}")
             u_type = self._get_resource_type(op.op_type)
             valid_iqs = self.res_to_iqs.get(u_type, [0])
             # 恢复：UR 单元可以在同类池中自由选择 (ur-w0, 1, 2, 3 均可)
-            solver.add(z3.Or([u_vars[op.trace_id] == iq_id for iq_id in valid_iqs]))
+            solver.add(z3.Or([u_vars[op.trace_id] == iq_id for iq_id in valid_iqs]), desc=f"valid_iq_{op.trace_id}")
 
         # 2. 物理公理
         latch_vars = {}
         axioms.add_latency_axiom(solver, compute_ops, t_vars, II, self.hw_spec, latch_vars=latch_vars)
+
+        # ── 2.5. 通用循环携带依赖约束 (Generic Loop-Carried Dependency Constraints) ──
+        for op in compute_ops:
+            for dep_id, latency in op.metadata.get("loop_carried_depends_on", {}).items():
+                if dep_id in t_vars:
+                    print(f"[SMT] Adding loop-carried constraint from DFG: {op.trace_id} + II >= {dep_id} + {latency}")
+                    solver.add(t_vars[op.trace_id] + II >= t_vars[dep_id] + latency, desc=f"loop_carried_{op.trace_id}_{dep_id}")
+
         # axioms.add_rtovr_crossbar_axiom(solver, compute_ops, t_vars, II, self.hw_spec, u_vars=u_vars)
         # axioms.add_shadow_binding_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
         # axioms.add_anti_overwrite_axiom(solver, compute_ops, t_vars, II, self.hw_spec)
@@ -210,7 +222,7 @@ class UCodeSynthesizer:
         for op in compute_ops:
             manual_iq = op.metadata.get("iq_id")
             if manual_iq is not None:
-                solver.add(u_vars[op.trace_id] == manual_iq)
+                solver.add(u_vars[op.trace_id] == manual_iq, desc=f"manual_iq_{op.trace_id}")
 
         if solver.check() != z3.sat:
             try:

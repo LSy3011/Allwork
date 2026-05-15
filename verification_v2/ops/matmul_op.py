@@ -17,14 +17,14 @@ class ManualMatmulOperator(BaseOperator):
     def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
         # 定义 8 个输入张量和 1 个输出张量
         return {
-            "a0": {"bank": 0, "offset": 0, "role": "input", "precision": "fp32"},
-            "a1": {"bank": 0, "offset": 64, "role": "input", "precision": "fp32"},
-            "a2": {"bank": 0, "offset": 128, "role": "input", "precision": "fp32"},
-            "a3": {"bank": 0, "offset": 192, "role": "input", "precision": "fp32"},
-            "b0": {"bank": 1, "offset": 0, "role": "input", "precision": "fp32"},
-            "b1": {"bank": 1, "offset": 64, "role": "input", "precision": "fp32"},
-            "b2": {"bank": 1, "offset": 128, "role": "input", "precision": "fp32"},
-            "b3": {"bank": 1, "offset": 192, "role": "input", "precision": "fp32"},
+            "a0": {"bank": 0, "offset": 0, "role": "input", "precision": "fp32", "stride": 4},
+            "a1": {"bank": 0, "offset": 1, "role": "input", "precision": "fp32", "stride": 4},
+            "a2": {"bank": 0, "offset": 2, "role": "input", "precision": "fp32", "stride": 4},
+            "a3": {"bank": 0, "offset": 3, "role": "input", "precision": "fp32", "stride": 4},
+            "b0": {"bank": 1, "offset": 0, "role": "input", "precision": "fp32", "stride": 4},
+            "b1": {"bank": 1, "offset": 1, "role": "input", "precision": "fp32", "stride": 4},
+            "b2": {"bank": 1, "offset": 2, "role": "input", "precision": "fp32", "stride": 4},
+            "b3": {"bank": 1, "offset": 3, "role": "input", "precision": "fp32", "stride": 4},
             "y":  {"bank": 5, "offset": 0, "role": "output", "precision": "fp32"}
         }
 
@@ -44,8 +44,30 @@ class ManualMatmulOperator(BaseOperator):
         b1 = input_data["b1"]
         b2 = input_data["b2"]
         b3 = input_data["b3"]
-        # y = a0*b0 + a1*b1 + a2*b2 + a3*b3
-        golden_y = a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3
+
+        n_rows = len(a0)
+        golden_y = np.zeros(n_rows, dtype=np.float32)
+        
+        acc0 = 0.0
+        acc1 = 0.0
+        acc2 = 0.0
+        acc3 = 0.0
+        
+        for iter_idx in range(n_rows // vector_lanes):
+            start = iter_idx * vector_lanes
+            end   = start + vector_lanes
+            
+            # [V8.1] 硬件永不清零 old_i (dr_d0)，所以跨迭代持续累加
+            acc0 += np.sum(a0[start:end] * b0[start:end])
+            acc1 += np.sum(a1[start:end] * b1[start:end])
+            acc2 += np.sum(a2[start:end] * b2[start:end])
+            acc3 += np.sum(a3[start:end] * b3[start:end])
+            
+            golden_y[start + 0] = acc0
+            golden_y[start + 1] = acc1
+            golden_y[start + 2] = acc2
+            golden_y[start + 3] = acc3
+
         return {"y": golden_y, "intermediates": []}
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
@@ -54,61 +76,62 @@ class ManualMatmulOperator(BaseOperator):
         # 🛸 深度对齐：定义临时物理暂存 Bank，分别写入 4 个空闲物理 Bank（Bank 2, 3, 4, 6）以消除 Bank 冲突
         temp_banks = [2, 3, 4, 6]
         
-        # 1. 创建输入读取节点 (4拍内串行/流水读取)
+        # 1. 创建输入读取节点 (a0..a3, b0..b3 全部使用 stride=4，配合对称性破缺 iq_id)
         a_reads = []
         b_reads = []
         for i in range(4):
-            # a_i in Bank 0
+            ar_iq = 30 + (i % 2) * 2
+            br_iq = 31 + (i % 2) * 2
+            # a_i in Bank 0, stride 4
             ar = b.make_op(
                 "UR_READ", f"a{i}_read", RT.UR_READ, [], 
-                meta_name=f"a{i}", logical_addr=0 * 256 + i * 64, stride=1, role="input", iq_id=30
+                meta_name=f"a{i}", logical_addr=0 * 256 + i, stride=4, role="input", iq_id=ar_iq
             )
-            # b_i in Bank 1
+            # b_i in Bank 1, stride 4
             br = b.make_op(
                 "UR_READ", f"b{i}_read", RT.UR_READ, [], 
-                meta_name=f"b{i}", logical_addr=1 * 256 + i * 64, stride=1, role="input", iq_id=31
+                meta_name=f"b{i}", logical_addr=1 * 256 + i, stride=4, role="input", iq_id=br_iq
             )
             a_reads.append(ar)
             b_reads.append(br)
 
-        # 2. 创建乘积和暂存节点 (4拍流水乘法 + 写入对应的物理 Bank)
+        # 2. 创建乘积和暂存节点 (写入中间 Bank 2,3,4,6，且全部使用 stride=4 以保持与输入 a/b 完全一致的读周期步长)
         temp_reads = []
         for i in range(4):
-            # (1) 通过 RTOVR 搬运到 FPMUL 两个物理端口
-            rt_a = b.make_op("RTOVR", f"rt_a{i}_FPMUL_S0", PS.FPMUL_S0, [a_reads[i]], sel=30)
-            rt_b = b.make_op("RTOVR", f"rt_b{i}_FPMUL_S1", PS.FPMUL_S1, [b_reads[i]], sel=31)
+            # (1) RTOVR 搬运
+            rt_a = b.make_op("RTOVR", f"rt_a{i}_FPMUL_S0", PS.FPMUL_S0, [a_reads[i]])
+            rt_b = b.make_op("RTOVR", f"rt_b{i}_FPMUL_S1", PS.FPMUL_S1, [b_reads[i]])
             
-            # (2) 执行 FPMUL 乘法
+            # (2) FPMUL 乘法
             mul = b.make_op("FPMUL", f"inl_mul{i}", RT.FPMUL, [rt_a, rt_b], iq_id=3)
             
-            # (3) 乘积经 RTOVR 搬运到写总线 (选通 FPMUL 出口 = 3)
-            rt_write = b.make_op("RTOVR", f"rt_mul{i}_UR_W0_S", PS.UR_W0_S, [mul], sel=3)
+            # (3) 乘积经 RTOVR 搬运到写总线 (让 SMT 决定写向哪个 UR_W_S)
+            write_ps = getattr(PS, f"UR_W{i}_S")
+            rt_write = b.make_op("RTOVR", f"rt_mul{i}_{write_ps.name}", write_ps, [mul], sel=3)
             
-            # (4) 串行写回中间 Bank
+            # (4) 写入中间 Bank (使用 stride=4，并且专门分配到 ur-w1..3 写入通道，避免与 ur-w0 的 stride-1 冲突)
             write_addr = temp_banks[i] * 256 + 0
             write_name = f"temp_write{i}"
+            tr_w_iq = 36 + (i % 3)
             b.make_op(
                 "UR_WRITE", write_name, RT.UR_WRITE, [rt_write], 
-                logical_addr=write_addr, stride=1, role="intermediate", iq_id=35
+                logical_addr=write_addr, stride=4, role="intermediate", iq_id=tr_w_iq
             )
             
-            # (5) 对应地，后面我们需要并行读出这 4 个乘积
-            # 分别使用 UR_READ_0, 1, 2, 3 物理实例在同一拍读出
-            # 🛸 关键修复：加入对对应写操作的 RAW 依赖，确保调度时序绝对正确
+            # (5) 并行读出 (使用 stride=4 并且映射到 ur-r0..3。这样所有 4 个读取通道的步长完全均一为 4)
+            tr_iq = 30 + i
             tr = b.make_op(
                 "UR_READ", f"temp_read{i}", RT.UR_READ, [write_name], 
-                logical_addr=write_addr, stride=1, role="intermediate", iq_id=30 + i
+                logical_addr=write_addr, stride=4, role="intermediate", iq_id=tr_iq
             )
             temp_reads.append(tr)
 
-        # 3. 创建归约树求和阶段 (4路并行选通 RTOVR -> FP32ADDTREE5TO1)
+        # 3. 创建归约树求和阶段
         rt_sums = []
         for i in range(4):
-            # 将 4 个 temp_read 节点并选到加法树的 4 个物理输入插槽 (FP32ADDTREE5TO1_S0 到 S3)
-            # 对应的 sel 依次是：30, 31, 32, 33 (对应 UR_READ_0_D 到 UR_READ_3_D)
             rt_sum = b.make_op(
                 "RTOVR", f"rt_temp_read{i}_FP32ADDTREE5TO1_S{i}", 
-                getattr(PS, f"FP32ADDTREE5TO1_S{i}"), [temp_reads[i]], sel=30 + i
+                getattr(PS, f"FP32ADDTREE5TO1_S{i}"), [temp_reads[i]]
             )
             rt_sums.append(rt_sum)
 
@@ -118,9 +141,9 @@ class ManualMatmulOperator(BaseOperator):
             cumulative=True, reduction_per_channel=4, iq_id=26
         )
 
-        # 5. y_0 输出写回到 Bank 5 Offset 0 (选通 FP32ADDTREE5TO1_D0 出口 = 26)
+        # 5. y_0 输出写回
         rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
-        
+
         b.make_op(
             "UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out], 
             logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35

@@ -33,29 +33,45 @@ def lower_add(c, sym, expr):
 @KernelRegistry.register(lambda e: isinstance(e, sp.Add) and len(e.args) == 4 and all(isinstance(arg, sp.Mul) for arg in e.args))
 def lower_fp32addtree_5to1(c, sym, expr):
     """
-    [ALGORITHM OPTIMIZATION] 乘加树硬件映射：
-    自动将形如 "a0*b0 + a1*b1 + a2*b2 + a3*b3" 的 4 路内积结构
-    直接合并并下沉为单个 FP32ADDTREE5TO1 硬件宏指令，完全绕过二叉 FPADD。
+    [ALGORITHM OPTIMIZATION] 乘加树硬件高度流水化重构：
+    不再采用高延迟、无法重叠的串行 FP32ADDTREE5TO1 节点链（这会导致 II = 16 性能极低）。
+    相反，我们利用高吞吐、完全流水的 FPADD 浮点加法器，在 DFG 层面并行构建二叉求和树：
+      sum0 = m0 + m1 (FPADD)
+      sum1 = m2 + m3 (FPADD)
+      sum_all = sum0 + sum1 (FPADD)
+    最后将单路 4-lane 结果送入单个 FP32ADDTREE5TO1 节点，仅进行一次单拍规约，无状态且无循环携带依赖。
+    这样不仅彻底排除了跨迭代的物理污染与 Latch 覆盖，还能让 SMT 求解器流畅求解出最优的 II = 4 计算吞吐！
     """
     args = list(expr.args)
-    # 1. 获取 4 个乘积项对应的 FPMUL 运算节点 (自动触发 _get_op 的 inline Lowering)
     mul_nodes = [c._get_op(arg) for arg in args]
 
-    # 2. 将这 4 个乘积项路由到 FP32ADDTREE5TO1 的前 4 个输入端口 (S0, S1, S2, S3)
-    r_nodes = []
-    for i, m_node in enumerate(mul_nodes):
-        slot = getattr(PS, f"FP32ADDTREE5TO1_S{i}")
-        r_nodes.append(c._route(m_node, slot))
+    # 1. 第一层并行 FPADD
+    r_m0 = c._route(mul_nodes[0], PS.FPADD_S0)
+    r_m1 = c._route(mul_nodes[1], PS.FPADD_S1)
+    sum0 = c.b.make_op("FPADD", f"{sym}_sum0", RT.FPADD, [r_m0, r_m1])
 
-    # 3. 构造 FP32ADDTREE5TO1 节点
-    c.mir_env[sym] = c.b.make_op(
+    r_m2 = c._route(mul_nodes[2], PS.FPADD_S0)
+    r_m3 = c._route(mul_nodes[3], PS.FPADD_S1)
+    sum1 = c.b.make_op("FPADD", f"{sym}_sum1", RT.FPADD, [r_m2, r_m3])
+
+    # 2. 第二层 FPADD 汇聚成一个 4-lane vector
+    r_s0 = c._route(sum0, PS.FPADD_S0)
+    r_s1 = c._route(sum1, PS.FPADD_S1)
+    sum_all = c.b.make_op("FPADD", f"{sym}_sum_all", RT.FPADD, [r_s0, r_s1])
+
+    # 3. 单路规约求和
+    r_final = c._route(sum_all, PS.FP32ADDTREE5TO1_S0)
+    
+    curr_node = c.b.make_op(
         "FP32ADDTREE5TO1",
         str(sym),
         RT.FP32ADDTREE5TO1,
-        r_nodes,
-        cumulative=True,
+        [r_final],
+        cumulative=False,
         reduction_per_channel=4
     )
+    c.mir_env[sym] = curr_node
+
 
 @KernelRegistry.register(lambda e: isinstance(e, sp.Pow))
 def lower_pow(c, sym, expr):

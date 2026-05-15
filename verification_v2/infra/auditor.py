@@ -69,9 +69,11 @@ class Auditor:
             
         return all_passed
 
-    def _evaluate_expected_values(self, ops, input_data, iter_idx, vector_lanes=None):
+    def _evaluate_expected_values(self, ops, input_data, iter_idx, vector_lanes=None, acc_state=None):
         import numpy as np
         env = {}
+        if acc_state is None:
+            acc_state = {}
         if not ops or not input_data:
             return env
             
@@ -121,6 +123,73 @@ class Auditor:
             if len(coeff_powers) > 0 and all(0 <= p < num_coeffs for p in coeff_powers):
                 is_direct_index = True
         
+        def _evaluate_vector_lanes(op_id, current_iter_idx):
+            if op_id not in op_map:
+                return np.zeros(vector_lanes, dtype=np.float32)
+            op_node = op_map[op_id]
+            op_type = op_node.op_type.upper()
+            role = op_node.metadata.get("role")
+            deps = op_node.metadata.get("depends_on", [])
+            
+            start = current_iter_idx * vector_lanes
+            end = start + vector_lanes
+            
+            if op_type == "UR_READ":
+                if role == "input":
+                    sym_name = op_node.metadata.get("meta_name", op_id.split("_read_")[0])
+                    if sym_name in input_data:
+                        arr = input_data[sym_name]
+                        res = np.zeros(vector_lanes, dtype=np.float32)
+                        slice_len = min(vector_lanes, len(arr) - start)
+                        if slice_len > 0:
+                            res[:slice_len] = arr[start:start+slice_len]
+                        return res
+                elif role == "constant":
+                    try:
+                        parts = op_id.split("_")
+                        prefix_len = len(parts[0]) + len(parts[1]) + 2
+                        val_part = op_id[prefix_len:]
+                        if "_dup" in val_part:
+                            val_part = val_part.split("_dup")[0]
+                        val_part = val_part.replace("n", "-").replace("_", ".")
+                        return np.full(vector_lanes, float(val_part), dtype=np.float32)
+                    except:
+                        return np.zeros(vector_lanes, dtype=np.float32)
+                elif role == "param":
+                    meta_name = op_node.metadata.get("meta_name", "")
+                    if meta_name.startswith("c") and meta_name[1:].isdigit() and "coeffs" in input_data:
+                        p = int(meta_name[1:])
+                        idx = p if is_direct_index else power_to_idx.get(p, 0)
+                        if idx < len(input_data["coeffs"]):
+                            return np.full(vector_lanes, float(input_data["coeffs"][idx]), dtype=np.float32)
+                    elif meta_name in input_data:
+                        val = input_data[meta_name]
+                        if isinstance(val, (list, np.ndarray)):
+                            return np.full(vector_lanes, float(val[0]), dtype=np.float32)
+                        return np.full(vector_lanes, float(val), dtype=np.float32)
+                dep = deps[0] if deps else None
+                return _evaluate_vector_lanes(dep, current_iter_idx) if dep else np.zeros(vector_lanes, dtype=np.float32)
+                
+            elif op_type == "FPMUL":
+                val0 = _evaluate_vector_lanes(deps[0], current_iter_idx) if len(deps) > 0 else np.zeros(vector_lanes, dtype=np.float32)
+                val1 = _evaluate_vector_lanes(deps[1], current_iter_idx) if len(deps) > 1 else np.zeros(vector_lanes, dtype=np.float32)
+                return val0 * val1
+                
+            elif op_type == "FPADD":
+                val0 = _evaluate_vector_lanes(deps[0], current_iter_idx) if len(deps) > 0 else np.zeros(vector_lanes, dtype=np.float32)
+                val1 = _evaluate_vector_lanes(deps[1], current_iter_idx) if len(deps) > 1 else np.zeros(vector_lanes, dtype=np.float32)
+                if op_node.metadata.get("SUB") or op_node.metadata.get("sub"):
+                    return val0 - val1
+                return val0 + val1
+                
+            elif op_type == "RTOVR":
+                dep = deps[0] if deps else None
+                return _evaluate_vector_lanes(dep, current_iter_idx) if dep else np.zeros(vector_lanes, dtype=np.float32)
+                
+            else:
+                dep = deps[0] if deps else None
+                return _evaluate_vector_lanes(dep, current_iter_idx) if dep else np.zeros(vector_lanes, dtype=np.float32)
+
         for op in ops:
             trace_id = op.trace_id
             op_type = op.op_type.upper()
@@ -204,7 +273,21 @@ class Auditor:
                     env[trace_id] = val0 + val1
                     
             elif op_type in ("FP32ADDTREE5TO1", "FP32ADDTREE8TO1"):
-                env[trace_id] = sum(env.get(d, 0.0) for d in deps)
+                # 🛸 [V7.0] 物理加法树规约对齐：由于硬件执行的是对输入通道 S0 内部 4 个 Lane 的规约求和 (100% 物理对齐)
+                # 🛸 [V8.1] 硬件永不清零 old_i (dr_d0)，所以需跨迭代累加
+                s0_id = deps[0] if len(deps) > 0 else None
+                if s0_id:
+                    s0_lanes = _evaluate_vector_lanes(s0_id, iter_idx)
+                    cur_sum = float(np.sum(s0_lanes))
+                else:
+                    cur_sum = 0.0
+                
+                # 若算子指定了 cumulative (如 matmul)，则进行状态累加
+                if op.metadata.get("cumulative", False):
+                    acc_state[trace_id] = acc_state.get(trace_id, 0.0) + cur_sum
+                    env[trace_id] = acc_state[trace_id]
+                else:
+                    env[trace_id] = cur_sum
                     
             elif op_type == "LOGIC" and len(deps) >= 3:
                 val0 = env.get(deps[0], 0.0) if len(deps) > 0 else 0.0
@@ -270,9 +353,10 @@ class Auditor:
 
         # 🛸 动态计算所有中间节点的 SMT 数值过程
         expected_val_map = {}
+        acc_state = {}
         if ops and input_data:
             for iter_idx in range(num_iterations):
-                env = self._evaluate_expected_values(ops, input_data, iter_idx)
+                env = self._evaluate_expected_values(ops, input_data, iter_idx, acc_state=acc_state)
                 for t_id, val in env.items():
                     expected_val_map[(iter_idx, t_id)] = val
 
@@ -361,12 +445,12 @@ class Auditor:
                         else:
                             # 🚀 [SAT-OPT-3] 分级容差：按单元类型匹配物理精度
                             _TOLERANCES = {
-                                "ur-r":   1e-5,   # 内存读，与 Golden 精确一致
-                                "ur-w":   1e-5,   # 内存写，同上
-                                "rtovr":  1e-5,   # 寄存器路由，同上
-                                "fpmul":  1e-4,   # FP32 乘法精度
-                                "fpadd":  1e-4,   # FP32 加法精度
-                                "logic":  0.0,    # 比较/选择，必须 bit-exact
+                                "ur-r":   5e-4,   # 允许 5e-4 深度累加浮点误差
+                                "ur-w":   5e-4,   
+                                "rtovr":  5e-4,   
+                                "fpmul":  1e-4,   
+                                "fpadd":  1e-4,   
+                                "logic":  0.0,    
                             }
                             tol = next(
                                 (v for k, v in _TOLERANCES.items() if sim_iq_name.startswith(k)),

@@ -1,60 +1,14 @@
 name: "matmul"
-formula: "Matrix([
-  a0*b0_0 + a1*b1_0 + a2*b2_0 + a3*b3_0,
-  a0*b0_1 + a1*b1_1 + a2*b2_1 + a3*b3_1,
-  a0*b0_2 + a1*b1_2 + a2*b2_2 + a3*b3_2,
-  a0*b0_3 + a1*b1_3 + a2*b2_3 + a3*b3_3,
-  a0*b0_4 + a1*b1_4 + a2*b2_4 + a3*b3_4,
-  a0*b0_5 + a1*b1_5 + a2*b2_5 + a3*b3_5,
-  a0*b0_6 + a1*b1_6 + a2*b2_6 + a3*b3_6,
-  a0*b0_7 + a1*b1_7 + a2*b2_7 + a3*b3_7
-])"
+formula: "a0*b0 + a1*b1 + a2*b2 + a3*b3"
 tensors:
-  # Vector A (stored on Bank 0)
   a0: { bank: 0, offset: 0, role: "input", precision: "fp32", stride: 4 }
   a1: { bank: 0, offset: 1, role: "input", precision: "fp32", stride: 4 }
   a2: { bank: 0, offset: 2, role: "input", precision: "fp32", stride: 4 }
   a3: { bank: 0, offset: 3, role: "input", precision: "fp32", stride: 4 }
 
-  # Matrix B Row 0 (stored on Bank 1)
-  b0_0: { bank: 1, offset: 0, role: "input", precision: "fp32", stride: 8 }
-  b0_1: { bank: 1, offset: 1, role: "input", precision: "fp32", stride: 8 }
-  b0_2: { bank: 1, offset: 2, role: "input", precision: "fp32", stride: 8 }
-  b0_3: { bank: 1, offset: 3, role: "input", precision: "fp32", stride: 8 }
-  b0_4: { bank: 1, offset: 4, role: "input", precision: "fp32", stride: 8 }
-  b0_5: { bank: 1, offset: 5, role: "input", precision: "fp32", stride: 8 }
-  b0_6: { bank: 1, offset: 6, role: "input", precision: "fp32", stride: 8 }
-  b0_7: { bank: 1, offset: 7, role: "input", precision: "fp32", stride: 8 }
+  b0: { bank: 1, offset: 0, role: "input", precision: "fp32", stride: 4 }
+  b1: { bank: 1, offset: 1, role: "input", precision: "fp32", stride: 4 }
+  b2: { bank: 1, offset: 2, role: "input", precision: "fp32", stride: 4 }
+  b3: { bank: 1, offset: 3, role: "input", precision: "fp32", stride: 4 }
 
-  # Matrix B Row 1 (stored on Bank 2)
-  b1_0: { bank: 2, offset: 0, role: "input", precision: "fp32", stride: 8 }
-  b1_1: { bank: 2, offset: 1, role: "input", precision: "fp32", stride: 8 }
-  b1_2: { bank: 2, offset: 2, role: "input", precision: "fp32", stride: 8 }
-  b1_3: { bank: 2, offset: 3, role: "input", precision: "fp32", stride: 8 }
-  b1_4: { bank: 2, offset: 4, role: "input", precision: "fp32", stride: 8 }
-  b1_5: { bank: 2, offset: 5, role: "input", precision: "fp32", stride: 8 }
-  b1_6: { bank: 2, offset: 6, role: "input", precision: "fp32", stride: 8 }
-  b1_7: { bank: 2, offset: 7, role: "input", precision: "fp32", stride: 8 }
-
-  # Matrix B Row 2 (stored on Bank 3)
-  b2_0: { bank: 3, offset: 0, role: "input", precision: "fp32", stride: 8 }
-  b2_1: { bank: 3, offset: 1, role: "input", precision: "fp32", stride: 8 }
-  b2_2: { bank: 3, offset: 2, role: "input", precision: "fp32", stride: 8 }
-  b2_3: { bank: 3, offset: 3, role: "input", precision: "fp32", stride: 8 }
-  b2_4: { bank: 3, offset: 4, role: "input", precision: "fp32", stride: 8 }
-  b2_5: { bank: 3, offset: 5, role: "input", precision: "fp32", stride: 8 }
-  b2_6: { bank: 3, offset: 6, role: "input", precision: "fp32", stride: 8 }
-  b2_7: { bank: 3, offset: 7, role: "input", precision: "fp32", stride: 8 }
-
-  # Matrix B Row 3 (stored on Bank 4)
-  b3_0: { bank: 4, offset: 0, role: "input", precision: "fp32", stride: 8 }
-  b3_1: { bank: 4, offset: 1, role: "input", precision: "fp32", stride: 8 }
-  b3_2: { bank: 4, offset: 2, role: "input", precision: "fp32", stride: 8 }
-  b3_3: { bank: 4, offset: 3, role: "input", precision: "fp32", stride: 8 }
-  b3_4: { bank: 4, offset: 4, role: "input", precision: "fp32", stride: 8 }
-  b3_5: { bank: 4, offset: 5, role: "input", precision: "fp32", stride: 8 }
-  b3_6: { bank: 4, offset: 6, role: "input", precision: "fp32", stride: 8 }
-  b3_7: { bank: 4, offset: 7, role: "input", precision: "fp32", stride: 8 }
-
-  # Output Vector C (stored on Bank 5)
   y: { bank: 5, offset: 0, role: "output", precision: "fp32" }

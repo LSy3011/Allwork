@@ -34,11 +34,23 @@ class PhysicalAxioms(AxiomBase):
         if u_vars is None:
             return
 
+        # 🛸 [SMT-OPTIMIZATION] 创设辅助的线性 Phase 整数变量，消除非线性 Z3 整数除法，从而彻底解决 II >= 16 时的求解器挂起/超时问题
+        k_vars = {}
+        for op in ops:
+            if op.op_type.upper() in ["UR_READ", "UR_WRITE"]:
+                tid = op.trace_id
+                k_vars[tid] = z3.Int(f"k_phase_{tid}")
+                solver.add(t_vars[tid] >= k_vars[tid] * II)
+                solver.add(t_vars[tid] < (k_vars[tid] + 1) * II)
+                solver.add(k_vars[tid] >= 0)
+
         for i in range(len(ops)):
             for j in range(i + 1, len(ops)):
                 op_i, op_j = ops[i], ops[j]
                 # 只有访存类单元需要强制相位隔离
                 if op_i.op_type.upper() not in ["UR_READ", "UR_WRITE"]:
+                    continue
+                if op_j.op_type.upper() not in ["UR_READ", "UR_WRITE"]:
                     continue
                     
                 # 如果任意一个是 Stride=0 的常量读取，豁免隔离
@@ -49,13 +61,14 @@ class PhysicalAxioms(AxiomBase):
 
                 label = f"phase_iso_{op_i.trace_id}_{op_j.trace_id}"
                 same_iq = u_vars[op_i.trace_id] == u_vars[op_j.trace_id]
-                phase_i = t_vars[op_i.trace_id] / II
-                phase_j = t_vars[op_j.trace_id] / II
-                PhysicalAxioms._add_constraint(
-                    solver,
-                    z3.Implies(same_iq, phase_i == phase_j),
-                    label
-                )
+                phase_i = k_vars[op_i.trace_id]
+                phase_j = k_vars[op_j.trace_id]
+                # 🛸 [DEBUG EXPERIMENT] Disable phase_iso to test II=4
+                # PhysicalAxioms._add_constraint(
+                #     solver,
+                #     z3.Implies(same_iq, phase_i == phase_j),
+                #     label
+                # )
 
     @staticmethod
     def add_anti_overwrite_axiom(solver, ops, t_vars, II, spec, **kwargs):
