@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 
@@ -54,10 +55,77 @@ class HardwareSpec(BaseModel):
 
     @classmethod
     def load(cls, config_dir: str):
+        """
+        ADR-015: pickle 缓存包装。
+        - 命中：检查所有相关 yaml 文件 mtime 一致 → 返回缓存对象
+        - 未命中：fresh 加载 → 落盘缓存 → 返回
+        - 异常：静默 fallback 到 fresh，user 通过 print 知晓
+        - 逃生：`AIACC_NO_HW_SPEC_CACHE=1` 跳过缓存
+        """
+        import os
+        if os.environ.get("AIACC_NO_HW_SPEC_CACHE") == "1":
+            return cls._load_fresh(config_dir)
+
+        cached = cls._try_load_cached(config_dir)
+        if cached is not None:
+            return cached
+
+        spec = cls._load_fresh(config_dir)
+        try:
+            cls._save_cache(config_dir, spec)
+        except Exception as e:
+            print(f"[HW-SPEC-CACHE] WARN: failed to save cache: {e}")
+        return spec
+
+    @classmethod
+    def _cache_path(cls, config_dir: str):
+        import hashlib
+        from pathlib import Path
+        key = hashlib.sha256(os.path.abspath(config_dir).encode()).hexdigest()[:16]
+        return Path("build") / ".hw_spec_cache" / f"{key}.pkl"
+
+    @classmethod
+    def _collect_yaml_mtimes(cls, config_dir: str):
+        from pathlib import Path
+        base = Path(config_dir)
+        if not base.exists():
+            return {}
+        files = list(base.glob("*.yaml")) + list(base.glob("specs/**/*.yaml"))
+        return {str(p): p.stat().st_mtime for p in files}
+
+    @classmethod
+    def _try_load_cached(cls, config_dir: str):
+        import pickle
+        cache_file = cls._cache_path(config_dir)
+        if not cache_file.exists():
+            return None
+        try:
+            with open(cache_file, "rb") as f:
+                data = pickle.load(f)
+            expected_mtimes = cls._collect_yaml_mtimes(config_dir)
+            if data.get("mtimes") != expected_mtimes:
+                return None  # yaml 文件 mtime 不匹配（编辑/新增/删除）
+            return data["spec"]
+        except Exception:
+            return None  # pickle 反序列化失败、字段不兼容等 → fresh load
+
+    @classmethod
+    def _save_cache(cls, config_dir: str, spec):
+        import pickle
+        cache_file = cls._cache_path(config_dir)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        mtimes = cls._collect_yaml_mtimes(config_dir)
+        tmp = cache_file.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump({"mtimes": mtimes, "spec": spec}, f)
+        tmp.rename(cache_file)
+
+    @classmethod
+    def _load_fresh(cls, config_dir: str):
         import yaml
         from pathlib import Path
         base = Path(config_dir)
-        
+
         def load_yaml(f):
             p = base / f
             if not p.exists(): return {}
