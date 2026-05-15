@@ -1,3 +1,17 @@
+---
+adr_id: ADR-006 (legacy, docs/adm/adr/)
+title: 物理语义下沉与规格驱动 (Semantic Lowering & Spec-Driven Driver)
+status: accepted
+still_holds: yes
+last_verified: 2026-05-15
+audited_by: docs/adr/ADR-005-old-adr-audit.md
+notes: |
+  ✅ src/driver/field_mapper.py grep 验证：无 OpName 模式匹配硬编码
+  ✅ hw_config/specs/units/*.yaml 的 code_fields 是真相源
+  ✅ MIROp.metadata 显式承载硬件字段值，驱动按字段名查找
+  → 5 个旧 ADR 中唯一完全仍 holds 的
+---
+
 # ADR-006: 物理语义下沉与规格驱动 (Semantic Lowering & Spec-Driven Driver)
 
 ## 1. 现状与挑战

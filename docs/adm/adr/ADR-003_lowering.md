@@ -1,3 +1,18 @@
+---
+adr_id: ADR-003 (legacy, docs/adm/adr/)
+title: Lowering 流程（大模型辅助 + Bit-Perfect 冻结）
+status: superseded
+still_holds: no
+last_verified: 2026-05-15
+superseded_by: docs/adr/ADR-001-verification-v2-single-entry.md
+audited_by: docs/adr/ADR-005-old-adr-audit.md
+notes: |
+  🪦 src/library/atomic/ 已被 Big Prune 删除（commit 988e521）
+  🔄 算子流程改为 yaml-driven（verification_v2/ops/*.yaml + ConfigurableOperator）
+     + 手写 DFG（继承 verification_v2/ops/base.py:BaseOperator）
+  ✅ Bit-Perfect 验证思想仍在（main_verify.py --mode hw-parity），实现路径完全不同
+---
+
 # ADR-003: Lowering 流程 (大模型辅助 + Bit-Perfect 冻结)
 
 ## 1. 问题描述

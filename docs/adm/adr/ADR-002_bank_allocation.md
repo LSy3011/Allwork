@@ -1,3 +1,19 @@
+---
+adr_id: ADR-002 (legacy, docs/adm/adr/)
+title: Bank 分配架构 (方案 B+: 约束分离)
+status: superseded
+still_holds: no
+last_verified: 2026-05-15
+superseded_by: docs/adr/ADR-001-verification-v2-single-entry.md (architecturally)
+audited_by: docs/adr/ADR-005-old-adr-audit.md
+notes: |
+  🪦 三层切割（SMT / Stitcher / Layout）模型彻底废弃；Stitcher + Layout +
+     orchestrator/ 已删除（commit 988e521）
+  🪦 APB / FootprintMask / SMTOutputVerifier / StreamScanner / ConstraintChecker
+     全无代码痕迹
+  ✅ 仅"Bank 互斥通过 SMT"精神保留（resource_axioms.add_bank_conflict_axiom）
+---
+
 # ADR-002: Bank 分配架构 (方案 B+: 约束分离)
 
 ## 1. 问题描述

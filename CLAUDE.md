@@ -45,11 +45,11 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - ⚠ **UR 命名** —— hw_config yaml 写 "Unified Register"，但语义是 "User Register"（SRAM 实现）；统一时机未定
 - ⚠ **依赖版本漂移风险** —— 无 requirements.txt，z3 / pydantic / sympy 版本未锁；CI 缺失也无法预警
 - ⚠ **ADPC 版本散落** —— 源码注释里 V2.0 / V4.0 / V5.0 / V5.1 / V5.4 / V6.0 并存；统一版本号语义未定
-- ⚠ **旧 ADR-001~006 still_holds 未审计** —— `docs/adm/adr/` 中的 5 个 ADR 是否仍成立，需要逐个标 yes/partial/no
+- ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
 - ⚠ **Bank R-R 物理语义精确定义** —— docs/adm/collaboration_guide.md 提到 "R-R 冲突的精确定义只有你知道"，建议落到 hco subagent 的 prompt 里
 
 ## Historical docs (V1/Gemini era)
 `docs/{hco,adm,se,tfd,pvo,ig}/` 是 7-角色 Gemini 时代 docs。原 7 角色 → 现仅 HCO 升级为 sub-agent，其余被 SOP 覆盖（详见 docs/glossary.md 末段）。
-- ✅ 可参考：`docs/hco/`（硬件约束语义） + `docs/adm/adr/ADR-001 ~ 006`（决策历史）
+- ✅ 可参考：`docs/hco/`（硬件约束语义） + `docs/adm/adr/{ADR-001,002,003,005,006}`（V1 决策历史，无 004；状态已审计见 [docs/adr/ADR-005](docs/adr/ADR-005-old-adr-audit.md)，引用前**必看 frontmatter `still_holds`**）
 - 🪦 已过期：HSTS / AddrColoring / 11-Pass Pipeline / 六大公理 / Atomic-Composite 算子分类
 - 新决策一律走 `docs/adr/ADR-NNN.md`，不再扩 7 角色目录
