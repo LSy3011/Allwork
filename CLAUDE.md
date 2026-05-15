@@ -9,8 +9,8 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - 已知失败：`--mode smt-unit` 当前 `failures=2, errors=1`（test_smt_adversarial 的边界证伪，遗留 bug）
 
 ## Tech
-- Python 3.10 · z3-solver · pydantic · sympy · numpy · pyyaml
-- ⚠ 无 `requirements.txt` / `pyproject.toml` / `Dockerfile` / CI 配置（已知缺失）
+- Python 3.10 · 5 个直接依赖固定版本见 [`requirements.txt`](requirements.txt)（z3-solver / pydantic / sympy / numpy / PyYAML，详见 [ADR-007](docs/adr/ADR-007-pin-direct-dependencies.md)）
+- ⚠ 无 `Dockerfile` / CI 配置（已知缺失）
 - HW spec：`hw_config/{hw_params,modules,iq_config,pipeline_delays,rtovr_config}.yaml` + `specs/{system,units}/`
 - 仿真器纯 Python（`sim/smc_simulator/`），通过 subprocess 调起；`sim/aiacc_hardware/specs` symlink → `hw_config/specs/`
 
@@ -42,7 +42,6 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 
 - ⚠ **smt-unit 2 fail + 1 error 的 root cause** —— `test_smt_adversarial.TestSMTRefutation` 的 II=16/17 边界证伪在 V2 引入前后即存在；尚未定位是 axiom 漏洞还是测试本身的数学下界推导错误
 - ⚠ **HSTS 是否真死** —— `compactor.py` 注释提到 "Automated IQ Loop Stitching"，可能是 HSTS 的轻量后继；需读 compactor.py 确认
-- ⚠ **依赖版本漂移风险** —— 无 requirements.txt，z3 / pydantic / sympy 版本未锁；CI 缺失也无法预警
 - ⚠ **ADPC 版本散落** —— 源码注释里 V2.0 / V4.0 / V5.0 / V5.1 / V5.4 / V6.0 并存；统一版本号语义未定
 - ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
 - ⚠ **Bank R-R 物理语义精确定义** —— docs/adm/collaboration_guide.md 提到 "R-R 冲突的精确定义只有你知道"，建议落到 hco subagent 的 prompt 里

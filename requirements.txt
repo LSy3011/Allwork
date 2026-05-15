@@ -1,0 +1,5 @@
+z3-solver==4.16.0.0
+pydantic==2.13.3
+sympy==1.14.0
+numpy==2.2.6
+PyYAML==6.0.3
