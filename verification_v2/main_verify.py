@@ -6,7 +6,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from verification_v2.infra.mock_memory import MockProgram
-from verification_v2.infra.visualizer import print_physical_instructions, print_aligned_timeline
+from verification_v2.infra.visualizer import print_physical_instructions
 from verification_v2.infra.pipeline_runner import PipelineRunner
 from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
@@ -98,11 +98,6 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
 
     # 3. 可视化调试
     print_physical_instructions(ctx["physical_instrs"], show_model=show_m)
-    
-    # 解析实际轨迹用于对齐图 (下沉到 PipelineRunner)
-    actual_activity = runner.parse_simulation_timeline(ctx["output_dir"])
-
-    # print_aligned_timeline(ctx["schedule"], actual_activity, ctx["II"], max_cycles=50, show_review=show_m)
 
     # 4. 分阶段审计 (Fail-Fast)
     auditor = Auditor(ctx["output_dir"], runner.spec, show_review=show_r, show_model=show_m)
@@ -125,11 +120,8 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     else:
         print("\n" + "!"*10 + f" VERIFICATION FAILED FOR {op_name.upper()} " + "!"*10)
         # 🚀 [SW-OPT-2] 失败时自动升级 Verbose，无需重跑
-        print("\n[AUTO-DEBUG] Replaying physical instructions and timeline for diagnosis:")
+        print("\n[AUTO-DEBUG] Replaying physical instructions for diagnosis:")
         print_physical_instructions(ctx["physical_instrs"], show_model=True)
-        actual_activity_debug = runner.parse_simulation_timeline(ctx["output_dir"])
-        # print_aligned_timeline(ctx["schedule"], actual_activity_debug, ctx["II"],
-        #                        max_cycles=80, show_review=True)
         return False
 
 def run_smt_unit_tests() -> bool:
