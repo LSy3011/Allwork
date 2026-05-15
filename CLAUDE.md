@@ -46,7 +46,7 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - ~~⚠ Bank 冲突 axiom 与 spec 不一致~~ — **2026-05-15 resolved**（ADR-009 修 axiom，axiom/Verifier/ADR-008 三层一致）
 - ⚠ **axiom 墓地** —— 22 个 def 中只有 7 个真 active，15 个 dead 或 no-op（含 `add_side_effect_phase_axiom` 核心约束注释掉但仍被调用）。详见 [ADR-010](docs/adr/ADR-010-smt-axiom-full-audit.md)。HCO 审查涉及 `src/synthesis/axioms/**` 改动时**必先看 ADR-010 表格**确认目标 axiom 是否真生效
 - ⚠ **`add_side_effect_phase_axiom` 不是 no-op**（ADR-010 errata）—— ADR-011 实施 A/B 实测：k_phase 变量等价于 quotient-remainder 分解，**实际影响 z3 搜索**（log II=7 UNSAT 时间 ±137%，II=8 SAT 时间 ±85%，净总打平）。core `Implies(same_iq, phase==phase)` 注释掉但 bound 约束仍生效。ADR-010 标 "no-op" 是错的，ADR-011 Consequences 段已订正
-- ⚠ **matmul flaky FAIL**（pre-existing）—— `verification_v2/ops/matmul_op.py:prepare_input` 用 `np.random.uniform` 无 seed，配合 tol=5e-04 边界，偶发触发 ~5-6e-04 累加 FP 漂移。与 ADR-011 / 任何 SMT 改动无关，3 次重跑通常 PASS。修复路径：(a) 加 `np.random.seed(N)` 固定输入；或 (b) 把 matmul 的 cumulative tol 放宽到 1e-3
+- ~~⚠ matmul flaky FAIL~~ — **2026-05-15 resolved**（`matmul_op.py:prepare_input` 改用 `np.random.default_rng(0)` 固定 seed，3 次重跑稳定 PASS）
 
 ## Historical docs (V1/Gemini era)
 `docs/{hco,adm,se,tfd,pvo,ig}/` 是 7-角色 Gemini 时代 docs。原 7 角色 → 现仅 HCO 升级为 sub-agent，其余被 SOP 覆盖（详见 docs/glossary.md 末段）。
