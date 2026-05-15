@@ -188,10 +188,14 @@ class SMTSynthesizer:
                 solver.add(t[op.trace_id] >= t[dep_id] + (delay - 1) + transit)
                 
                 # 🛸 [SMT-REFACTOR] 极简 O(E) 上界，替代臃肿的 add_anti_overwrite_axiom
-                is_inv = (dep_node.metadata.get("is_invariant", False) or 
-                          dep_node.metadata.get("is_const", False) or 
+                # ADR-006 补全：之前注释承诺了上界但 solver.add 缺失，导致 smt-unit 2 fail+1 error
+                is_inv = (dep_node.metadata.get("is_invariant", False) or
+                          dep_node.metadata.get("is_const", False) or
                           dep_node.metadata.get("stride", 1) == 0 or
-                          "UR_WRITE" in dep_node.op_type.upper())
+                          dep_node.op_type.upper() == "UR_WRITE")
+                if not is_inv:
+                    # O(E) 上界：consumer 必须在 producer 数据被下一迭代覆盖前读取
+                    solver.add(t[op.trace_id] < t[dep_id] + delay + II)
 
         # ── 3.5. 通用循环携带依赖约束 (Generic Loop-Carried Dependency Constraints) ──────
         for op in ops:
@@ -328,10 +332,10 @@ class TimingVerifier:
                 
                 # 数据存活窗口 [lat, lat + II - 1]
                 # [算法优化] 如果 Producer 是循环不变量 (或常数、stride=0)，或者是持久化内存写入，则不触发过期报错
-                is_inv = (op.metadata.get("is_invariant", False) or 
-                          op.metadata.get("is_const", False) or 
+                is_inv = (op.metadata.get("is_invariant", False) or
+                          op.metadata.get("is_const", False) or
                           op.metadata.get("stride", 1) == 0 or
-                          "UR_WRITE" in op.op_type.upper())
+                          op.op_type.upper() == "UR_WRITE")
                 if not is_inv and t_c >= t_p + lat + II:
                     raise RuntimeError(f"[Verifier] Latch Overwrite: {op.trace_id} expired "
                                      f"before {cons.trace_id} read (II={II})")

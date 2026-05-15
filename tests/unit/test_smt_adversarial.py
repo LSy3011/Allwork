@@ -157,6 +157,49 @@ class TestSMTRefutation(unittest.TestCase):
         self.assertIsNone(result_16, "II=16 必须 UNSAT（边界下方）")
         self.assertIsNotNone(result_17, "II=17 必须 SAT（精确边界）。若 UNSAT 则约束过严！")
 
+    def test_invariant_exempt_from_latch_upper_bound(self):
+        """
+        [反证 R5] producer 标 stride=0 时应豁免 latch lifetime 上界（ADR-006）。
+        复用 R3/R4 的图结构（数学下界 II=17），但把 a 改成 stride=0 invariant。
+        豁免后 a 的 latch 上界消失；II=12 远低于无豁免下界 17，但应 SAT。
+        若 UNSAT 说明 is_inv 豁免逻辑被破坏。
+        """
+        b = MIROpBuilder()
+        a_id = b.make_op("UR_READ", "a", RT.UR_READ, [], "A")
+        curr = b.make_op("FPADD", "c_1", RT.FPADD, [a_id], "C1")
+        for i in range(2, 5):
+            curr = b.make_op("FPADD", f"c_{i}", RT.FPADD, [curr], f"C{i}")
+        b.make_op("FPADD", "d", RT.FPADD, [a_id, curr], "D")
+        ops = b.get_dfg()
+        # 在 DFG 上为 a 标记 stride=0（循环不变量）
+        for op in ops:
+            if op.trace_id == "a":
+                op.metadata["stride"] = 0
+
+        result = self.synthesizer._solve_for_ii(ops, II=12)
+        self.assertIsNotNone(result,
+            "stride=0 producer 应豁免 latch 上界，II=12 应 SAT（无豁免数学下界 17）。"
+            "若 UNSAT 说明 is_inv 豁免逻辑失效。")
+
+    def test_ur_write_exempt_from_latch_upper_bound(self):
+        """
+        [反证 R6] producer 是 UR_WRITE 时应豁免 latch lifetime 上界（ADR-006）。
+        UR_WRITE 写回 UR Bank 是持久化存储，不存在 latch 被下一迭代覆盖的问题。
+        同样的深链结构，II=12 应当 SAT（无豁免数学下界 ≥17）。
+        """
+        b = MIROpBuilder()
+        w_id = b.make_op("UR_WRITE", "w", RT.UR_WRITE, [], "W")
+        curr = b.make_op("FPADD", "c_1", RT.FPADD, [w_id], "C1")
+        for i in range(2, 5):
+            curr = b.make_op("FPADD", f"c_{i}", RT.FPADD, [curr], f"C{i}")
+        b.make_op("FPADD", "d", RT.FPADD, [w_id, curr], "D")
+        ops = b.get_dfg()
+
+        result = self.synthesizer._solve_for_ii(ops, II=12)
+        self.assertIsNotNone(result,
+            "UR_WRITE producer 应豁免 latch 上界，II=12 应 SAT。"
+            "若 UNSAT 说明 is_inv 豁免逻辑失效。")
+
 
 if __name__ == "__main__":
     unittest.main()
