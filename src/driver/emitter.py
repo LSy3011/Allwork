@@ -3,15 +3,11 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Any
 
 from api.hw_spec import HardwareSpec
-from driver.field_mapper import FieldMapper
-from driver.compactor import Compactor
 from driver.packer import BitPacker
-from driver.hw_constants import (
-    IQ_BASE_UR_READ, IQ_BASE_UR_WRITE, 
-    PORT_OFFSET_UR_RDATA, PORT_ID_FPMUL_D, PORT_ID_FPADD_D, PORT_ID_INTADD_D0,
-    OFFSET_VLD, DEFAULT_BITS_CODE, DEFAULT_MAX_CYCLES
-)
 from ir.lir.lir_op import PhysicalInstruction, SMIHeader
+
+# 从 driver/hw_constants.py inline 的唯一存活常量（其余符号 driver-wide 零使用，已随 hw_constants 一并删除）
+DEFAULT_MAX_CYCLES = 120
 
 class LIRPacker:
     """
