@@ -32,11 +32,13 @@ ADR-009 实施 W↔R 跨类型 mutex 后，user 提出 "完整评估一下 SMT �
 | 6 | `add_iq_latch_protect_axiom` | physical | yes | ✅ L208 | ❌ | UR_READ 同 IQ 不重叠；只在 backend smt-unit 路径生效，ucode_solver 不调 |
 | 7 | （非 axiom）ADR-006 inline O(E) 上界 | backend.py:198 | n/a | ✅ inline | ❌（靠 #1 子句覆盖） | 非函数化但生产实际工作 |
 
-### B. ACTIVE-BUT-NO-OP（被调用但核心约束空跑，1 个）
+### B. ACTIVE 但模型异常（被调用但核心 `Implies` 约束注释掉，1 个）
 
-| # | Axiom | 问题 |
+| # | Axiom | 状态 |
 |---|---|---|
-| 8 | `add_side_effect_phase_axiom` | ucode_solver:210 调用。代码 line 67-71 标记 `[DEBUG EXPERIMENT] Disable phase_iso to test II=4` 把核心 `Implies(same_iq, phase_i == phase_j)` 注释掉。但 lines 39-45 仍然为每个 UR_READ/UR_WRITE 创建 `k_phase_*` 变量并 add 三条 bound 约束。**结果**：solver 多了一批冗余变量但无 phase 隔离逻辑。**性能负担有，价值零。** |
+| 8 | `add_side_effect_phase_axiom` | ucode_solver:210 调用。代码 line 67-71 标记 `[DEBUG EXPERIMENT] Disable phase_iso to test II=4` 把核心 `Implies(same_iq, phase_i == phase_j)` 注释掉。但 lines 39-45 仍然为每个 UR_READ/UR_WRITE 创建 `k_phase_*` 变量并 add 三条 bound 约束（`t >= k*II`, `t < (k+1)*II`, `k >= 0`）—— 等价于 quotient-remainder 分解，**有实际语义作用**（详见末尾 Errata）|
+
+> **⚠ Errata 2026-05-15**（ADR-011 实施 A/B 测得）：本条早期标 "no-op，价值零" 是**错误**结论。lines 39-45 的 bound 约束等价 `t = k*II + r, 0 <= r < II, k >= 0`，与 `add_modulo_constraint` 的 `get_remainder_vars` 重复但**不冗余**——z3 必须协调两套 quotient 编码，搜索路径会改变。A/B 实测 log 算子：删 k_phase 后 II=7 UNSAT 时间 +137%（2s→4.9s）、II=8 SAT 时间 -85%（3.6s→0.5s），净总打平但**分布显著改变**。结论：**不是 no-op**，是"语义有效但 phase 隔离副作用未启用"。**不应在 ADR-013 类清理任务里删它**。
 
 ### C. DEAD：注册了但所有调用都被注释（8 个）
 
@@ -79,7 +81,7 @@ ADR-009 实施 W↔R 跨类型 mutex 后，user 提出 "完整评估一下 SMT �
 | latency upper bound (ADR-006) | inline L198，覆盖**所有**非 is_invariant/UR_WRITE depends_on | 仅 RTOVR 路径（`add_latency_axiom` 内 rtovr_latch_lifecycle）；非 RTOVR 的 RAW 边无 |
 | shadow binding | inline L215-227（FPMUL/FPADD/UR_WRITE 等 + RTOVR） | 注释掉，无 |
 | iq latch protect | `add_iq_latch_protect_axiom` ✅ | 不调用 |
-| side_effect_phase | 无 | 调了，但核心约束注释掉 → no-op |
+| side_effect_phase | 无 | 调了；核心 `Implies` 注释掉，但 bound 约束仍有效（≈ quotient-remainder，**非 no-op**，详见 §B Errata） |
 | loop_carried_depends_on | inline L204 | inline L205（两边等价） |
 | resource_constraint（modulo + bank + spill） | ✅ | ✅ |
 
@@ -92,7 +94,7 @@ ADR-009 实施 W↔R 跨类型 mutex 后，user 提出 "完整评估一下 SMT �
 **2. CLAUDE.md Known unknowns 立刻更新**：
 - 旧条目 "smt-unit 2 fail + 1 error" 标 **resolved**（ADR-006 + ADR-009 双修后 12 测试全 pass，2026-05-15 验证）
 - 新条目 "**axiom 墓地**"：15/22 axiom 是 dead 或 no-op，HCO subagent 审查时如发现 diff 涉及 #9-#23 任一，**默认不要重新启用**——按 ADR-006 reject 段写过的"避免与商余数降维模型冲突"
-- 新条目 "**`add_side_effect_phase_axiom` 是 no-op**"：ucode_solver:210 还在调用但核心约束注释。**建议**：要么彻底删除调用，要么补回核心约束并重新 e2e 验证。**HCO 审查若动 phase 相关 yaml/spec，需考虑此 axiom 是否应恢复**
+- 新条目 "**`add_side_effect_phase_axiom` 模型异常**"：ucode_solver:210 调用，核心 `Implies` 注释但 bound 仍生效。**Errata 2026-05-15**：早期标 "no-op" 是错的，实测 A/B 影响 z3 搜索路径。**不应轻易删**。HCO 审查 phase 相关 yaml/spec 变更时仍需决断是否恢复 `Implies` 子句
 
 **3. HCO sub-agent 知识库更新**：
 - 领域常量段加 "axiom 真生效列表：#1-#7"（见本 ADR Table A）
