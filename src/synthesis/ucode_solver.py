@@ -258,6 +258,26 @@ class UCodeSynthesizer:
         latch_vars = {}
         axioms.add_latency_axiom(solver, compute_ops, t_vars, II, self.hw_spec, latch_vars=latch_vars)
 
+        # ── 2.1. ADR-006 latch lifetime 上界（ADR-016 从 backend.py 移植）─────
+        # 覆盖**所有**非 invariant/UR_WRITE 的直接 RAW 边（含 compute → compute）
+        # add_latency_axiom 内的 rtovr_latch_lifecycle 只覆盖 RTOVR 路径；
+        # 这里补全跨 compute 节点的直接依赖。e2e 真实 DFG 大多走 RTOVR，本约束触发少；
+        # 反证测试 R3/R4/R5 依赖此约束精确推出 II>=17。
+        nodes_by_id = {op.trace_id: op for op in compute_ops}
+        for op in compute_ops:
+            for dep_id in op.metadata.get("depends_on", []):
+                if dep_id not in t_vars:
+                    continue  # RTOVR 节点已被 compute_ops 过滤
+                dep = nodes_by_id[dep_id]
+                delay = self.hw_spec.delays.get(dep.op_type.upper(), 1)
+                is_inv = (dep.metadata.get("is_invariant", False) or
+                          dep.metadata.get("is_const", False) or
+                          dep.metadata.get("stride", 1) == 0 or
+                          dep.op_type.upper() == "UR_WRITE")
+                if not is_inv:
+                    solver.add(t_vars[op.trace_id] < t_vars[dep_id] + delay + II,
+                               desc=f"latch_ub_{op.trace_id}_{dep_id}")
+
         # ── 2.5. 通用循环携带依赖约束 (Generic Loop-Carried Dependency Constraints) ──
         for op in compute_ops:
             for dep_id, latency in op.metadata.get("loop_carried_depends_on", {}).items():
