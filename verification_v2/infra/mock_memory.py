@@ -3,7 +3,7 @@ from typing import Any
 
 class MockProgram:
     """
-    [ADPC V5.4] 硬件感知型模拟内存层。
+    硬件感知型模拟内存层。
     移除所有 256/8 等硬编码，实时根据 HardwareSpec 构建内存拓扑。
     """
     class MockAllocator:

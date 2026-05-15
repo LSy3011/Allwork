@@ -6,7 +6,7 @@ from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
 class ManualMatmulOperator(BaseOperator):
     """
-    [ADPC V2.0] 手动编排的 Matmul DFG。
+    手动编排的 Matmul DFG。
     通过将中间乘积写入 4 个不同的物理 Bank，然后再在同一拍并行读取，
     完美避开了由于单物理乘法器串行发射与 RTOVR 强对齐选通对齐冲突而导致的 UNSAT 矛盾。
     """

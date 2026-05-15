@@ -90,7 +90,7 @@ class GraphCompiler:
         编译主函数。将复杂的符号数学公式压缩、优化并装配为底层算子图。
         inputs: DFG 的输入口锚点，允许指派测试用的 kwargs (如 manual_bank)
         """
-        # 🛸 [ADPC V4.0] 关键修复：重排时清空中间态环境，防止节点在多轮 Fuzz 中累积爆炸。
+        # 关键修复：重排时清空中间态环境，防止节点在多轮 Fuzz 中累积爆炸。
         from ir.mir.builder import MIROpBuilder
         self.b = MIROpBuilder()
         self.mir_env = {}
@@ -150,7 +150,7 @@ class GraphCompiler:
 
     def _lower_expr(self, sym, expr):
         """
-        [ADPC V6.0] 内核化下沉入口。
+        内核化下沉入口。
         """
         if isinstance(expr, sp.Symbol):
             self.mir_env[sym] = self._get_op(expr)

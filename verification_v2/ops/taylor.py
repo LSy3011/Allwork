@@ -5,7 +5,7 @@ from .base import BaseOperator
 
 class TaylorOperator(BaseOperator):
     """
-    [ADPC V5.1] 工业级 Taylor 算子。
+    工业级 Taylor 算子。
     完全移除硬编码，支持动态精度与动态物理布局。
     """
     def __init__(self, coeffs: Dict[int, float]):

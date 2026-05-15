@@ -7,7 +7,7 @@ from .base import BaseOperator
 
 class ConfigurableOperator(BaseOperator):
     """
-    [ADPC V5.0] 高级抽象算子。
+    高级抽象算子。
     允许通过 YAML 配置文件定义公式、布局和测试逻辑，实现 70+ 算子的配置化扩展。
     """
     def __init__(self, config_path: str):

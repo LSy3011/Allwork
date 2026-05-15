@@ -86,7 +86,7 @@ def lower_pow(c, sym, expr):
                 current = c.b.make_op("FPMUL", f"{sym}_pw{i}", RT.FPMUL, [r0, r1])
             c.mir_env[sym] = current
         elif exp_val == -1:
-            # 🛸 [ADPC V4.0] 倒数泰勒展开优化版
+            # 倒数泰勒展开优化版
             x_node = c._get_op(base)
             one_node = c._get_const(sp.Float(1.0))
             r_x, r_o1 = c._route(x_node, PS.FPADD_S0), c._route(one_node, PS.FPADD_S1)

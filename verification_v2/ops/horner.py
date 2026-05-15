@@ -5,7 +5,7 @@ from .base import BaseOperator
 
 class HornerOperator(BaseOperator):
     """
-    [ADPC V5.4] 稳定版 Horner 算子。
+    稳定版 Horner 算子。
     移除了 prepare_input 中的数据类型硬编码。
     """
     # 布局定义

@@ -6,7 +6,7 @@ from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
 class ManualSeluOperator(BaseOperator):
     """
-    [ADPC V2.0] 手动编排的高性能、时序解耦版 SELU DFG。
+    手动编排的高性能、时序解耦版 SELU DFG。
     通过人为在长链 Horner 拟合多项式中插入 Spill-Reload 物理缓存，且针对每次消费使用独立的 UR_READ，
     并且精细分配常数物理端口，彻底解决所有物理资源时序碰撞与非弹性等式死锁！
     """
