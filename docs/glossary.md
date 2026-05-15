@@ -9,7 +9,7 @@
 |---|---|---|
 | **SMC** | Stream Multiprocessor Compute Unit | 硬件核心单元，32 实例 |
 | **UR** | User Register | 8-Bank 主存储，物理 SRAM 实现 |
-| **Bank** | UR 内部分块 | 8 Bank × 256 深度；R-R / W-W 同拍冲突非法，R+W 合法 |
+| **Bank** | UR 内部分块 | 8 Bank × 256 深度；同 Bank 同 cycle 任意两个 UR 端口的访问（R-R / R-W / W-W）**全部禁止**（详见 [ADR-008](adr/ADR-008-bank-conflict-precision.md)，旧 docs 写"R+W 合法"是错的） |
 | **IQ** | Instruction Queue | 多路独立并行发射 |
 | **RtoVR / RTOVR** | Register-to-Vector-Routing | 分布式选通搬运，40 target 插槽，无总线竞争；刚性同步 T_ALU = T_RtoVR + 1 |
 

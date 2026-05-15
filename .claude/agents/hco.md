@@ -10,10 +10,10 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 ## 你必须知道的领域常量（source of truth = code）
 
 - **硬件**：32 个 SMC · 8-Bank UR（User Register，SRAM）· 256 深度/bank · 4R/4W 端口（来自 `hw_config/hw_params.yaml`）
-- **Bank 冲突规则**（⚠ 精确语义只有 user 知道，审查时主动询问，**不要默认理解**）：
-  - R-R 同 Bank 同拍 → **非法**
-  - W-W 同 Bank 同拍 → **非法**
-  - R+W 同 Bank 同拍 → **合法**
+- **Bank 冲突规则**（ADR-008，权威）：同一 Bank 同一 cycle，**任意两个 UR 端口**（4R+4W 共 8 端口中任意两个）的访问（R-R / R-W / W-W 全部组合）→ **全部禁止**
+  - 物理原因：Bank 是单端口 SRAM，多端口同 cycle 访问 → 总线竞争
+  - ⚠ 旧 `docs/hco/detail_hw_spec.md` 写 "R+W 合法" 是错的，**不要参考**
+  - ⚠ 代码层不一致已知（ADR-008 §代码现状）：TimingVerifier 严格按 ADR-008；axiom `add_bank_conflict_axiom` 只禁同类型；ucode_solver e2e 主路径未调 bank axiom——审查 Bank 变更时**必须**对照这三层
 - **RtoVR**：分布式选通搬运指令；具体 target 拓扑见 `hw_config/rtovr_config.yaml:consumers_dr`（V1 docs 写"40 插槽"未在代码常量中找到对应，⚠ 审查时按 yaml 字典实际条目数为准）
 - **ALU 延迟**（来自 `hw_config/pipeline_delays.yaml`，**权威 source**）：
   - FPADD / FPMUL = **4**
@@ -57,9 +57,12 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 - [ ] FP32 vs FP16 vs INT 各精度延迟是否一致改动
 
 ### D. Bank 冲突规则变更
-- [ ] ⚠ **R-R / W-W "非法"的精确定义只有 user 知道**（SMT 拒绝？物理硬件未定义？数据错误？）→ HCO 必须主动向 user 询问，**不能默认理解**
-- [ ] **Bank R-R / W-W 非法、R+W 合法** 这条物理基线是否仍成立——如果要变，必须有硬件 RTL 变更依据
-- [ ] `resource_axioms.add_bank_conflict_axiom` 与 `add_read_port_mutex_axiom` / `add_write_port_mutex_axiom` 仍互补（注意后两个当前**未 export**，主流程可能未真用）
+- [ ] ADR-008 精确定义（R-R/R-W/W-W 同 Bank 同 cycle 全禁）是否仍成立——若要变，必须有硬件 RTL 变更依据 + 新 ADR 取代
+- [ ] 三层一致性核对（已知 ucode_solver + axiom 与 spec 不一致，见 ADR-008 §代码现状）：
+  - TimingVerifier post-check 是否仍按 ADR-008 严格执行
+  - `resource_axioms.add_bank_conflict_axiom` 是否补全 R+W 约束（当前只禁同类型）
+  - `ucode_solver._solve_for_ii` 是否在 SMT 层补调 bank_conflict_axiom（当前完全未调）
+- [ ] `add_read_port_mutex_axiom` / `add_write_port_mutex_axiom`（当前**未 export**）是否相关——它们解决的是端口带宽（4R/4W 上限），不是 Bank 冲突，**不能混淆替代** ADR-008 的 Bank 禁忌
 
 ### E. HardwareSpec schema 变更
 - [ ] `HardwareSpec.load(config_dir)` 加载链仍能读出所有字段

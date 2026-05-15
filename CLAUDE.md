@@ -43,7 +43,7 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - ⚠ **smt-unit 2 fail + 1 error 的 root cause** —— `test_smt_adversarial.TestSMTRefutation` 的 II=16/17 边界证伪在 V2 引入前后即存在；尚未定位是 axiom 漏洞还是测试本身的数学下界推导错误
 - ⚠ **HSTS 是否真死** —— `compactor.py` 注释提到 "Automated IQ Loop Stitching"，可能是 HSTS 的轻量后继；需读 compactor.py 确认
 - ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
-- ⚠ **Bank R-R 物理语义精确定义** —— docs/adm/collaboration_guide.md 提到 "R-R 冲突的精确定义只有你知道"，建议落到 hco subagent 的 prompt 里
+- ⚠ **Bank 冲突 axiom 与 spec 不一致** —— ADR-008 定义"R-R/R-W/W-W 全禁"（user 口径），但 SMT 层只有 `TimingVerifier` 严格执行；`add_bank_conflict_axiom` 太松（R+W 未禁）且 `ucode_solver` e2e 主路径未调任何 bank axiom。同 ADR-006 pattern（axiom 漏 + Verifier 兜底），需独立 hco 审查 + 修 axiom + 新 ADR
 
 ## Historical docs (V1/Gemini era)
 `docs/{hco,adm,se,tfd,pvo,ig}/` 是 7-角色 Gemini 时代 docs。原 7 角色 → 现仅 HCO 升级为 sub-agent，其余被 SOP 覆盖（详见 docs/glossary.md 末段）。
