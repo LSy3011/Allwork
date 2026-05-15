@@ -9,14 +9,19 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 
 ## 你必须知道的领域常量（source of truth = code）
 
-- **硬件**：32 个 SMC · 8-Bank UR（User Register，SRAM）· 256 深度/bank · 4R/4W 端口
-- **Bank 冲突规则**：
+- **硬件**：32 个 SMC · 8-Bank UR（User Register，SRAM）· 256 深度/bank · 4R/4W 端口（来自 `hw_config/hw_params.yaml`）
+- **Bank 冲突规则**（⚠ 精确语义只有 user 知道，审查时主动询问，**不要默认理解**）：
   - R-R 同 Bank 同拍 → **非法**
   - W-W 同 Bank 同拍 → **非法**
   - R+W 同 Bank 同拍 → **合法**
-- **RtoVR**：40 target 插槽，分布式选通，无总线竞争；刚性同步 T_ALU = T_RtoVR + 1
-- **ALU 延迟**：FPADD/FPMUL = 3, FP16MUL = 2, INTADD/LOGIC/UR_READ/UR_WRITE/RtoVR = 1（详见 `hw_config/pipeline_delays.yaml`）
-- **SMT axioms**：22 个，分 4 组（dependency / resource / physical / special），见 `src/synthesis/axioms/`
+- **RtoVR**：分布式选通搬运指令；具体 target 拓扑见 `hw_config/rtovr_config.yaml:consumers_dr`（V1 docs 写"40 插槽"未在代码常量中找到对应，⚠ 审查时按 yaml 字典实际条目数为准）
+- **ALU 延迟**（来自 `hw_config/pipeline_delays.yaml`，**权威 source**）：
+  - FPADD / FPMUL = **4**
+  - FP32ADDTREE5TO1 = 4 · FP32ADDTREE8TO1 = 3
+  - FP16MUL = 2
+  - INTADD / LOGIC / UR_READ / UR_WRITE / RTOVR / SHIFTUP / SHIFTDN / FPtoFP / INTtoINT / FPtoINT / INTtoFP / INT8toFP16 = 1
+  - ⚠ 旧 `docs/hco/detail_hw_spec.md` 表中 FPADD/FPMUL = 3 是过期数据，不要参考
+- **SMT axioms**：源码 def 总数 22，但 `axioms/__init__.py` 的 `__all__` 只 export 17 个 `add_*` 函数（resource 3 个 + special 2 个未 export，⚠ 未 export 即不生效）
 - **glossary**：详见 `docs/glossary.md`（与 hw_config yaml 中 "Unified Register" 命名矛盾时以 glossary "User Register" 为准）
 
 ## 触发场景
@@ -24,10 +29,12 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 被主 agent 调用时，diff 通常涉及以下之一：
 
 1. **`hw_config/**` yaml 数值改动** — 任何参数都可能联动多处
-2. **`src/synthesis/axioms/**` 增删 axiom** — 物理语义是否正确
-3. **`src/api/hw_spec.py` schema 变更** — Spec 加载链是否仍一致
-4. **`src/driver/{hw_constants,hw_resource}.py`** — 硬件常量 / ResourceType / PortSlot
-5. **ALU 延迟、Bank 数、端口数等核心常量**
+2. **`hw_config/specs/units/*.yaml`** — 硬件单元的比特字段定义（与 modules.yaml 不同层）
+3. **`src/synthesis/axioms/**` 增删 axiom** — 物理语义是否正确
+4. **`src/api/hw_spec.py` schema 变更** — Spec 加载链是否仍一致
+5. **`src/driver/{hw_constants,hw_resource}.py`** — 硬件常量 / ResourceType / PortSlot
+6. **`sim/smc_simulator/units/*.py`** — 仿真器单元行为；若改 ALU 仿真算法，需审查是否与硬件物理语义对齐
+7. **ALU 延迟、Bank 数、端口数等核心常量**
 
 ## 审查清单（按场景适用，逐条 yes/no/N/A）
 
@@ -41,17 +48,18 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 - [ ] 新 axiom 是否覆盖了对应的物理约束（不要只是"加强了"，要明确"对应硬件哪条约束"）
 - [ ] 删除 axiom 时，对应的硬件约束是否真的被其他 axiom / 硬件机制吸收
 - [ ] 是否需要补对应的反证测试（`tests/unit/test_smt_adversarial.py`）：构造一个**应当 UNSAT 的最小图**，验证新 axiom 真在生效
-- [ ] axiom 函数注册到 `axioms/__init__.py` 的 `__all__` 没
+- [ ] axiom 函数注册到 `axioms/__init__.py` 的 `__all__` 没 — ⚠ **未 export 即不生效**（现存 5 个未 export 案例：resource 的 symmetry_breaking / read_port_mutex / write_port_mutex；special 的 cross_bank_copy / long_latency_chain）
 
 ### C. ALU 延迟改动
 - [ ] `modules.yaml` 与 `pipeline_delays.yaml` 同步
 - [ ] `dependency_axioms.add_latency_axiom` 不需要改（它从 spec.delays 读）
-- [ ] 现有算子的 II 是否会因此改变（跑 `--op horner` 验证）
+- [ ] 现有算子的 II 是否会因此改变（跑 `--op horner` + `--op activation` 验证；activation 覆盖更多 ALU 组合）
 - [ ] FP32 vs FP16 vs INT 各精度延迟是否一致改动
 
 ### D. Bank 冲突规则变更
+- [ ] ⚠ **R-R / W-W "非法"的精确定义只有 user 知道**（SMT 拒绝？物理硬件未定义？数据错误？）→ HCO 必须主动向 user 询问，**不能默认理解**
 - [ ] **Bank R-R / W-W 非法、R+W 合法** 这条物理基线是否仍成立——如果要变，必须有硬件 RTL 变更依据
-- [ ] `resource_axioms.add_bank_conflict_axiom` 与 `add_read_port_mutex_axiom` / `add_write_port_mutex_axiom` 仍互补
+- [ ] `resource_axioms.add_bank_conflict_axiom` 与 `add_read_port_mutex_axiom` / `add_write_port_mutex_axiom` 仍互补（注意后两个当前**未 export**，主流程可能未真用）
 
 ### E. HardwareSpec schema 变更
 - [ ] `HardwareSpec.load(config_dir)` 加载链仍能读出所有字段

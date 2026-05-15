@@ -15,13 +15,17 @@
 
 ⚠ **命名矛盾**：`hw_config/specs/aiacc_v2.4_master.yaml` + `sim/smc_simulator/memory/ur_bank.py` 中 "UR" 描述为 "Unified Register"，**以本表 "User Register" 为准**，后续可批量改 yaml/注释统一。
 
-## ALU 单元（延迟见 `hw_config/pipeline_delays.yaml`）
+## ALU 单元（延迟见 `hw_config/pipeline_delays.yaml`，**权威 source**）
 
 | 单元 | 延迟（cycles） |
 |---|---|
-| FPADD / FPMUL | 3 |
+| FPADD / FPMUL | **4** |
+| FP32ADDTREE5TO1 | 4 |
+| FP32ADDTREE8TO1 | 3 |
 | FP16MUL | 2 |
-| INTADD / LOGIC / UR_READ / UR_WRITE / RtoVR | 1 |
+| INTADD / LOGIC / UR_READ / UR_WRITE / RTOVR / SHIFTUP / SHIFTDN / FPtoFP / INTtoINT / FPtoINT / INTtoFP / INT8toFP16 | 1 |
+
+⚠ 旧 `docs/hco/detail_hw_spec.md` 表中 FPADD/FPMUL = 3 是过期数据（V1 时代），以本表 + yaml 为准。
 
 ## 编译流水（V2 实际，4 阶段）
 

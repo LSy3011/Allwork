@@ -23,6 +23,8 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 
 ## Decision routing
 
+> 🔒 **总则（[ADR-004](docs/adr/ADR-004-doc-first-principle.md) 文档先行）**：新功能 / 新算子 / 新 axiom / 流水线接口变更，**写代码前必须先有 ADR 或 spec doc**。Bug fix、单算子 yaml、重命名、docstring 不受此约束。
+
 | 触发路径 | 处理 |
 |---|---|
 | `hw_config/**` 任何 yaml 数值变更 | 必调 `hco` subagent + 写 ADR |
