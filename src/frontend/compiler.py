@@ -63,28 +63,6 @@ class GraphCompiler:
 
         return self.b.make_op("RTOVR", uid, target_slot, [nid], **kwargs)
 
-    def compile_tensor(self, inputs, formula, shape: List[int], out_name="out_0") -> List:
-        flat_size = 1
-        for s in shape: flat_size *= s
-        if flat_size % 4 != 0: raise ValueError(f"Tensor size {flat_size} must be 4-aligned")
-        
-        simd_blocks = flat_size // 4
-        if len(shape) >= 2:
-            inner_blocks = shape[-1] // 4
-            self.loop_context = {
-                "inner_loops": inner_blocks - 1,
-                "outer_loops": shape[-2] - 1,
-                "inner_inc": 1,
-                "outer_inc": inner_blocks 
-            }
-        else:
-            self.loop_context = {"inner_loops": simd_blocks - 1, "outer_loops": 0, "inner_inc": 1, "outer_inc": 0}
-        
-        dfg = self.compile(inputs, formula, out_name)
-        for op in dfg:
-            op.metadata.update({"shape": shape, **self.loop_context})
-        return dfg
-
     def compile(self, inputs: Dict, formula: Any, out_name="out_0", spec=None) -> List[Any]:
         """
         编译主函数。将复杂的符号数学公式压缩、优化并装配为底层算子图。
