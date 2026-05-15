@@ -774,7 +774,7 @@ functional_units:
     latency: 1
     attributes:
       throughput: 1
-      desc: Unified Register Write Port
+      desc: User Register Write Port
     ports:
       inputs:
       - name: DATA
@@ -968,7 +968,7 @@ functional_units:
     latency: 1
     attributes:
       throughput: 1
-      desc: Unified Register Read Port
+      desc: User Register Read Port
     ports:
       outputs:
       - name: DATA

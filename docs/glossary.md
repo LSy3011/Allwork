@@ -13,8 +13,6 @@
 | **IQ** | Instruction Queue | 多路独立并行发射 |
 | **RtoVR / RTOVR** | Register-to-Vector-Routing | 分布式选通搬运，40 target 插槽，无总线竞争；刚性同步 T_ALU = T_RtoVR + 1 |
 
-⚠ **命名矛盾**：`hw_config/specs/aiacc_v2.4_master.yaml` + `sim/smc_simulator/memory/ur_bank.py` 中 "UR" 描述为 "Unified Register"，**以本表 "User Register" 为准**，后续可批量改 yaml/注释统一。
-
 ## ALU 单元（延迟见 `hw_config/pipeline_delays.yaml`，**权威 source**）
 
 | 单元 | 延迟（cycles） |

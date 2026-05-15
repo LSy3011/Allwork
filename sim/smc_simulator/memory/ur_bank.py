@@ -4,7 +4,7 @@ from smc_simulator.core.base import Component
 
 class URBank(Component):
     """
-    重构后的 Unified Register (UR) Bank。
+    重构后的 User Register (UR) Bank。
     支持从 System Spec 动态配置 Bank 数量和读写端口数量。
     """
     def __init__(self, name: str, num_banks: int = 8, bank_size: int = 256, num_read_ports: int = 4):

@@ -2,7 +2,7 @@ unit_name: UR_READ
 latency: 1
 attributes:
   throughput: 1
-  desc: Unified Register Read Port
+  desc: User Register Read Port
 ports:
   outputs:
   - name: DATA

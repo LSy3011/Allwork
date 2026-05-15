@@ -2,7 +2,7 @@ unit_name: UR_WRITE
 latency: 1
 attributes:
   throughput: 1
-  desc: Unified Register Write Port
+  desc: User Register Write Port
 ports:
   inputs:
   - name: DATA

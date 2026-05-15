@@ -29,7 +29,7 @@
 ## Stage 2: 内存/Bank 分配器 (Resource Allocation)
 **解决物理存储的结构性冲突 (Structural Hazards)。**
 
-* **核心功能**：遍历输入流并为计算图配置底层的 `UR` (Unified Register) Bank与地址隔离空间。确保在同一个 `tick` 周期内，硬件不会由于试图重读或并写同一个 Bank 而触发总线冲突。
+* **核心功能**：遍历输入流并为计算图配置底层的 `UR` (User Register) Bank与地址隔离空间。确保在同一个 `tick` 周期内，硬件不会由于试图重读或并写同一个 Bank 而触发总线冲突。
 * **算法引擎**：采用了基于图着色启发式搜索的 `BalancedBankColorer` 以及动态生命区间分析 (Liveness Analysis) 的 `GreedyAllocator`。
 * **输入 (Input)**：纯拓扑 MIR 有向无环图。
 * **输出 (Output)**：属性被注入的 MIR。每个 `UR_READ` 和 `UR_WRITE` 获得严格绑定的 `metadata.bank_id` 以及 `metadata.addr`。
