@@ -1,11 +1,15 @@
 from typing import List, Dict, Optional, Set, Tuple
 import copy
+import os
 import z3
 from ir.mir.mir_op import MIROp
 import synthesis.axioms as axioms
 from driver.hw_resource import ResourceType
 from core.ii_analyzer import IIAnalyzer
 from api.hw_spec import HardwareSpec
+
+# ADR-014: 与 ucode_solver.py 的 _DEBUG_SOLVER 同语义；本地定义避免反向依赖
+_DEBUG_SOLVER = os.environ.get("AIACC_SOLVER_DEBUG") == "1"
 
 
 class SMTSynthesizer:
@@ -117,15 +121,26 @@ class SMTSynthesizer:
           5. 影子绑定：ALU ← RTOVR 时间窗口（1 ≤ delta ≤ 4）
         """
         solver = z3.Solver()
-        orig_add = solver.add
-        _track_idx = 0
-        def tracked_add(*args, **kwargs):
-            nonlocal _track_idx
-            for arg in args:
-                _track_idx += 1
-                lbl = z3.Bool(f"lbl_{_track_idx}_{str(arg)[:80].replace(' ', '').replace('+', '_').replace('-', '_')}")
-                solver.assert_and_track(arg, lbl)
-        solver.add = tracked_add
+        # ADR-014 Phase 1/4 sync (from ADR-011 ucode_solver fixes):
+        solver.set("random_seed", 0)             # 确定性：smt-unit 测试可重现
+        solver.set("smt.arith.solver", 2)        # 差分逻辑 Bellman-Ford solver，模调度 special path
+        # ADR-014 Phase 3: 生产路径走 z3 原生 solver.add；assert_and_track 仅 DEBUG
+        # axiom 代码用 solver.add(..., desc=...) 签名，z3 原生 add 不认 desc，需 wrapper 剥
+        if _DEBUG_SOLVER:
+            _track_idx = 0
+            def tracked_add(*args, **kwargs):
+                nonlocal _track_idx
+                for arg in args:
+                    _track_idx += 1
+                    lbl = z3.Bool(f"lbl_{_track_idx}_{str(arg)[:80].replace(' ', '').replace('+', '_').replace('-', '_')}")
+                    solver.assert_and_track(arg, lbl)
+            solver.add = tracked_add
+        else:
+            _orig_add = solver.add
+            def native_add(*args, **kwargs):
+                kwargs.pop("desc", None)  # 兼容签名：axiom 用 desc=..., z3 原生不认
+                _orig_add(*args, **kwargs)
+            solver.add = native_add
 
         nodes_by_id = {op.trace_id: op for op in ops}
         t = {op.trace_id: z3.Int(f"t_{op.trace_id}") for op in ops}
