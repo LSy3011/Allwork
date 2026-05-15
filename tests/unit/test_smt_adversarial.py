@@ -200,6 +200,74 @@ class TestSMTRefutation(unittest.TestCase):
             "UR_WRITE producer 应豁免 latch 上界，II=12 应 SAT。"
             "若 UNSAT 说明 is_inv 豁免逻辑失效。")
 
+    def test_impossible_ii_bank_wr_crosstype(self):
+        """
+        [反证 R7] 同 Bank W+R 跨类型冲突（ADR-009）。
+        单 W 单 R 同 bank=2 不同 addr，强制 II=1 → 必 UNSAT。
+        若 SAT 说明 add_bank_conflict_axiom 的 W↔R 段未生效。
+        """
+        b = MIROpBuilder()
+        b.make_op("UR_WRITE", "w0", RT.UR_WRITE, [], "W0")
+        b.make_op("UR_READ", "r0", RT.UR_READ, [], "R0")
+        ops = b.get_dfg()
+        for op in ops:
+            if op.trace_id == "w0":
+                op.metadata["manual_bank"] = 2
+                op.metadata["logical_addr"] = 0
+            elif op.trace_id == "r0":
+                op.metadata["manual_bank"] = 2
+                op.metadata["logical_addr"] = 1
+
+        result = self.synthesizer._solve_for_ii(ops, II=1)
+        self.assertIsNone(result,
+            "II=1 W+R 同 bank 必须 UNSAT。"
+            "若 SAT 说明 W↔R 跨类型互斥未生效（ADR-009）。")
+
+    def test_sat_wr_crosstype_boundary(self):
+        """
+        [反证 R8] W+R 跨类型边界吻合：II=2 时应 SAT（ADR-009 边界）。
+        与 R7 同图，II=2 提供两个 mod slot，W 和 R 分别占一个 → SAT。
+        """
+        b = MIROpBuilder()
+        b.make_op("UR_WRITE", "w0", RT.UR_WRITE, [], "W0")
+        b.make_op("UR_READ", "r0", RT.UR_READ, [], "R0")
+        ops = b.get_dfg()
+        for op in ops:
+            if op.trace_id == "w0":
+                op.metadata["manual_bank"] = 2
+                op.metadata["logical_addr"] = 0
+            elif op.trace_id == "r0":
+                op.metadata["manual_bank"] = 2
+                op.metadata["logical_addr"] = 1
+
+        result = self.synthesizer._solve_for_ii(ops, II=2)
+        self.assertIsNotNone(result,
+            "II=2 W+R 同 bank 应 SAT（2 个 mod slot 充裕）。"
+            "若 UNSAT 说明约束过严。")
+
+    def test_impossible_ii_bank_wr_same_addr(self):
+        """
+        [反证 R9] W+R 跨类型同地址也无豁免（ADR-009 + user 2026-05-15 确认硬件无 forwarding）。
+        与 R7 同图但 W 和 R 同 logical_addr，II=1 → 仍必 UNSAT。
+        若 SAT 说明 W↔R 段错误地引入了 R-R 同地址豁免逻辑。
+        """
+        b = MIROpBuilder()
+        b.make_op("UR_WRITE", "w0", RT.UR_WRITE, [], "W0")
+        b.make_op("UR_READ", "r0", RT.UR_READ, [], "R0")
+        ops = b.get_dfg()
+        for op in ops:
+            if op.trace_id == "w0":
+                op.metadata["manual_bank"] = 2
+                op.metadata["logical_addr"] = 512
+            elif op.trace_id == "r0":
+                op.metadata["manual_bank"] = 2
+                op.metadata["logical_addr"] = 512  # 同 addr
+
+        result = self.synthesizer._solve_for_ii(ops, II=1)
+        self.assertIsNone(result,
+            "II=1 W+R 同 bank 同 addr 也应 UNSAT（硬件无 forwarding，ADR-009）。"
+            "若 SAT 说明 W↔R 段错误引入了同地址豁免。")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -227,7 +227,7 @@ class UCodeSynthesizer:
         if solver.check() != z3.sat:
             try:
                 core = solver.unsat_core()
-                print(f"[DEBUG-UNSAT-CORE] II={II} unsat core: {core}")
+                # print(f"[DEBUG-UNSAT-CORE] II={II} unsat core: {core}")
             except Exception as e:
                 print(f"[DEBUG-UNSAT-CORE] Failed to get unsat core: {e}")
             return None

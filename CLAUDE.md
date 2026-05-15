@@ -6,7 +6,7 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - 主入口：`python3 verification_v2/main_verify.py --op <name> --mode {e2e|smt-unit|hw-parity|all}`
 - 算子类别：`math` / `trig` / `activation` / `manual`（V1 的 Atomic/Composite/Algebraic 已废弃）
 - pytest：`pytest tests/`（仅 5 个活测试，全部 V2 后）
-- 已知失败：`--mode smt-unit` 当前 `failures=2, errors=1`（test_smt_adversarial 的边界证伪，遗留 bug）
+- ~~已知失败：smt-unit 2 fail + 1 error~~ — **2026-05-15 已修复**（ADR-006 latch upper bound + ADR-009 W↔R 双修），smt-unit 12 测试全 pass
 
 ## Tech
 - Python 3.10 · 5 个直接依赖固定版本见 [`requirements.txt`](requirements.txt)（z3-solver / pydantic / sympy / numpy / PyYAML，详见 [ADR-007](docs/adr/ADR-007-pin-direct-dependencies.md)）
@@ -40,10 +40,12 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 
 ## Known unknowns
 
-- ⚠ **smt-unit 2 fail + 1 error 的 root cause** —— `test_smt_adversarial.TestSMTRefutation` 的 II=16/17 边界证伪在 V2 引入前后即存在；尚未定位是 axiom 漏洞还是测试本身的数学下界推导错误
+- ~~⚠ smt-unit 2 fail + 1 error~~ — **2026-05-15 resolved**（ADR-006 + ADR-009，12 测试全 pass）
 - ⚠ **HSTS 是否真死** —— `compactor.py` 注释提到 "Automated IQ Loop Stitching"，可能是 HSTS 的轻量后继；需读 compactor.py 确认
 - ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
-- ⚠ **Bank 冲突 axiom 与 spec 不一致** —— ADR-008 定义"R-R/R-W/W-W 全禁"（user 口径），但 SMT 层只有 `TimingVerifier` 严格执行；`add_bank_conflict_axiom` 太松（R+W 未禁）且 `ucode_solver` e2e 主路径未调任何 bank axiom。同 ADR-006 pattern（axiom 漏 + Verifier 兜底），需独立 hco 审查 + 修 axiom + 新 ADR
+- ~~⚠ Bank 冲突 axiom 与 spec 不一致~~ — **2026-05-15 resolved**（ADR-009 修 axiom，axiom/Verifier/ADR-008 三层一致）
+- ⚠ **axiom 墓地** —— 22 个 def 中只有 7 个真 active，15 个 dead 或 no-op（含 `add_side_effect_phase_axiom` 核心约束注释掉但仍被调用）。详见 [ADR-010](docs/adr/ADR-010-smt-axiom-full-audit.md)。HCO 审查涉及 `src/synthesis/axioms/**` 改动时**必先看 ADR-010 表格**确认目标 axiom 是否真生效
+- ⚠ **`add_side_effect_phase_axiom` no-op** —— ucode_solver:210 调用它，但其核心 `Implies(same_iq, phase_i == phase_j)` 被注释（`[DEBUG EXPERIMENT] Disable phase_iso to test II=4`）。仍创冗余 k_phase 变量，性能负担小价值零。**HCO 审查 phase 相关变更时需决断恢复 / 删除**
 
 ## Historical docs (V1/Gemini era)
 `docs/{hco,adm,se,tfd,pvo,ig}/` 是 7-角色 Gemini 时代 docs。原 7 角色 → 现仅 HCO 升级为 sub-agent，其余被 SOP 覆盖（详见 docs/glossary.md 末段）。

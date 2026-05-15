@@ -222,6 +222,22 @@ class ResourceAxioms(AxiomBase):
                                     ),
                                     label
                                 )
+
+            # 3. W↔R 跨类型冲突（ADR-009）：同 Bank 任意 (W, R) 对必须落在不同模槽
+            # 无地址豁免：硬件无 forwarding（user 2026-05-15 确认）
+            for bid in set(bank_writes.keys()) | set(bank_reads.keys()):
+                writes = bank_writes.get(bid, [])
+                reads = bank_reads.get(bid, [])
+                if not writes or not reads:
+                    continue
+                for op_w in writes:
+                    for op_r in reads:
+                        label = f"bank_gap_WR_{bid}_{op_w.trace_id}_{op_r.trace_id}"
+                        ResourceAxioms._add_constraint(
+                            solver,
+                            get_mod_val_legacy(op_w) != get_mod_val_legacy(op_r),
+                            label
+                        )
         else:
             # 🚀 [SMT-REFACTOR Step 1.2] 全局消除 % II 原生取模
             conflict_ops = []
@@ -270,6 +286,21 @@ class ResourceAxioms(AxiomBase):
                                     ),
                                     f"bank_gap_R_same_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
                                 )
+
+            # 3. W↔R 跨类型冲突（ADR-009）：同 Bank 任意 (W, R) 对必须落在不同模槽
+            # 无地址豁免：硬件无 forwarding（user 2026-05-15 确认）
+            for bid in set(bank_writes.keys()) | set(bank_reads.keys()):
+                writes = bank_writes.get(bid, [])
+                reads = bank_reads.get(bid, [])
+                if not writes or not reads:
+                    continue
+                for op_w in writes:
+                    for op_r in reads:
+                        ResourceAxioms._add_constraint(
+                            solver,
+                            get_mod_val(op_w) != get_mod_val(op_r),
+                            f"bank_gap_WR_{bid}_{op_w.trace_id}_{op_r.trace_id}"
+                        )
 
     @staticmethod
     def add_spill_reload_mutex_axiom(solver, ops, t_vars, II, spec, **kwargs):

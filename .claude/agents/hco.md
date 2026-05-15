@@ -13,7 +13,7 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 - **Bank 冲突规则**（ADR-008，权威）：同一 Bank 同一 cycle，**任意两个 UR 端口**（4R+4W 共 8 端口中任意两个）的访问（R-R / R-W / W-W 全部组合）→ **全部禁止**
   - 物理原因：Bank 是单端口 SRAM，多端口同 cycle 访问 → 总线竞争
   - ⚠ 旧 `docs/hco/detail_hw_spec.md` 写 "R+W 合法" 是错的，**不要参考**
-  - ⚠ 代码层不一致已知（ADR-008 §代码现状）：TimingVerifier 严格按 ADR-008；axiom `add_bank_conflict_axiom` 只禁同类型；ucode_solver e2e 主路径未调 bank axiom——审查 Bank 变更时**必须**对照这三层
+  - ⚠ 代码层不一致已知（ADR-008 + ADR-008 errata）：TimingVerifier 严格按 ADR-008；axiom `add_bank_conflict_axiom` 只禁同类型，R+W 跨类型未禁；ucode_solver 通过 `add_resource_constraint` 间接调用 axiom，所以"axiom 太松"是唯一不一致——审查 Bank 变更时务必看 axiom 自身实现而非调用链
 - **RtoVR**：分布式选通搬运指令；具体 target 拓扑见 `hw_config/rtovr_config.yaml:consumers_dr`（V1 docs 写"40 插槽"未在代码常量中找到对应，⚠ 审查时按 yaml 字典实际条目数为准）
 - **ALU 延迟**（来自 `hw_config/pipeline_delays.yaml`，**权威 source**）：
   - FPADD / FPMUL = **4**
@@ -21,7 +21,11 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
   - FP16MUL = 2
   - INTADD / LOGIC / UR_READ / UR_WRITE / RTOVR / SHIFTUP / SHIFTDN / FPtoFP / INTtoINT / FPtoINT / INTtoFP / INT8toFP16 = 1
   - ⚠ 旧 `docs/hco/detail_hw_spec.md` 表中 FPADD/FPMUL = 3 是过期数据，不要参考
-- **SMT axioms**：源码 def 总数 22，但 `axioms/__init__.py` 的 `__all__` 只 export 17 个 `add_*` 函数（resource 3 个 + special 2 个未 export，⚠ 未 export 即不生效）
+- **SMT axioms**（ADR-010 全量审计 2026-05-15）：源码 def 总数 22，但**只有 7 个真 active**——审查 axiom 改动时**必先查 ADR-010 Table A/B/C/D** 看目标函数是哪类：
+  - **Active（7）**：`add_latency_axiom` / `add_resource_constraint` / `add_modulo_constraint` / `add_bank_conflict_axiom` / `add_spill_reload_mutex_axiom` / `add_iq_latch_protect_axiom` + backend.py:198 inline O(E) latch 上界（非函数化）
+  - **No-op（1）**：`add_side_effect_phase_axiom` 被 ucode_solver 调用但核心约束注释掉；改 phase 相关 yaml 时需决断恢复/删
+  - **Dead（14）**：8 个调用点全注释 + 5 个未 export（其中 4 个 body 是 `pass` stub）+ 1 个 alu_pipeline 类内函数零调用
+  - 增删 axiom 必须 (a) 写 ADR (b) 注册到 `__all__` (c) 在 backend.py 或 ucode_solver.py 加真实调用点；缺一就是新死代码
 - **glossary**：详见 `docs/glossary.md`（与 hw_config yaml 中 "Unified Register" 命名矛盾时以 glossary "User Register" 为准）
 
 ## 触发场景
@@ -58,10 +62,10 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
 
 ### D. Bank 冲突规则变更
 - [ ] ADR-008 精确定义（R-R/R-W/W-W 同 Bank 同 cycle 全禁）是否仍成立——若要变，必须有硬件 RTL 变更依据 + 新 ADR 取代
-- [ ] 三层一致性核对（已知 ucode_solver + axiom 与 spec 不一致，见 ADR-008 §代码现状）：
+- [ ] 两层一致性核对（已知 axiom 太松，见 ADR-008 + errata）：
   - TimingVerifier post-check 是否仍按 ADR-008 严格执行
-  - `resource_axioms.add_bank_conflict_axiom` 是否补全 R+W 约束（当前只禁同类型）
-  - `ucode_solver._solve_for_ii` 是否在 SMT 层补调 bank_conflict_axiom（当前完全未调）
+  - `resource_axioms.add_bank_conflict_axiom` 是否补全 R+W 跨类型约束（当前只禁同类型）
+  - 注意 ucode_solver 通过 `add_resource_constraint` 间接调 axiom（resource_axioms.py:25-32），不必单独追加调用
 - [ ] `add_read_port_mutex_axiom` / `add_write_port_mutex_axiom`（当前**未 export**）是否相关——它们解决的是端口带宽（4R/4W 上限），不是 Bank 冲突，**不能混淆替代** ADR-008 的 Bank 禁忌
 
 ### E. HardwareSpec schema 变更

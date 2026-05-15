@@ -63,3 +63,11 @@ SMT 层 axiom 漏（backend.py 太松 + ucode_solver 完全无）已是 known is
 - 🔒 **binding**：
   - 任何涉及 Bank 冲突约束的 axiom / Verifier 变更必须以 user 口径（R-R/R-W/W-W 全禁）为准
   - 若发现新算子物理仿真踩到 R+W 同 Bank 同 cycle 错误，**不应**简单加 metadata 绕开，而应触发本 ADR 的 binding：先调 hco subagent，可能进 ADR-009（补 axiom）
+
+## Errata（2026-05-15）
+
+本 ADR 第 §Context 段"ucode_solver 完全未调用 bank_conflict axiom"是**错误**——`src/synthesis/ucode_solver.py:215` 通过 `axioms.add_resource_constraint(...)` 间接调用了 `add_bank_conflict_axiom`（见 `resource_axioms.py:25-32` 的展开）。Phase 2 起草 ADR-009 时复核发现。
+
+订正：真实代码不一致**只有一层**——axiom 自身太松（R+W 未禁），ucode_solver 间接调用 OK。三层叙事中"ucode_solver 未调"这条移除。其他论点（精确语义、Verifier 严格、axiom 太松）不受影响。
+
+Decision 段不动（决策的核心是"确立 R-R/R-W/W-W 精确语义"，不依赖 ucode_solver 调用状态）。
