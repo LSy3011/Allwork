@@ -81,9 +81,3 @@ class DependencyAxioms(AxiomBase):
                     f"rtovr_latch_lifecycle_{op.trace_id}_{prod_id}"
                 )
 
-    @staticmethod
-    def add_dependency_axiom(solver, ops, t_vars, II, spec, **kwargs):
-        """
-        通用依赖公理包装器，符合标准签名。
-        """
-        DependencyAxioms.add_latency_axiom(solver, ops, t_vars, II, spec, **kwargs)

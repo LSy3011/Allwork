@@ -44,7 +44,7 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - ⚠ **HSTS 是否真死** —— `compactor.py` 注释提到 "Automated IQ Loop Stitching"，可能是 HSTS 的轻量后继；需读 compactor.py 确认
 - ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
 - ~~⚠ Bank 冲突 axiom 与 spec 不一致~~ — **2026-05-15 resolved**（ADR-009 修 axiom，axiom/Verifier/ADR-008 三层一致）
-- ⚠ **axiom 墓地** —— 22 个 def 中只有 7 个真 active，15 个 dead 或 no-op（含 `add_side_effect_phase_axiom` 核心约束注释掉但仍被调用）。详见 [ADR-010](docs/adr/ADR-010-smt-axiom-full-audit.md)。HCO 审查涉及 `src/synthesis/axioms/**` 改动时**必先看 ADR-010 表格**确认目标 axiom 是否真生效
+- ~~⚠ axiom 墓地~~ — **2026-05-15 resolved**（ADR-013 删 16 项 + special_axioms.py 文件；axiom 模块现 22→7 真 active，全部生效；smt-unit 13/13 + horner/matmul/cos4 e2e PASS）
 - ⚠ **`add_side_effect_phase_axiom` 不是 no-op**（ADR-010 errata）—— ADR-011 实施 A/B 实测：k_phase 变量等价于 quotient-remainder 分解，**实际影响 z3 搜索**（log II=7 UNSAT 时间 ±137%，II=8 SAT 时间 ±85%，净总打平）。core `Implies(same_iq, phase==phase)` 注释掉但 bound 约束仍生效。ADR-010 标 "no-op" 是错的，ADR-011 Consequences 段已订正
 - ~~⚠ matmul flaky FAIL~~ — **2026-05-15 resolved**（`matmul_op.py:prepare_input` 改用 `np.random.default_rng(0)` 固定 seed，3 次重跑稳定 PASS）
 

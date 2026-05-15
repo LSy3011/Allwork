@@ -21,10 +21,9 @@ description: AIACC 专属硬件契约审查（Hardware Contract Officer）。当
   - FP16MUL = 2
   - INTADD / LOGIC / UR_READ / UR_WRITE / RTOVR / SHIFTUP / SHIFTDN / FPtoFP / INTtoINT / FPtoINT / INTtoFP / INT8toFP16 = 1
   - ⚠ 旧 `docs/hco/detail_hw_spec.md` 表中 FPADD/FPMUL = 3 是过期数据，不要参考
-- **SMT axioms**（ADR-010 全量审计 2026-05-15）：源码 def 总数 22，但**只有 7 个真 active**——审查 axiom 改动时**必先查 ADR-010 Table A/B/C/D** 看目标函数是哪类：
-  - **Active（7）**：`add_latency_axiom` / `add_resource_constraint` / `add_modulo_constraint` / `add_bank_conflict_axiom` / `add_spill_reload_mutex_axiom` / `add_iq_latch_protect_axiom` + backend.py:198 inline O(E) latch 上界（非函数化）
-  - **No-op（1）**：`add_side_effect_phase_axiom` 被 ucode_solver 调用但核心约束注释掉；改 phase 相关 yaml 时需决断恢复/删
-  - **Dead（14）**：8 个调用点全注释 + 5 个未 export（其中 4 个 body 是 `pass` stub）+ 1 个 alu_pipeline 类内函数零调用
+- **SMT axioms**（ADR-013 清理 2026-05-15 后）：模块共 **7 个 active axiom**——增删必经此清单。
+  - **Active（7）**：`add_latency_axiom` / `add_resource_constraint` / `add_modulo_constraint` / `add_bank_conflict_axiom` / `add_spill_reload_mutex_axiom` / `add_iq_latch_protect_axiom` / `add_side_effect_phase_axiom`（详 ADR-010 errata：核心 `Implies` 注释但 bound 仍生效）+ backend.py:198 inline O(E) latch 上界（非函数化）
+  - 历史：22 个 def 中 16 个已删（ADR-013，包括整个 `special_axioms.py`）。删除清单和理由见 ADR-013 §Decision；如发现"以前那个 add_xxx_axiom 哪去了"，去 git log + ADR-010 考古表查
   - 增删 axiom 必须 (a) 写 ADR (b) 注册到 `__all__` (c) 在 backend.py 或 ucode_solver.py 加真实调用点；缺一就是新死代码
 - **glossary**：详见 `docs/glossary.md`（与 hw_config yaml 中 "Unified Register" 命名矛盾时以 glossary "User Register" 为准）
 

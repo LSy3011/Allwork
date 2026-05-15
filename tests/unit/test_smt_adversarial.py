@@ -268,6 +268,34 @@ class TestSMTRefutation(unittest.TestCase):
             "II=1 W+R 同 bank 同 addr 也应 UNSAT（硬件无 forwarding，ADR-009）。"
             "若 SAT 说明 W↔R 段错误引入了同地址豁免。")
 
+    def test_alu_issue_exclusion_under_resource_constraint(self):
+        """
+        [反证 R10] 同 ALU 单元同模槽不可同时发射（ADR-013 删除 add_alu_pipeline_axiom 前的安全保障）。
+
+        构造 2 个 FPADD op，预 patch 同一 iq_id（强制分到同一物理 ALU 实例），
+        强制 II=1（唯一 mod slot 0）。`add_resource_constraint` 的 modulo 子约束
+        应当判 UNSAT，因为两个 op 落到同一 (iq, slot) 不允许。
+
+        若 SAT → 说明 `add_resource_constraint` 没覆盖 ALU 发射排他，
+        删 `add_alu_pipeline_axiom` 会留下物理空洞，必须先补强后才能删。
+        """
+        b = MIROpBuilder()
+        b.make_op("FPADD", "a0", RT.FPADD, [], "A0")
+        b.make_op("FPADD", "a1", RT.FPADD, [], "A1")
+        ops = b.get_dfg()
+        # 强制两 op 用同一物理 FPADD 实例
+        # FPADD 在 iq_registry 通常是 0/1/2/3 范围中的一个；取 spec 的第一个 valid iq
+        valid_iqs = self.spec.get_iq_ids("FPADD")
+        if valid_iqs:
+            for op in ops:
+                op.metadata["iq_id"] = valid_iqs[0]
+
+        # II=1 → 唯一 mod slot 0 → 同 iq 同 slot → 必 UNSAT
+        result = self.synthesizer._solve_for_ii(ops, II=1)
+        self.assertIsNone(result,
+            "II=1 同 FPADD 实例同模槽应 UNSAT（add_resource_constraint modulo 子约束保护）。"
+            "若 SAT 说明删除 add_alu_pipeline_axiom 会留下 ALU 发射排他物理空洞。")
+
 
 if __name__ == "__main__":
     unittest.main()
