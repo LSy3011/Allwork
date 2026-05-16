@@ -37,10 +37,12 @@ class TestRTOVRReject(unittest.TestCase):
         unit_map = {"prod": "fpmul", "cons": "fpadd"}
         
         II = 10
-        # prod 发射在 0，在 0 + II = 10 时，被下一次迭代覆盖。
-        # cons 发射在 11，RTOVR 采样推断为 10 ( >= 10)，此时数据已失效。
-        schedule = {"prod": 0, "cons": 11}
-        
+        # ADR-006 精确公式：数据存活窗口上界 = t_prod + lat_p + II = 0 + 4 + 10 = 14。
+        # RTOVR 采样推断 = t_cons - 1（无显式 RTOVR 节点时降级）。
+        # cons 发射在 16 → t_rtovr 推断 15 >= 14，数据已被下一迭代覆盖 → 必须拒绝。
+        # （原测试用旧公式 t_prod+II=10 心算，schedule cons=11 永远触发不了，陈旧 bug）
+        schedule = {"prod": 0, "cons": 16}
+
         result = self.synth.validate_physical_schedule(ops, schedule, unit_map, II=II)
         self.assertFalse(result, "Verifier 应当拒绝采样过晚（已被覆盖）的非法调度")
 
