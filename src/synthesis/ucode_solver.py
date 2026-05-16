@@ -439,7 +439,7 @@ class UCodeSynthesizer:
             
             # 🛸 [ENGINEERING] 修正模块信息查找路径
             unit_info = self.hw_spec.modules.get(u_type, {})
-            if hasattr(unit_info, "dict"): unit_info = unit_info.dict()
+            if hasattr(unit_info, "model_dump"): unit_info = unit_info.model_dump()
             port_names = [p.split("-")[-1] for p in unit_info.get("inputs", [])]
             if not port_names:
                 port_names = ["S0", "S1", "S2", "S3", "ST"]
