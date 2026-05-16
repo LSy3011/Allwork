@@ -14,3 +14,6 @@ __pycache__/
 
 # Phase 0 — local-only soft constraints (cultural/political map)
 CLAUDE.md.local
+
+# Agent scratch / brain working artifacts
+artifacts/
