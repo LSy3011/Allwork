@@ -24,9 +24,9 @@ description: AIACC 编译器重构自动化工作流 - 确保物理属性与逻�
 ## Step 5: 更新测试规格 (TFD)
 更新 `docs/tfd/tdd_spec.md` 和对应 `docs/tfd/phase*.md`。
 
-## Step 6: 设计文档不改内容
-对原始设计文档 **不做内容修改**。
-运行 `python3 build_report.py` 自动重新生成。
+## Step 6: 设计决策走 ADR
+新决策写 `docs/adr/ADR-NNN-*.md`（doc-first，见 ADR-004）。
+V1 七角色设计报告生成器 `build_report.py` 已废弃删除（被 ADR 体系取代）。
 
 ## Step 7: 更新门禁 (IG)
 更新 `docs/ig/gate_checklist.md`。

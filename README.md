@@ -51,7 +51,7 @@ docs/ 下有 29 个文件 (1639 行)，全读会浪费上下文。
 ## 常用命令
 
 ```bash
-python3 build_report.py    # 生成设计报告
+python3 verification_v2/main_verify.py --op <name> --mode e2e   # 验证算子
 git log --oneline          # 查看进度
 git tag                    # 查看里程碑
 ```
