@@ -1,6 +1,6 @@
 ---
 adr_id: ADR-020
-title: SHIFTUP 多 SMC bit-perfect 收尾（v3：根因转 Auditor 通路 / chain 排除）
+title: SHIFTUP 多 SMC bit-perfect 收尾（v4：bug #3 cycle-level 锁定 → compiler axiom vs sim 实现语义不一致）
 decided: 2026-05-28
 last_verified: 2026-05-28
 still_holds: partial
@@ -8,14 +8,15 @@ still_holds: partial
 
 # ADR-020 · SHIFTUP 多 SMC bit-perfect 收尾
 
-> **状态：Accepted (v3, partial-fix)** —— bug #1/#2 已修并 commit；bug #3/#4 列入 Next Session 起点
+> **状态：Accepted (v4, partial-fix)** —— bug #1/#2 已修并 commit；bug #3 cycle-level root cause 已锁定（本 session）但代码未修；bug #4 仍未触碰
 >
 > **演进**：
 > - v1（同日早）：决策"改 iq_unit.py body loop，让 SHIFTUP 每 SMC fire ≥32 次/SMC（修法 A）"
 > - v1 hco 预审：**Reject-with-major-rework**（修法 A 与 `shiftup.yaml:55 iq_slot_consumption` 字面矛盾；fire=32 数值巧合非语义对；根因可能在 driver 非 sim）
 > - evidence-gathering 三步（同日下午）：实测**否定 v1 假设**，揭示假"真根因方向"（见 §Context Evidence v1/v2）
 > - **v2（同日下午）**：决策从 "iq_unit.py 状态机" 转向 "SHIFTUP chain 数据流时序"；H1/H2/H3/H4 待 cycle-level 调试
-> - **v3（本版，同日晚）**：drill-down dump 后 **H1/H2/H3/H4 + H5/H6/H7 全排除**；真根因裂为 4 层独立 bug（input_data 双源 / Auditor parser 缺 smc_id / sim 真数值错 / expected_val_map trace_id 映射错）；bug #1/#2 本 session 修，bug #3/#4 留 ADR-020 v4
+> - **v3（同日晚 prior session）**：drill-down dump 后 **H1/H2/H3/H4 + H5/H6/H7 全排除**；真根因裂为 4 层独立 bug（input_data 双源 / Auditor parser 缺 smc_id / sim 真数值错 / expected_val_map trace_id 映射错）；bug #1/#2 修，bug #3/#4 留 v4
+> - **v4（本版，同日晚 本 session）**：bug #3 cycle-level dump 锁定 → **compiler axiom vs sim 实现语义不一致**：`dependency_axioms.py:56-60` SHIFTUP producer `lat_p += smc_id_en` 假设 chain 提供 N-cycle 缓冲；`shift_up_unit.py` 实现为 1-stage register（无 buffer）→ SMC_0 chain head 收到 a 的 iter 偏移 +(smc_num-1)=+31
 
 ## Context
 
@@ -344,3 +345,200 @@ a0f5b99 feat(adr-018-stage1): D3.b + per-SMC data e2e partial (task #18 sub-7/7)
 - `verification_v2/main_verify.py:109-119` · bug #1 Auditor 调用路径（含 partitioned 2D 切片）
 - `sim/smc_simulator/core/kernel.py:108-117` · bug #2 smc_id 下传 setattr
 - `verification_v2/infra/auditor.py:328,366-394` · bug #2 parser 修法 + audit_smc 参数
+
+---
+
+## v4 · bug #3 cycle-level root cause（2026-05-28 晚 · 本 session）
+
+### Context Evidence v4
+
+#### E11 · bank5_final.hex line 0 word-reverse decode 锚点确认
+
+bank5_final.hex 每行 32 hex chars = 4 fp32 (LE lane 0 = rightmost word)：
+
+```
+line 0 hex: 0x41144a36419b152b40cff19641441d26
+  word-reverse decode → lane 0..3 = [12.2571, 6.4982, 19.3853, 9.2681]
+```
+
+与 v3 commit msg `c249715` 中 "[12.26, 6.50, 19.39, 9.27]" 完全一致 → 锚点正确。
+
+#### E12 · 理论 y[0,0..3] 与 actual 全 SMC y matrix 全位置搜索
+
+固定 seed `default_rng(0)` 复现 SMC_0 输入：
+- `a[0..3] = [3.548, 2.079, 1.164, 1.066]`
+- `b[0,0..3] = [4.510, 1.347, 3.834, 4.157]`
+- `c[0,0..3] = [3.077, 3.849, 1.933, 1.356]`
+- 期望 `y[0,0..3] = a[0..3]*b[0,0..3]+c[0,0..3] = [19.078, 6.650, 6.395, 5.788]`
+
+actual 4 lane 在所有 32-SMC × 256-row y matrix 中搜索 `|diff| < 0.05`：
+- actual lane 0 = 12.2571 在 SMC_0 最接近 y[105]/y[247]（远离 0），SMC_1..31 各有零散匹配
+- **无任何 lane permutation / iter shift / SMC permutation 单一变换能解释 4 lane 同时匹配**
+- → 简单几何错排假设全否定
+
+#### E13 · cycle-level AUDIT-DATA dump（per cycle SMC_0 数据流）
+
+`build/verification_v2/fma_parallel_n/fma_parallel_n_sim.log` 解析（V0 字段 word-reverse decode）：
+
+| Cyc | Unit | Tag | 数据 | 实测 lane 值 | 期望 | 判定 |
+|---|---|---|---|---|---|---|
+| 2 | ur-r0 | READ Bank:0 Addr:0 | a[0..3] | [3.55, 2.08, 1.16, 1.07] | a[0..3] = [3.55, 2.08, 1.16, 1.07] | ✅ a 读出正确 |
+| 36 | fpmul | COMPUTE S0 | **a[124..127]** | [2.04, 1.97, 4.55, 1.90] | a[0..3] = [3.55, 2.08, 1.16, 1.07] | ❌ **+31 iter 偏移** |
+| 36 | fpmul | COMPUTE S1 | b[0,0..3] | [4.51, 1.35, 3.83, 4.16] | b[0,0..3] | ✅ b 通路对 |
+| 41 | fpadd | COMPUTE S0 | c[0,0..3] | [3.08, 3.85, 1.93, 1.36] | c[0,0..3] | ✅ c 通路对 |
+| 41 | fpadd | COMPUTE S1 | FPMUL_out | [9.18, 2.65, 17.45, 7.91] | a*b[0]=[16.0, 2.80, 4.46, 4.43] | ❌ 由 S0 错传导 |
+| 46 | ur-w0 | WRITE Bank:5 Addr:0 | y_actual[0] | [12.26, 6.50, 19.39, 9.27] | y[0,0..3]=[19.08, 6.65, 6.39, 5.79] | ❌ 由 fpmul S0 错传导 |
+
+**单点错误定位**：`Cyc:36 FPMUL S0` 错；b 通路（partitioned，SMC own bank 读）和 c 通路（同）全对 → bug 在 a 通路（broadcast，走 SHIFTUP chain）。
+
+#### E14 · 精确 bug formula（iter 0/1 数值验证）
+
+per-iter dump（FPMUL Cyc 36..67，对应 iter 0..31）：
+
+| iter k | FPMUL S0 lane 0 实测 | 对应 a[?] | 偏移 |
+|---|---|---|---|
+| 0 | 2.0355 | **a[124]** | +124 = 31×4 |
+| 1 | 1.4982 | **a[128]** | +124 |
+| 2 | 4.2388 | **a[132]** | +124 |
+| ... | ... | ... | 恒 +124 |
+| 31 | 1.2611 | **a[248]** | +124 |
+
+bug formula：
+```
+sim_actual_y[k] = a[(k+31)*4 .. (k+31)*4+3]  ·  b[0, k*4 .. k*4+3]  +  c[0, k*4 .. k*4+3]
+                      ^^^^^^                  partitioned 正确    partitioned 正确
+                      broadcast +31 iter 偏移
+```
+
+验证：
+- iter 0：predicted = `a[124..127]·b[0,0..3]+c[0,0..3] = [12.2571, 6.4982, 19.3853, 9.2681]` = actual ✓
+- iter 1：predicted = `a[128..131]·b[0,4..7]+c[0,4..7] = [9.9566, 7.1136, 15.8016, 8.1564]` = decode(bank5 line 1) ✓
+
+→ **bug formula 锁定，offset = `smc_num - 1` = 31 iter（恰好链长 - 1）**
+
+### 真根因 v4 · Compiler axiom vs Sim 实现语义不一致
+
+#### 编译器 axiom 假设
+
+`src/synthesis/axioms/dependency_axioms.py:52-60`：
+
+```python
+lat_p = spec.delays.get(producer.op_type.upper(), 1)  # SHIFTUP base = 1
+# ADR-018 v7 D3.b (task #18 sub-7): SHIFTUP/SHIFTDN 跨 SMC chain RAW.
+# SPMD 模型 consumer 单 t_var 必须满足最差 SMC_{smc_id_en} 数据到达，
+# 故 chain_stage_latency × smc_id_en 计入 producer 有效 lat。
+if producer.op_type.upper() in ('SHIFTUP', 'SHIFTDN'):
+    smc_id_en = producer.metadata.get('smc_id_en', 0)
+    if isinstance(smc_id_en, int) and smc_id_en > 0:
+        chain_stage_latency = 1  # ADR-018 D3.b
+        lat_p += smc_id_en * chain_stage_latency  # 32-SMC: lat_p = 1 + 31 = 32
+```
+
+**axiom 隐含模型**：SHIFTUP producer 对 ALL consumer SMC 而言，其数据有效到达时间 = `t_prod + 1 + smc_id_en`。
+- 反推：consumer 必须在 ≥ `t_prod + 32` 时才能采样
+- 反推：producer 的实际效果如同一个 `smc_id_en`-stage **延迟 FIFO**
+
+#### 仿真器实现
+
+`sim/smc_simulator/units/shift_up_unit.py:39-78`（latency=1）：
+
+```python
+# SMC_0 chain head 本地数据源；其他 SMC 接上游 CRU_SHIFTUP_I
+if smc_id == 0:
+    self._next_cru_o = local_data & ((1 << 128) - 1)
+else:
+    self._next_cru_o = chain_in & ((1 << 128) - 1)
+# broadcast 模式所有 smc_id ≤ smc_id_en 都暴露 DR_SHIFTUP_D
+if (is_broadcast and smc_id <= smc_id_en):
+    self._next_dr_d = self._next_cru_o
+```
+
+`sim/smc_simulator/core/kernel.py:512-517`：
+
+```python
+self.units['shiftup'].evaluate({
+    ...
+    'data': self.ur_bank.get_read_data(0)  # SMC_0 chain head 本地数据源
+})
+```
+
+**sim 实际模型**：SHIFTUP 是 **1-stage register**，每 cycle `cru_o ← local_data`（SMC_0）/`cru_o ← chain_in`（其他）。DR_SHIFTUP_D 每 cycle 都被新数据覆盖。
+
+#### SMC_0 与 SMC_{smc_id_en} 行为差异（精确时序）
+
+设 a_read iter k 在 cycle `2+k` fire（abs_t=2, II=1）：
+
+| 时刻 | SMC_0 DR_SHIFTUP_D | SMC_31 DR_SHIFTUP_D（chain tail）|
+|---|---|---|
+| Cyc 2 | a[0..3]（自读 1 cycle 后） | 0（chain 还没传到）|
+| Cyc 3 | a[4..7]（被覆盖）| 0 |
+| ... | 每 cycle 覆盖 | 0 |
+| Cyc 33 | a[124..127] | a[0..3]（chain 31 hop 刚到）|
+| Cyc 36 | **a[136..139]** ≈ +31 iter | **a[12..15]** ≈ +3 iter（rtovr setup 余量） |
+
+`Cyc:36 FPMUL fire` 时（SPMD 全 SMC 同 cycle）：
+- 编译器假设 ALL SMC 都拿到 iter 0 的 a → 这只对 chain tail SMC_31 成立（粗略对齐，可能仍差几 cycle）
+- SMC_0 chain head 拿到 iter ~33 的 a → 实测 iter 31
+
+**→ 这就是 bug #3 的物理根因**：axiom 把 SHIFTUP 当 N-stage FIFO 用，sim 把它当 1-stage register 实现；SPMD 模型对 chain head 失效。
+
+#### 重要推论
+
+- **bug 只发生在 SMC_0**：SMC_31 chain tail 大致对齐（仍可能 off-by-1/2，需独立验证）
+- **b、c 通路无 bug**：partitioned tensor 每 SMC own bank 读，不走 chain
+- **数值 offset = smc_num - 1 = 31** 不是巧合 —— chain 长度 - 1
+
+### v4 Decision
+
+#### D7 · 4 个修复方向 inventory
+
+| 方向 | 修法 | pros | cons |
+|---|---|---|---|
+| **A** · 修 sim | SMC_0 SHIFTUP 加 `smc_num`-stage circular buffer（write cycle t，read cycle t+N） | axiom 不动；emitter 不动；fma_parallel_n 立即 bit-perfect | sim ≠ hw spec（spec 中 SHIFTUP 是 1-stage）→ 等于篡改 sim；需 hco 决定是否接受"sim 偏离 spec"的语义 |
+| **B** · 修 axiom + emitter | emitter 给每 SMC stagger a_read abs_t（SMC_0 后移 `smc_num-1` cycle，SMC_31 不变） | sim 不动；与现 hw spec 对齐 | 违反 SPMD "同指令同 cycle fire"；编译模型大改；emitter 复杂度增；可能引爆其他 axiom |
+| **C** · 修 hw_spec + sim | shiftup.yaml 加 `smc_num`-stage internal pipeline；sim 配套加 N-stage shift register | 最干净，axiom + sim + hw spec 三方对齐 | 硬件成本（N=32 × 128bit register ≈ 512B/SMC × 32 SMC = 16KB SRAM）；需 hco + hw 团队联审；周期长 |
+| **D** · 修 routing | SMC_0 rtovr-3 SEL 单独走本地直读（如 SEL=0 / 直读 R0），SMC_1..31 维持 SEL=29 (DR_SHIFTUP_D) | sim 不动；emitter 改动局限；可让 SMC_0 bit-perfect first 目标短期可达 | 违反 routing 跨 SMC 统一性；SMC_1..30 chain 中段是否仍 off-by-K 需逐 SMC 验证；SPMD 模型概念漏洞 |
+
+#### D8 · 推荐路径（待 hco 复核）
+
+- **短期**（ADR-020 v4 收尾达成 SMC_0 bit-perfect first）：方向 **D**（routing per-SMC），最小动 emitter，不动 axiom / sim / hw_spec
+- **长期**（达成 32-SMC bit-perfect 全清，ADR-020 Accepted 状态升）：方向 **C**（修 hw_spec），最干净对齐
+- **决策权**：本 ADR 仅 inventory，不 commit 修法；hco subagent 复核决定 A/B/C/D 选哪个；hco 之前 sim/axiom/hw_spec 任何一处改动都 **禁止落盘**
+
+#### D9 · 本 session 已交付
+
+- bug #3 cycle-level root cause 锁定（E11-E14 evidence + bug formula + axiom/sim mismatch 定位）
+- 4 修法方向 inventory + 推荐 D 短期 / C 长期
+- **未交付**：未改任何代码（sim / axiom / emitter / hw_spec / yaml 全部不动）；未跑修复后回归；未触碰 bug #4
+
+### Open Questions v4
+
+1. **SMC_31 是否真 bit-perfect？** v4 未独立验证 SMC_31（chain tail）。若 SMC_31 也错（偏移 +K 非 0），则方向 D 不适用，必须走 C；若 SMC_31 对则 D 可作短期修法
+2. **方向 D 的副作用**：SMC_1..30（chain 中段）DR_SHIFTUP_D 偏移多少？是否也需 per-SMC stagger SEL？
+3. **abs_t 排程数值精确分解**：实测 `abs_t(FPMUL) - abs_t(a_read) = 36 - 2 = 34`；axiom 给出 `lat_p = 32`，差 2 cycle 待 SMT trace 确认是否由 rtovr / latch 贡献
+4. **bug #4（Auditor expected_val_map）独立性**：bug #3 修后 bug #4 是否仍存？v4 未触碰
+5. **历史 ADR-018 D3.b 决策回溯**：`dependency_axioms.py:53` 注释提到 "ADR-018 v7 D3.b (task #18 sub-7)"；该决策当时是否考虑过 sim 端的实现对齐？若 ADR-018 当时假设 sim 同步实现 N-stage delay 而 sim 实际只实现 1-stage，则属 ADR-018 收尾遗留
+
+### hco 复核请求 v4
+
+> **触发条件**：变更涉及 `src/synthesis/axioms/` / `hw_config/specs/units/shiftup.yaml` / `sim/smc_simulator/units/shift_up_unit.py` 三处之一（CLAUDE.md decision routing 第 1-2 行）。本 ADR 不直接改这三处但提出修法方向 inventory，需 hco subagent 给出方向 A/B/C/D 的选型决策 + 修法范围审定。
+>
+> **请 hco 评估**：
+> - 方向 A（sim N-stage buffer）是否构成"sim 偏离 spec"违规？sim 是否应严格反映 hw_spec？
+> - 方向 B（emitter per-SMC stagger）是否破坏 SPMD 编译模型？ADR-018 是否预留此可能性？
+> - 方向 C（hw_spec 改 SHIFTUP 为 N-stage）的硬件成本（≈ 16KB 额外 SRAM）是否可接受？是否有更轻量 hw 方案（如复用现有 bank latch）？
+> - 方向 D（routing per-SMC）的 SMC_1..30 副作用边界？
+
+### v4 References
+
+- 本 commit · ADR-020 v4 段（cycle-level root cause + 修法 inventory）
+- `src/synthesis/axioms/dependency_axioms.py:52-60` · SHIFTUP producer lat_p += smc_id_en 公式（**根因点 1**）
+- `sim/smc_simulator/units/shift_up_unit.py:39-78` · SHIFTUP sim 实现（1-stage register，**根因点 2**）
+- `sim/smc_simulator/core/kernel.py:512-517` · SHIFTUP local_data wiring (ur_bank port 0 → shiftup data)
+- `sim/smc_simulator/system/cluster.py:84-97` · `_propagate_chain_inputs` 链 propagation（SMC_0 chain_in=0 / SMC_31 chain tail）
+- `hw_config/pipeline_delays.yaml:16` · `SHIFTUP: 1` base latency
+- `hw_config/modules.yaml:201-206` · SHIFTUP module spec（in: CRU_SHIFTUP_I, SMC_ID / out: CRU_SHIFTUP_O, DR_SHIFTUP_D）
+- `build/verification_v2/fma_parallel_n/fma_parallel_n_sim.log` · cycle-level AUDIT-DATA dump 源（E13 表数据来自此）
+- `build/verification_v2/fma_parallel_n/smc_0/output_bank/bank5_final.hex` · actual 输出 line 0/1（E11/E14 验证）
+- `build/verification_v2/fma_parallel_n/physical_instructions.json` · abs_t 排程（a_read=2, fpmul=36, fpadd=41, ur-w0=46）
+- commit `52babc2` · ADR-018 Stage 1 收尾时遗留（"SMC_0 bit-perfect ✓" 反向 claim 不成立的回归引入点之一）
