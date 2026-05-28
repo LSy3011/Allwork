@@ -658,4 +658,150 @@ lat_p += smc_id_en * chain_stage_latency  # 折成 op.t_var 单维 worst-case
 - `src/driver/emitter.py` · per-SMC stagger 实施目标点（具体行号 v6 落地时确认）
 - `hw_config/specs/units/shiftup.yaml:20-29, 50-55` · spec 真源（不动）
 - v4 §D7/D8（本文件 L491-512）· 4 方向 inventory（hco 否定主对话推荐路径）
-- v4 §OQ #3 · `abs_t` 差 2 cycle 来源 → **v5 升级高优先级阻塞项**
+- v4 §OQ #3 · `abs_t` 差 2 cycle 来源 → **v5 升级高优先级阻塞项** → **v5.1 已解**
+
+---
+
+## v5.1 · OQ #3 解 + B stagger 精确公式（2026-05-28 晚 · 本 session）
+
+### 状态变更
+
+v5 §Open Questions OQ #3（`abs_t(FPMUL) - abs_t(a_read) = 34` vs axiom `lat_p = 32` 差 2 cycle 来源）由 **升级阻塞项 → 已解**。B 修法实施路径全部 unblock；下一 session 可直接进 v6 代码落地。
+
+### Context · 时间链 4 边分解
+
+`build/verification_v2/fma_parallel_n/physical_instructions.json` BODY-stage abs_t 实测：
+
+| # | 源 | 目标 | 边类型 | latency 来源（`hw_config/pipeline_delays.yaml`）| diff |
+|---|---|---|---|---|---|
+| – | – | `a_read_3` (abs_t=2) | – | – | – |
+| ① | `a_read_3` | `shiftup_a_read_3` (abs_t=3) | RAW | `lat(UR_READ)=1` | **+1** |
+| ② | `shiftup_a_read_3` | `rt_a_read_3_FPMUL_S0_1` (abs_t=35) | chain RAW（worst-case fold） | `lat(SHIFTUP)=1 + smc_id_en × chain_stage_latency = 1 + 31 = 32` | **+32** |
+| ③ | `rt_a_read_3_FPMUL_S0_1` | `inl_2` (abs_t=36) | RAW | `lat(RTOVR)=1` | **+1** |
+
+总差 `36 - 2 = 34 = 1 + 32 + 1` ✓
+
+### 裁定 · "差 2 cycle 来源"
+
+axiom `lat_p = 32`（在 `dependency_axioms.py:56-60` fold 计算）**只是 SHIFTUP→RTOVR 这一条边**（即边 ②）。`a_read → fpmul` 总差 34 还包括上下游两条 base latency 边（① 与 ③）：
+
+- **边 ①（UR_READ→SHIFTUP）**：`lat=UR_READ=1`，producer 端 base latency，与 chain 无关
+- **边 ③（RTOVR→FPMUL）**：`lat=RTOVR=1`，consumer 端 base latency，与 chain 无关
+
+这 2 cycle 是 pipeline 各 unit 的固有 latency，**B 修法不动它们**，仅订正边 ② 的 fold 计算。
+
+### B 修法 stagger 精确公式
+
+**当前 axiom（fold）**：
+
+```
+∀ SMC:  t_rtovr = t_shiftup + lat(SHIFTUP) + smc_id_en × chain_stage_latency
+                = t_shiftup + 1 + 31
+                = t_shiftup + 32       (所有 SMC 共用单 t_var)
+```
+
+**B 修法（ADR-018 D3.b per-SMC 原式 + 1 cycle SHIFTUP base lat）**：
+
+```
+∀ k ∈ [0, smc_id_en]:
+    t_rtovr_at_SMC_k = t_shiftup + lat(SHIFTUP) + k × chain_stage_latency
+                     = t_shiftup + 1 + k
+                     = t_shiftup + 1 + k    (per-SMC 独立 t_var)
+```
+
+**Stagger 偏移量（emitter 在 lowering 阶段对每 SMC 应用）**：
+
+```
+delta_k = (smc_id_en - k) × chain_stage_latency
+        = (31 - k) × 1
+        = 31 - k cycles
+```
+
+emitter 输出 hex 时，SMC_k 的 rtovr-3 abs_t = current_fold_abs_t - delta_k。
+
+**SMC_k 实际 fire cycle**（基于当前排程 abs_t=35）：
+
+| SMC | delta_k | rtovr-3 fire cycle | 备注 |
+|---|---|---|---|
+| 0 | 31 | **4** | 最早 fire；chain head 数据立即可用 |
+| 1 | 30 | 5 | 等 1 hop chain |
+| 15 | 16 | 19 | 等 15 hop chain |
+| 31 | 0 | **35** | 与当前 fold 一致；chain tail 数据最晚到 |
+
+### 链式 stagger 传播范围（hco 风险 #2 显式化）
+
+**B 修法不能孤立 stagger rtovr-3**。一旦 rtovr-3 per-SMC stagger，整 DFG 经 SHIFTUP-跨链的所有 op 都必须同 delta_k stagger，否则 FPMUL S0/S1 同 cycle 错对齐。
+
+#### a 通路（跨 SHIFTUP，全须 stagger）：
+
+| trace_id | unit | 当前 abs_t | SMC_0 修后 abs_t | 备注 |
+|---|---|---|---|---|
+| `rt_a_read_3_FPMUL_S0_1` | RTOVR | 35 | 4 | a 通路 RtoVR (输入 FPMUL S0) |
+| `inl_2` | FPMUL | 36 | 5 | 由 S0 拖动 |
+| `rt_inl_2_FPADD_S1_4` | RTOVR | 40 | 9 | 由 FPMUL 拖动 |
+| `y_0_a1` | FPADD | 41 | 10 | 由 S1 拖动 |
+| `rt_y_0_a1_UR_W0_S_5` | RTOVR | 45 | 14 | 由 FPADD 拖动 |
+| `out_obj_0` | UR_WRITE | 46 | 15 | 由 RtoVR 拖动 |
+
+#### b/c 通路（partitioned，不跨 SHIFTUP；但 consumer fire 时间被 a 通路拖动）：
+
+| trace_id | unit | 当前 abs_t | SMC_0 修后 abs_t | 备注 |
+|---|---|---|---|---|
+| `b_read_4` | UR_READ | 34 | **3** | 必须配套提前 31 cycle；否则 SMC_0 FPMUL 在 cycle 5 fire 时 b 还没读到 |
+| `rt_b_read_4_FPMUL_S1_2` | RTOVR | 35 | 4 | 同上 |
+| `c_read_1` | UR_READ | 39 | **8** | 必须配套提前 31 cycle |
+| `rt_c_read_1_FPADD_S0_3` | RTOVR | 40 | 9 | 同上 |
+
+**关键结论**：b/c 通路虽然 partitioned 不需 chain，但 consumer fire 时间因 a 通路 stagger 而提前，**b/c 也必须 per-SMC 提前 read，否则 FPMUL/FPADD 操作数缺失**。emitter stagger 算法必须对 **整 DFG 拓扑**（不只 a 通路）做 per-SMC offset 计算。
+
+### B 修法实施算法（v6 落地参考）
+
+```
+for each consumer_op in DFG (topological order):
+    delta_at_SMC_k(consumer_op) = max(
+        delta_at_SMC_k(producer_op) for producer_op in deps(consumer_op)
+    )
+    # 若 consumer 直接跨 SHIFTUP chain dep:
+    if has_shiftup_chain_dep(consumer_op):
+        delta_at_SMC_k(consumer_op) = max(
+            delta_at_SMC_k(consumer_op),
+            (smc_id_en - k) × chain_stage_latency
+        )
+    # emitter 输出 SMC_k 的 abs_t:
+    abs_t_at_SMC_k(consumer_op) = current_fold_abs_t(consumer_op) - delta_at_SMC_k(consumer_op)
+```
+
+注意：
+- DFG topological order 保证 producer 的 delta 先算
+- `max` 取最严约束（任何一条上游 stagger 都会拖动 consumer）
+- partitioned tensor 的 UR_READ 没有 producer，但若它是某 staggered consumer 的依赖，则 emitter 必须反向传播 stagger
+
+### v5.1 Open Questions（新增 + 校准）
+
+1. **emitter stagger 算法是否能与 SMT 求解器解耦？** 当前 SMT 求解器算出统一 abs_t（基于 fold lat_p），emitter 在 lowering 阶段做 per-SMC subtract。这是后处理范式（low-cost），还是 SMT 必须重算 per-SMC t_var（high-cost）？v6 落地前需选型。
+
+2. **II 是否变？** 当前 II=1（compiler_schedule.json 实测）。per-SMC stagger 后，单 SMC 自己的 II 不变（stagger 是 inter-SMC offset），但 **整 cluster total cycles** 减少（SMC_0 比 SMC_31 早完成 31 cycle），跨 SMC 同步点（如 OQ-8 (i) SHIFTUP 同步发射）须验证不被破坏。
+
+3. **OQ-8 (i) "沿途 SMC 同 cycle 占 IQ slot"（D3.e axiom）与 consumer per-SMC stagger 是否冲突？** SHIFTUP 自身仍同步 fire（不变），但 consumer FPMUL 的 IQ slot 在不同 SMC 落不同 cycle → 资源 modulo 须 per-SMC 重算（hco 风险 #4）。具体哪些 axiom 受影响 v6 落地时枚举。
+
+### v5.1 Decision
+
+- **B 修法 unblock**：OQ #3 解，stagger 公式精确化，链式传播范围审定
+- **v6 起点定义**（next session）：
+  1. 解 v5.1 OQ #1（emitter stagger 后处理 vs SMT 重算选型）
+  2. 动 `src/synthesis/axioms/dependency_axioms.py:56-60` 删 fold
+  3. 动 `src/driver/emitter.py` 加 per-SMC stagger 算法（按 v5.1 §"实施算法"）
+  4. 动 `docs/adr/ADR-018-multi-smc-scheduling-design.md` D3.b 段加 errata
+  5. 全量回归（fma_parallel_n 32-SMC + horner + activation + matmul）
+  6. ADR-020 v6 commit
+- **本 session 不动任何代码**（仅 doc）；hco 复核范围未扩，v5 修法范围审定仍有效
+
+### v5.1 References
+
+- v4 §E13 cycle-level AUDIT-DATA dump · 时间链实测源
+- v5 §"v5 真根因再校准" · spec/sim 对，axiom fold 错
+- `build/verification_v2/fma_parallel_n/physical_instructions.json` · BODY-stage abs_t 排程
+- `hw_config/pipeline_delays.yaml:2-22` · UR_READ=1, RTOVR=1, SHIFTUP=1, FPMUL=4, FPADD=4 base latencies
+- `docs/adr/ADR-018-multi-smc-scheduling-design.md:99-103` · D3.b 原始 per-SMC 公式
+- `docs/adr/ADR-018-multi-smc-scheduling-design.md:139-153` · D3.e SHIFTUP IQ propagation（v5.1 OQ #3 关联）
+- v5 §D11 修法范围 · v6 落地必动/不动清单（v5.1 不扩范围）
