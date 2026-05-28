@@ -43,6 +43,24 @@ system_core:
       SHIFTUP: 1
       SHIFTDN: 1
       RTOVR: 64
+    # ADR-018 v7 D1: 显式 per-SMC schema（值同 unit_instances，语义为每 SMC 一套）
+    unit_instances_per_smc:
+      FPMUL: 1
+      FPADD: 1
+      INTADD: 1
+      LOGIC: 1
+      FPTOFP: 1
+      FPTOINT: 1
+      INTTOFP: 1
+      INTTOINT: 1
+      INT8TOFP16: 1
+      FP16MUL: 1
+      FP32ADDTREE5TO1: 1
+      FP32ADDTREE8TO1: 1
+      SHIFTUP: 1
+      SHIFTDN: 1
+      RTOVR: 64
+    smc_shared_units: []
   iq_registry:
     UR_READ: 30
     UR_WRITE: 35

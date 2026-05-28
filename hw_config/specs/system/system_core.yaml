@@ -25,6 +25,7 @@ resource_constraints:
   max_parallel_iq: 999
   bus_width: 128
   # 🚀 物理对齐：显式定义计算单元实例数量
+  # ADR-018 v7 D1: 语义改为 per-SMC 视角（每 SMC 一套）；保留 unit_instances 字段名为向后兼容
   unit_instances:
     # 基础计算流
     FPMUL: 1
@@ -44,9 +45,27 @@ resource_constraints:
     # 累加树
     FP32ADDTREE5TO1: 1
     FP32ADDTREE8TO1: 1
-    # 位移操作
+    # 位移操作（跨 SMC chain）
     SHIFTUP: 1
     SHIFTDN: 1
+  # ADR-018 v7 D1: 显式 per-SMC schema（值同 unit_instances）+ 跨 SMC 共享单元清单（当前为空）
+  unit_instances_per_smc:
+    FPMUL: 1
+    FPADD: 1
+    INTADD: 1
+    LOGIC: 1
+    RTOVR: 64
+    FPTOFP: 1
+    FPTOINT: 1
+    INTTOFP: 1
+    INTTOINT: 1
+    INT8TOFP16: 1
+    FP16MUL: 1
+    FP32ADDTREE5TO1: 1
+    FP32ADDTREE8TO1: 1
+    SHIFTUP: 1
+    SHIFTDN: 1
+  smc_shared_units: []
 
 iq_registry:
   UR_READ: 30

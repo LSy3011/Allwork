@@ -30,6 +30,9 @@ class ResourceAxioms(AxiomBase):
         # 兼容旧版的其他资源约束
         ResourceAxioms.add_bank_conflict_axiom(solver, ops, t_vars, II, spec, **kwargs)
         ResourceAxioms.add_spill_reload_mutex_axiom(solver, ops, t_vars, II, spec, **kwargs)
+        # ADR-018 v7 D3.d/D3.e：多 SMC chain 相关 axiom（N=1 / 非 chain 算子下 no-op）
+        ResourceAxioms.add_broadcast_unique_source_axiom(solver, ops, t_vars, II, spec, **kwargs)
+        ResourceAxioms.add_chain_iq_propagation_axiom(solver, ops, t_vars, II, spec, **kwargs)
 
     @staticmethod
     def add_modulo_constraint(solver, ops, t_vars, II, spec, **kwargs):
@@ -40,16 +43,18 @@ class ResourceAxioms(AxiomBase):
         if u_vars is None:
             return
 
-        # 按资源类型分组操作
-        type_to_ops: Dict[str, List[MIROp]] = {}
+        # 按 (资源类型, smc_id) 分组操作（ADR-018 v7 D2：多 SMC key 扩展）
+        # N=1 模式下所有 op smc_id=0 → 等价单 SMC 单维 key；多 SMC 下每 SMC ALU 独立 modulo 池
+        type_to_ops: Dict[tuple, List[MIROp]] = {}
         for op in ops:
             u_type = ResourceAxioms._get_resource_type(op.op_type)
-            type_to_ops.setdefault(u_type, []).append(op)
+            smc_id = op.metadata.get('smc_id', 0)
+            type_to_ops.setdefault((u_type, smc_id), []).append(op)
 
-        for u_type, op_list in type_to_ops.items():
+        for (u_type, smc_id), op_list in type_to_ops.items():
             if len(op_list) <= 1:
                 continue
-            
+
             # 🛸 [SMT-REFACTOR] 已经剥离了 RTOVR 的 SMT 物理搜索，直接放行
             if u_type == "RTOVR":
                 continue
@@ -84,7 +89,7 @@ class ResourceAxioms(AxiomBase):
                             )
                             predicates.append((cond, 1))
                         
-                        label = f"mod_pble_{u_type}_{iq_id}_s{slot}"
+                        label = f"mod_pble_{u_type}_smc{smc_id}_{iq_id}_s{slot}"
                         # 使用 Pseudo-Boolean Le (<= 1) 约束
                         ResourceAxioms._add_constraint(
                             solver,
@@ -107,7 +112,7 @@ class ResourceAxioms(AxiomBase):
                         op_i, op_j = op_list[i], op_list[j]
                         tid_i, tid_j = op_i.trace_id, op_j.trace_id
                         
-                        label = f"mod_gap_{u_type}_{tid_i}_{tid_j}"
+                        label = f"mod_gap_{u_type}_smc{smc_id}_{tid_i}_{tid_j}"
                         ResourceAxioms._add_constraint(
                             solver,
                             z3.Implies(
@@ -164,27 +169,32 @@ class ResourceAxioms(AxiomBase):
         def get_mod_val_legacy(op):
             return s_vars[op.trace_id] if s_vars else t_vars[op.trace_id]
 
-        # 按 Bank ID 分组操作
-        bank_writes = {} # bank_id -> List[MIROp]
-        bank_reads = {}  # bank_id -> List[MIROp]
+        # 按 (smc_id, Bank ID) 分组操作（ADR-018 v7 D2：多 SMC key 扩展）
+        # ADR-009 errata: 跨 SMC 同 bank_id 同 addr 是不同物理 Bank，应 SAT 不冲突；
+        # R-R 同地址豁免 / W↔R 无豁免规则均限于同 SMC 内成立。
+        # N=1 模式所有 op smc_id=0 → 等价单 SMC 单维 key。
+        bank_writes = {} # (smc_id, bank_id) -> List[MIROp]
+        bank_reads = {}  # (smc_id, bank_id) -> List[MIROp]
 
         for op in ops:
             u_type = ResourceAxioms._get_resource_type(op.op_type)
             bid, addr = get_op_bank_and_addr(op)
+            smc_id = op.metadata.get('smc_id', 0)
             if bid is not None:
+                key = (smc_id, bid)
                 if u_type == "UR_WRITE":
-                    bank_writes.setdefault(bid, []).append(op)
+                    bank_writes.setdefault(key, []).append(op)
                 elif u_type == "UR_READ":
-                    bank_reads.setdefault(bid, []).append(op)
+                    bank_reads.setdefault(key, []).append(op)
 
         if is_legacy:
             # 1. 写冲突公理：同一个 Bank 的任意两个写操作在 II 内必然冲突（必须位于不同模槽）
-            for bid, write_ops in bank_writes.items():
+            for (smc_id, bid), write_ops in bank_writes.items():
                 if len(write_ops) > 1:
                     for i in range(len(write_ops)):
                         for j in range(i + 1, len(write_ops)):
                             op_i, op_j = write_ops[i], write_ops[j]
-                            label = f"bank_gap_W_{bid}_{op_i.trace_id}_{op_j.trace_id}"
+                            label = f"bank_gap_W_smc{smc_id}_{bid}_{op_i.trace_id}_{op_j.trace_id}"
                             ResourceAxioms._add_constraint(
                                 solver, 
                                 get_mod_val_legacy(op_i) != get_mod_val_legacy(op_j), 
@@ -192,7 +202,7 @@ class ResourceAxioms(AxiomBase):
                             )
 
             # 2. 读冲突公理：同一个 Bank 的两个读操作，只有当它们逻辑地址不同时，才会在 II 内冲突
-            for bid, read_ops in bank_reads.items():
+            for (smc_id, bid), read_ops in bank_reads.items():
                 if len(read_ops) > 1:
                     for i in range(len(read_ops)):
                         for j in range(i + 1, len(read_ops)):
@@ -205,7 +215,7 @@ class ResourceAxioms(AxiomBase):
                                 should_conflict = (addr_i != addr_j)
                             
                             if should_conflict:
-                                label = f"bank_gap_R_{bid}_{op_i.trace_id}_{op_j.trace_id}"
+                                label = f"bank_gap_R_smc{smc_id}_{bid}_{op_i.trace_id}_{op_j.trace_id}"
                                 ResourceAxioms._add_constraint(
                                     solver, 
                                     get_mod_val_legacy(op_i) != get_mod_val_legacy(op_j), 
@@ -213,7 +223,7 @@ class ResourceAxioms(AxiomBase):
                                 )
                             else:
                                 # 相同物理地址：
-                                label = f"bank_gap_R_same_{bid}_{op_i.trace_id}_{op_j.trace_id}"
+                                label = f"bank_gap_R_same_smc{smc_id}_{bid}_{op_i.trace_id}_{op_j.trace_id}"
                                 ResourceAxioms._add_constraint(
                                     solver,
                                     z3.Implies(
@@ -225,14 +235,14 @@ class ResourceAxioms(AxiomBase):
 
             # 3. W↔R 跨类型冲突（ADR-009）：同 Bank 任意 (W, R) 对必须落在不同模槽
             # 无地址豁免：硬件无 forwarding（user 2026-05-15 确认）
-            for bid in set(bank_writes.keys()) | set(bank_reads.keys()):
-                writes = bank_writes.get(bid, [])
-                reads = bank_reads.get(bid, [])
+            for (smc_id, bid) in set(bank_writes.keys()) | set(bank_reads.keys()):
+                writes = bank_writes.get((smc_id, bid), [])
+                reads = bank_reads.get((smc_id, bid), [])
                 if not writes or not reads:
                     continue
                 for op_w in writes:
                     for op_r in reads:
-                        label = f"bank_gap_WR_{bid}_{op_w.trace_id}_{op_r.trace_id}"
+                        label = f"bank_gap_WR_smc{smc_id}_{bid}_{op_w.trace_id}_{op_r.trace_id}"
                         ResourceAxioms._add_constraint(
                             solver,
                             get_mod_val_legacy(op_w) != get_mod_val_legacy(op_r),
@@ -254,16 +264,16 @@ class ResourceAxioms(AxiomBase):
             def get_mod_val(op):
                 return rem_vars[op.trace_id]
                 
-            for bid, write_ops in bank_writes.items():
+            for (smc_id, bid), write_ops in bank_writes.items():
                 if len(write_ops) > 1:
                     for i in range(len(write_ops)):
                         for j in range(i + 1, len(write_ops)):
                             ResourceAxioms._add_constraint(
                                 solver, get_mod_val(write_ops[i]) != get_mod_val(write_ops[j]), 
-                                f"bank_gap_W_{bid}_{write_ops[i].trace_id}_{write_ops[j].trace_id}"
+                                f"bank_gap_W_smc{smc_id}_{bid}_{write_ops[i].trace_id}_{write_ops[j].trace_id}"
                             )
 
-            for bid, read_ops in bank_reads.items():
+            for (smc_id, bid), read_ops in bank_reads.items():
                 if len(read_ops) > 1:
                     for i in range(len(read_ops)):
                         for j in range(i + 1, len(read_ops)):
@@ -272,7 +282,7 @@ class ResourceAxioms(AxiomBase):
                             if addr_i is None or addr_j is None or addr_i != addr_j:
                                 ResourceAxioms._add_constraint(
                                     solver, get_mod_val(read_ops[i]) != get_mod_val(read_ops[j]), 
-                                    f"bank_gap_R_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
+                                    f"bank_gap_R_smc{smc_id}_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
                                 )
                             else:
                                 # 🚀 [CROSS-ITERATION BANK CONFLICT SOLUTION]
@@ -284,14 +294,14 @@ class ResourceAxioms(AxiomBase):
                                         t_vars[read_ops[i].trace_id] != t_vars[read_ops[j].trace_id],
                                         get_mod_val(read_ops[i]) != get_mod_val(read_ops[j])
                                     ),
-                                    f"bank_gap_R_same_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
+                                    f"bank_gap_R_same_smc{smc_id}_{bid}_{read_ops[i].trace_id}_{read_ops[j].trace_id}"
                                 )
 
             # 3. W↔R 跨类型冲突（ADR-009）：同 Bank 任意 (W, R) 对必须落在不同模槽
             # 无地址豁免：硬件无 forwarding（user 2026-05-15 确认）
-            for bid in set(bank_writes.keys()) | set(bank_reads.keys()):
-                writes = bank_writes.get(bid, [])
-                reads = bank_reads.get(bid, [])
+            for (smc_id, bid) in set(bank_writes.keys()) | set(bank_reads.keys()):
+                writes = bank_writes.get((smc_id, bid), [])
+                reads = bank_reads.get((smc_id, bid), [])
                 if not writes or not reads:
                     continue
                 for op_w in writes:
@@ -299,28 +309,105 @@ class ResourceAxioms(AxiomBase):
                         ResourceAxioms._add_constraint(
                             solver,
                             get_mod_val(op_w) != get_mod_val(op_r),
-                            f"bank_gap_WR_{bid}_{op_w.trace_id}_{op_r.trace_id}"
+                            f"bank_gap_WR_smc{smc_id}_{bid}_{op_w.trace_id}_{op_r.trace_id}"
                         )
+
+    @staticmethod
+    def add_broadcast_unique_source_axiom(solver, ops, t_vars, II, spec, **kwargs):
+        """
+        ADR-018 v7 D3.d (OQ-6 b 双层保险)：SHIFTUP broadcast 唯一源约束。
+        At-Most-1 active broadcast=1 op per IQ_SHIFTUP cycle slot
+        （emitter 复制是 lowering 阶段，不映射回多个 SMT 变量；本 axiom 守逻辑层 op 唯一）。
+        N=1 / 非 broadcast 算子下 op_list 为空，no-op。
+        """
+        shiftup_bc_ops = [
+            o for o in ops
+            if o.op_type.upper() == 'SHIFTUP' and o.metadata.get('broadcast') == 1
+        ]
+        if len(shiftup_bc_ops) <= 1:
+            return
+
+        # 任意两条 broadcast SHIFTUP op 必须落在不同 modulo slot
+        for i in range(len(shiftup_bc_ops)):
+            for j in range(i + 1, len(shiftup_bc_ops)):
+                op_i, op_j = shiftup_bc_ops[i], shiftup_bc_ops[j]
+                _, r_i = ResourceAxioms.get_remainder_vars(solver, op_i.trace_id, t_vars, II)
+                _, r_j = ResourceAxioms.get_remainder_vars(solver, op_j.trace_id, t_vars, II)
+                label = f"bc_unique_{op_i.trace_id}_{op_j.trace_id}"
+                ResourceAxioms._add_constraint(
+                    solver,
+                    r_i != r_j,
+                    label
+                )
+
+    @staticmethod
+    def add_chain_iq_propagation_axiom(solver, ops, t_vars, II, spec, **kwargs):
+        """
+        ADR-018 v7 D3.e (OQ-2 + OQ-8 (i))：SHIFTUP/SHIFTDN chain 沿途 SMC 同步发射 IQ slot 占用。
+        - 沿途 SMC_0..smc_id_en 在 t=op.t_issue 各占自己 chain IQ slot
+        - 复用 modulo collision pool：key (chain_iq_type, smc_along_path, t%II) 至多 1 op
+        - 当前 smc_id_en 是编译期常量（emitter 在 SMT solve 后填）；smc_id_en 是 SMT 变量场景留 Stage 2
+        - N=1 / 非 chain 算子下 chain_ops 为空，no-op
+        """
+        from collections import defaultdict
+
+        chain_ops = [
+            o for o in ops
+            if o.op_type.upper() in ('SHIFTUP', 'SHIFTDN')
+        ]
+        if not chain_ops:
+            return
+
+        # (chain_iq_type, smc_along_path) -> List[(op, r_var)]
+        slot_pool: Dict[tuple, List[tuple]] = defaultdict(list)
+        for op in chain_ops:
+            smc_id_en = op.metadata.get('smc_id_en', 0)
+            if not isinstance(smc_id_en, int):
+                continue  # smc_id_en 是 SMT 变量场景留 Stage 2
+            chain_type = op.op_type.upper()
+            _, r_var = ResourceAxioms.get_remainder_vars(solver, op.trace_id, t_vars, II)
+            for smc_k in range(smc_id_en + 1):
+                slot_pool[(chain_type, smc_k)].append((op, r_var))
+
+        # 同 (chain_type, smc_k) 池内任意两条 op 的 remainder 必须不同（同 cycle 不能两条 chain op 占同 SMC IQ）
+        for (chain_type, smc_k), op_slot_list in slot_pool.items():
+            if len(op_slot_list) <= 1:
+                continue
+            for i in range(len(op_slot_list)):
+                for j in range(i + 1, len(op_slot_list)):
+                    op_i, r_i = op_slot_list[i]
+                    op_j, r_j = op_slot_list[j]
+                    if op_i.trace_id == op_j.trace_id:
+                        continue
+                    label = f"chain_iq_{chain_type}_smc{smc_k}_{op_i.trace_id}_{op_j.trace_id}"
+                    ResourceAxioms._add_constraint(
+                        solver,
+                        r_i != r_j,
+                        label
+                    )
 
     @staticmethod
     def add_spill_reload_mutex_axiom(solver, ops, t_vars, II, spec, **kwargs):
         """
         Spill/Reload 互斥：同 Spill 对应的多个 Reload 操作必须落在不同模槽。
+        ADR-018 v7 D2: 按 (smc_id, spill_id) 分组——spill 落在 per-SMC 私有 Bank，
+        跨 SMC 同 spill_id 是不同物理资源，独立。N=1 模式 smc_id=0 等价旧行为。
         """
-        spill_groups: Dict[str, list] = {}
+        spill_groups: Dict[tuple, list] = {}
         for op in ops:
             if op.op_type.upper() == "UR_READ":
+                smc_id = op.metadata.get('smc_id', 0)
                 for d in op.metadata.get("depends_on", []):
                     if isinstance(d, str) and d.startswith("spill_"):
-                        spill_groups.setdefault(d, []).append(op)
+                        spill_groups.setdefault((smc_id, d), []).append(op)
 
-        for spill_id, reloads in spill_groups.items():
+        for (smc_id, spill_id), reloads in spill_groups.items():
             if len(reloads) <= 1:
                 continue
             for i in range(len(reloads)):
                 for j in range(i + 1, len(reloads)):
                     op_i, op_j = reloads[i], reloads[j]
-                    label = f"spill_re_{spill_id}_{op_i.trace_id}_{op_j.trace_id}"
+                    label = f"spill_re_smc{smc_id}_{spill_id}_{op_i.trace_id}_{op_j.trace_id}"
                     ResourceAxioms._add_constraint(
                         solver,
                         t_vars[op_i.trace_id] % II != t_vars[op_j.trace_id] % II,

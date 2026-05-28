@@ -106,3 +106,34 @@ class PortSlot(IntEnum):
     UR_R1_D   = 31
     UR_R2_D   = 32
     UR_R3_D   = 33
+
+
+# ====================================================================
+# ADR-018 v7 D1: 多 SMC enum 维度扩展 helper
+# 现 enum 值是 base id（全局 RtoVR/IQ 命名空间，单 SMC 视角）；
+# per-SMC 资源访问通过 helper 计算 unique key，不破现 enum 数值。
+# 旧 caller 显式传 smc_id=0 → 行为与单 SMC 模式等价。
+# ====================================================================
+
+def get_per_smc_resource_id(enum_val, smc_id: int = 0, smc_num: int = 32) -> int:
+    """
+    返回 per-SMC 唯一的资源 ID（用于 axiom key / cluster 分发）。
+
+    实现：enum_val 作为本 SMC 内的 base offset，叠加 smc_id × smc_num_units_stride。
+    当前最简策略：(smc_id, enum_val) 用 (smc_id * 1000 + enum_val) 编码——
+        - 1000 远大于现 enum 最大值（38）保证不冲突
+        - 32 SMC × 1000 = 32000，远小于 SMT Int 32-bit 上限
+    未来如需改 encoding（如真正分配 per-SMC IQ pool），改此函数即可。
+
+    Args:
+        enum_val: RtoVRInputSource / RtoVROutput / IQ 等 enum 的值（int 或 IntEnum 成员）
+        smc_id: SMC index ∈ [0, smc_num)
+        smc_num: 总 SMC 数量（默认 32 = PARAM_SMC_NUM）
+
+    Returns:
+        唯一 per-SMC 资源 ID
+    """
+    if not (0 <= smc_id < smc_num):
+        raise ValueError(f"smc_id={smc_id} out of range [0, {smc_num})")
+    val = int(enum_val) if hasattr(enum_val, '__int__') else enum_val
+    return smc_id * 1000 + val

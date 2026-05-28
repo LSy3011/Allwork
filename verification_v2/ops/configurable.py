@@ -18,6 +18,17 @@ class ConfigurableOperator(BaseOperator):
         self.formula_str = self.cfg["formula"]
         self.tensors_cfg = self.cfg["tensors"]
         self.test_cfg = self.cfg.get("test_data", {})
+
+        # ADR-018 v7 D4.5: 多 SMC partition 字段（向后兼容，不存在则单 SMC 模式）
+        # parallel_dim: None | "N" | "K"（Stage 1 X = "N" 用 SHIFTUP broadcast；Stage 2 Y = "K" 用 SHIFTDN chain reduce）
+        # chain_reduce_depth: 仅 parallel_dim="K" 时有效；默认 PARAM_SMC_NUM-1=31
+        self.parallel_dim = self.cfg.get("parallel_dim")
+        self.chain_reduce_depth = self.cfg.get("chain_reduce_depth")
+        if self.parallel_dim not in (None, "N", "K"):
+            raise ValueError(
+                f"[ADR-018 D4.5] op '{self.name}' parallel_dim={self.parallel_dim!r} 非法；"
+                f"合法值: None / 'N' / 'K'"
+            )
         
         # 🛸 [V5.0 FIX] 构建 locals，强制把 tensors_cfg 里的名字当作 Symbol，防止 gamma/beta 等与 SymPy 内置冲突
         locals_dict = {name: sp.Symbol(name) for name in self.tensors_cfg}

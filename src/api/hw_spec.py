@@ -187,18 +187,22 @@ class HardwareSpec(BaseModel):
             return self.system_core["system_core"]
         return self.system_core
 
-    def get_iq_ids(self, unit_type: str) -> List[int]:
+    def get_iq_ids(self, unit_type: str, smc_id: int = 0) -> List[int]:
         """
         根据物理单元类型获取其下所有实例的 IQ ID。
+
+        ADR-018 v7 D1: 新增 smc_id 参数（默认 0 = N=1 模式向后兼容）。
+        当前 IQ id 是全局 base + per-SMC index；smc_id 维度由调用方在 axiom key 中区分。
+        未来如需 per-SMC 独立 base id pool，扩展此函数即可（不破现 API）。
         """
         registry = self.config.get("iq_registry", {})
         instances = self.config.get("resource_constraints", {}).get("unit_instances", {})
-        
+
         # 🛸 [SMT-REFACTOR Step 1.1] 强行截断 RTOVR 槽位 (0-38) 避免分配到不存在的 DVR
         if unit_type.upper() == "RTOVR":
             base = registry.get("RTOVR", 100)
             return [base + i for i in range(39)]
-        
+
         # 1. 处理 UR 特殊端口 (动态从 registry 映射地址)
         if unit_type.upper() == "UR_READ":
             base = registry.get("UR_READ", 30)
@@ -208,14 +212,55 @@ class HardwareSpec(BaseModel):
             base = registry.get("UR_WRITE", 35)
             count = self.config["resource_constraints"].get("total_write_ports", 4)
             return [base + i for i in range(count)]
-            
+
         # 2. 处理 ALU 常规端口 (基于 Registry 偏移)
         if unit_type.upper() in instances:
             base_id = registry.get(unit_type.upper(), 0)
             count = instances[unit_type.upper()]
             return [base_id + i for i in range(count)]
-        
+
         return []
+
+    # ====================================================================
+    # ADR-018 v7 D1: 多 SMC schema helper
+    # ====================================================================
+
+    def get_unit_instances_per_smc(self) -> Dict[str, int]:
+        """
+        ADR-018 v7 D1: 返回 per-SMC 视角的 unit instance dict。
+        Fallback：若 system_core.yaml 没显式 unit_instances_per_smc，等价于 unit_instances（语义已是 per-SMC）。
+        """
+        rc = self.config.get("resource_constraints", {})
+        return rc.get("unit_instances_per_smc", rc.get("unit_instances", {}))
+
+    def get_smc_shared_units(self) -> set:
+        """ADR-018 v7 D1: 跨 SMC 共享的 unit 清单（当前空，预留未来真正共享的 unit）。"""
+        return set(self.config.get("resource_constraints", {}).get("smc_shared_units", []))
+
+    def is_smc_shared_unit(self, unit_type: str) -> bool:
+        return unit_type.upper() in self.get_smc_shared_units()
+
+    def get_global_unit_instances(self) -> Dict[str, int]:
+        """
+        ADR-018 v7 D1 global_unit_instances property:
+        return {u: (count if u in smc_shared else count * smc_num) for ...}
+        """
+        smc_num = self.params.PARAM_SMC_NUM
+        per_smc = self.get_unit_instances_per_smc()
+        shared = self.get_smc_shared_units()
+        return {u: (c if u in shared else c * smc_num) for u, c in per_smc.items()}
+
+    def assert_single_smc_mode(self, caller: str = "unknown"):
+        """
+        ADR-018 v7 D1: 让未迁移多 SMC 的 caller 在 PARAM_SMC_NUM>1 时显式 fail-fast。
+        防止 silent SMC-0 only 误跑。
+        """
+        if self.params.PARAM_SMC_NUM > 1:
+            raise RuntimeError(
+                f"[ADR-018] caller={caller} 未迁移多 SMC 接口，"
+                f"但 PARAM_SMC_NUM={self.params.PARAM_SMC_NUM}>1；"
+                f"请调用方传 smc_id 参数或使用 get_global_unit_instances()"
+            )
 
     def get_iq_name(self, iq_id: int, unit_type: str = None) -> str:
         """

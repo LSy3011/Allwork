@@ -36,7 +36,11 @@ class PhysicalAxioms(AxiomBase):
                     continue
                 if op_j.op_type.upper() not in ["UR_READ", "UR_WRITE"]:
                     continue
-                    
+
+                # ADR-018 v7 D2: 跨 SMC 的 op pair 独立（每 SMC 私有 IQ + Bank），不应互斥
+                if op_i.metadata.get('smc_id', 0) != op_j.metadata.get('smc_id', 0):
+                    continue
+
                 # 如果任意一个是 Stride=0 的常量读取，豁免隔离
                 if op_i.op_type.upper() == "UR_READ" and op_i.metadata.get("stride") == 0:
                     continue
@@ -73,7 +77,11 @@ class PhysicalAxioms(AxiomBase):
         for i in range(len(read_ops)):
             for j in range(i + 1, len(read_ops)):
                 op_A, op_B = read_ops[i], read_ops[j]
-                
+
+                # ADR-018 v7 D2: 跨 SMC 的 UR_READ 独立 IQ，不应互斥保护
+                if op_A.metadata.get('smc_id', 0) != op_B.metadata.get('smc_id', 0):
+                    continue
+
                 same_iq = u_vars[op_A.trace_id] == u_vars[op_B.trace_id]
 
                 def get_protection_window_conds(op_x, op_target_t):
