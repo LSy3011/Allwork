@@ -57,17 +57,22 @@ class UnitPayloadFactory:
 
         module_spec = hw_spec.modules[m_type]
 
+        # ADR-018 v7 D5: MIROp metadata 约定 lowercase 键（与 axiom 读取一致），
+        # 而 code_fields 与 payload 约定 UPPERCASE。这里对 op.metadata 做大写映射，
+        # 使 lookup 双向兼容（既兼容历史 UPPERCASE 直填，也兼容 lowercase MIROp）。
+        meta_upper = {str(k).upper(): v for k, v in op.metadata.items()}
+
         # 3. 动态驱动：遍历 YAML 定义的每个 field
         for field in module_spec.code_fields:
             field_name = field.name.upper()
-            
+
             # 特殊全局字段：默认设置 VALID=1，SRC_PREC/DST_PREC=1 (FP32)，PRECISION=1
             if field_name == "VALID":
                 res["VALID"] = 1
                 continue
             if field_name in ["SRC_PREC", "DST_PREC", "PRECISION"]:
                 # 优先读取元数据，如果没有，强制设为 1 (FP32模式) 兼容现有逻辑
-                res[field_name] = op.metadata.get(field_name, 1)
+                res[field_name] = meta_upper.get(field_name, 1)
                 continue
             if field_name == "WBE" and m_type == "UR_WRITE":
                 res["WBE"] = 0xFFFF
@@ -75,7 +80,7 @@ class UnitPayloadFactory:
 
             # 处理普通的 op metadata 映射
             # 优先查找全大写的标准名称，然后回退到特例逻辑 (如 logic_op, SUB)
-            val = op.metadata.get(field_name)
+            val = meta_upper.get(field_name)
 
             if val is None:
                 if field_name == "OP_TYPE" and m_type == "LOGIC":

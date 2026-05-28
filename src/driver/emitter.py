@@ -210,8 +210,12 @@ class LIRPacker:
         """
         if instr.op_type.upper() not in ('SHIFTUP', 'SHIFTDN'):
             return False
-        # payload 中 smc_id_en 字段命名小写（ADR-019 D1/D2）
+        # payload 中 smc_id_en 字段：modules.yaml lowercase 定义，但
+        # UnitPayloadFactory 统一 upper-case key 产 payload（ADR-018 D5 task #18 sub-4）。
+        # 双侧兼容查（避免 silent fallback 到 PARAM_SMC_NUM-1 引入静默 over-broadcast）。
         smc_id_en = instr.payload.get('smc_id_en')
+        if smc_id_en is None:
+            smc_id_en = instr.payload.get('SMC_ID_EN')
         if smc_id_en is None:
             # 缺省：全沿途广播（PARAM_SMC_NUM - 1）
             smc_id_en = self.hw_spec.params.PARAM_SMC_NUM - 1

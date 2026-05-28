@@ -342,5 +342,83 @@ class TestShiftupSmtIntegration(unittest.TestCase):
         self.assertEqual(sup.metadata.get("smc_id"), 0)
 
 
+class TestShiftupMirToLirLowering(unittest.TestCase):
+    """
+    ADR-018 v7 Stage 1 X (task #18 sub-4): MIR→LIR lowering 验证。
+    SHIFTUP MIROp → PhysicalAssembler → PhysicalInstruction(iq_name='shiftup',
+    payload 含 BROADCAST/SMC_ID_EN/VALID)。
+    历史 bug：UnitPayloadFactory 大写 field 名查 lowercase MIROp metadata 失败 →
+    BROADCAST/SMC_ID_EN 退化为 default 0；本类守 fix 不回退。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        cls.spec = HardwareSpec.load("hw_config")
+
+    def _build_physical_instrs(self, yaml_path: str):
+        from verification_v2.ops.configurable import ConfigurableOperator
+        from synthesis.ucode_solver import UCodeSynthesizer
+        from driver.assembler import PhysicalAssembler
+
+        op = ConfigurableOperator(yaml_path)
+        ops = op.get_dfg(self.spec)
+        syn = UCodeSynthesizer(self.spec)
+        res = syn.solve_with_units(ops, MII=1, MAX_II=8)
+        self.assertIsNotNone(res, "SMT solve 应 SAT，前置 sub-3 已保证")
+        for o in ops:
+            o.metadata["global_t"] = res["schedule"][o.trace_id]
+            o.metadata["unit_id"] = res.get("unit_assignments", {}).get(o.trace_id)
+        return PhysicalAssembler(self.spec).assemble(
+            ops, II=res["II"], num_iterations=1
+        )
+
+    def test_shiftup_physical_instr_emitted(self):
+        """SHIFTUP MIROp 应产 iq_name='shiftup' 的 PhysicalInstruction (INIT+HDR+BODY)."""
+        instrs = self._build_physical_instrs("verification_v2/ops/fma_parallel_n.yaml")
+        sup_instrs = [p for p in instrs if p.iq_name == "shiftup"]
+        stages = sorted(p.stage for p in sup_instrs)
+        self.assertIn("INIT", stages)
+        self.assertIn("HDR", stages)
+        self.assertIn("BODY", stages)
+        for p in sup_instrs:
+            self.assertEqual(p.op_type.upper(), "SHIFTUP")
+
+    def test_shiftup_body_payload_axiom_fields_intact(self):
+        """SHIFTUP BODY payload 应有 BROADCAST=1 / SMC_ID_EN=31 / VALID=1（非 default 0）.
+        前置 bug：MIROp metadata 用 lowercase 'broadcast'/'smc_id_en'，
+        UnitPayloadFactory upper-case 查不到 → 退化 default 0。本测试守
+        UnitPayloadFactory case-insensitive metadata lookup 修复。"""
+        instrs = self._build_physical_instrs("verification_v2/ops/fma_parallel_n.yaml")
+        sup_body = next(
+            p for p in instrs if p.iq_name == "shiftup" and p.stage == "BODY"
+        )
+        self.assertEqual(sup_body.payload.get("VALID"), 1)
+        self.assertEqual(sup_body.payload.get("BROADCAST"), 1,
+            f"BROADCAST 应为 1，实际 {sup_body.payload.get('BROADCAST')} "
+            "（若为 0：UnitPayloadFactory 没找到 lowercase 'broadcast'，触发回归）")
+        smc_id_en_expected = self.spec.params.PARAM_SMC_NUM - 1
+        self.assertEqual(sup_body.payload.get("SMC_ID_EN"), smc_id_en_expected,
+            f"SMC_ID_EN 应为 PARAM_SMC_NUM-1={smc_id_en_expected}")
+
+    def test_payload_factory_case_insensitive_metadata_lookup(self):
+        """UnitPayloadFactory 应支持 lowercase metadata key 查 UPPERCASE code_field name."""
+        from driver.payload_factory import UnitPayloadFactory
+        from ir.mir.mir_op import MIROp
+        from driver.hw_resource import ResourceType as RT
+
+        # 构造最小 SHIFTUP MIROp（lowercase metadata）
+        sup = MIROp(
+            op_type="SHIFTUP", logic_cycle=0, trace_id="test_sup",
+            metadata={"iq_type": RT.SHIFTUP, "broadcast": 1, "smc_id_en": 17},
+        )
+        payload = UnitPayloadFactory.build(sup, {}, {}, self.spec)
+        self.assertEqual(payload.get("BROADCAST"), 1,
+            "lowercase 'broadcast'=1 应被 UnitPayloadFactory 识别 → BROADCAST=1")
+        self.assertEqual(payload.get("SMC_ID_EN"), 17,
+            "lowercase 'smc_id_en'=17 应被识别 → SMC_ID_EN=17")
+        self.assertEqual(payload.get("VALID"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
