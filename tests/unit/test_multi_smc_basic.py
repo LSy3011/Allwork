@@ -286,5 +286,61 @@ class TestFrontendParallelDimNInjection(unittest.TestCase):
             "parallel_dim=None 应保持单 SMC 模式，无 SHIFTUP 注入")
 
 
+class TestShiftupSmtIntegration(unittest.TestCase):
+    """
+    ADR-018 v7 Stage 1 X: SHIFTUP MIROp → ucode_solver 端到端 SMT 集成。
+
+    test_smt_adversarial 已守 D3.d/e axiom 单独触发；本套守:
+    ConfigurableOperator get_dfg → ucode_solver.solve_with_units 完整链路 SAT，
+    且 SHIFTUP 获分配 iq_id=29 (SHIFTUP_D / iq_registry IQ_SHIFTUP).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        cls.spec = HardwareSpec.load("hw_config")
+
+    def test_fma_parallel_n_sat_with_shiftup(self):
+        from verification_v2.ops.configurable import ConfigurableOperator
+        from synthesis.ucode_solver import UCodeSynthesizer
+
+        op = ConfigurableOperator("verification_v2/ops/fma_parallel_n.yaml")
+        ops = op.get_dfg(self.spec)
+        shiftup_ops = [o for o in ops if o.op_type == "SHIFTUP"]
+        self.assertEqual(len(shiftup_ops), 1,
+            "fma_parallel_n 单 broadcast 输入 (a) → 1 个 SHIFTUP MIROp")
+
+        syn = UCodeSynthesizer(self.spec)
+        res = syn.solve_with_units(ops, MII=1, MAX_II=8)
+        self.assertIsNotNone(res, "fma_parallel_n DFG 应 SAT；若 None 则 SHIFTUP 集成回退")
+        self.assertLessEqual(res["II"], 4,
+            f"FMA + 单 SHIFTUP 应 SAT II≤4，实际 II={res['II']}")
+
+        # SHIFTUP 获得 iq_id (IQ_SHIFTUP=29 via iq_registry)
+        sup = shiftup_ops[0]
+        self.assertEqual(sup.metadata.get("iq_id"), 29,
+            f"SHIFTUP iq_id 应为 29 (iq_registry.IQ_SHIFTUP)，实际 {sup.metadata.get('iq_id')}")
+        # schedule 含 SHIFTUP 时间
+        self.assertIn(sup.trace_id, res["schedule"],
+            "SHIFTUP MIROp 应在 ucode_solver schedule 中")
+
+    def test_shiftup_axiom_metadata_intact_after_solve(self):
+        """solve 后 SHIFTUP 的 broadcast / smc_id_en 不应被 unit_assignments 后处理清掉
+        （否则下游 emitter D5.c 无法 dispatch broadcast hex）。"""
+        from verification_v2.ops.configurable import ConfigurableOperator
+        from synthesis.ucode_solver import UCodeSynthesizer
+
+        op = ConfigurableOperator("verification_v2/ops/fma_parallel_n.yaml")
+        ops = op.get_dfg(self.spec)
+        syn = UCodeSynthesizer(self.spec)
+        syn.solve_with_units(ops, MII=1, MAX_II=8)
+
+        sup = next(o for o in ops if o.op_type == "SHIFTUP")
+        self.assertEqual(sup.metadata.get("broadcast"), 1)
+        self.assertEqual(sup.metadata.get("smc_id_en"),
+                         self.spec.params.PARAM_SMC_NUM - 1)
+        self.assertEqual(sup.metadata.get("smc_id"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

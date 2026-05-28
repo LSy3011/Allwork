@@ -1,0 +1,17 @@
+# ADR-018 v7 Stage 1 X · Output-stationary by N （Stage 1 e2e 演示载体）
+# 公式 y = a*b + c：broadcast a + partitioned b/c → 32 SMC 各产 1 个 y。
+#
+# 为何用 FMA 不用 4-operand matmul：
+# ConfigurableOperator.compile_with_adpc 对 4-operand dot product
+# (a0*b0+a1*b1+a2*b2+a3*b3) 产 UNSAT DFG（pre-existing 限制，CLAUDE.md
+# L26-28；matmul.yaml 走 ManualMatmulOperator）。真 GEMM e2e 留 ADR-020。
+# 本 yaml 用 3-operand FMA 跑通 parallel_dim=N 全链路：
+# yaml → SHIFTUP 注入 → SMT solve (SAT II=1) → emitter → 32-SMC hex → sim。
+name: "fma_parallel_n"
+parallel_dim: "N"
+formula: "a*b + c"
+tensors:
+  a: { bank: 0, offset: 0, role: "input",  precision: "fp32", stride: 1, smc_layout: "broadcast" }
+  b: { bank: 1, offset: 0, role: "input",  precision: "fp32", stride: 1, smc_layout: "partitioned" }
+  c: { bank: 2, offset: 0, role: "input",  precision: "fp32", stride: 1, smc_layout: "partitioned" }
+  y: { bank: 5, offset: 0, role: "output", precision: "fp32",            smc_layout: "partitioned" }

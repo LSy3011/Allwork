@@ -1,5 +1,11 @@
-# ADR-018 v7 Stage 1 X · Output-stationary by N（per-SMC formula）
-# A 行经 SHIFTUP broadcast 到 32 SMC；每 SMC 持 B 的 1 列，算 C 的 1 列。
+# ADR-018 v7 Stage 1 X · 真 GEMM target （DEFERRED → ADR-020）
+# 公式 y_k = a0*b0_k+a1*b1_k+a2*b2_k+a3*b3_k：4-operand dot product per SMC。
+# 当前 ConfigurableOperator.compile_with_adpc 对此形态产 UNSAT DFG
+# (pre-existing 限制，CLAUDE.md L26-28；matmul.yaml 走 ManualMatmulOperator)。
+# 真 GEMM e2e 需 ManualGemmParallelN operator + SHIFTUP 注入，留 ADR-020 单独完成。
+# Stage 1 framework 验证暂走 fma_parallel_n.yaml（3-operand FMA, SAT II=1）。
+#
+# 字段语义（ADR-020 实施时复用）：
 # - a* (K=4 broadcast)：源在 SMC_0，SHIFTUP smc_id_en=PARAM_SMC_NUM-1=31 到 SMC_1..31
 # - b* (per-SMC partition)：每 SMC k 的 bank 1 持自己的 4 元素列
 # - y (per-SMC output)：每 SMC k 写自己的 bank 5
