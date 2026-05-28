@@ -83,7 +83,13 @@ class PipelineRunner:
 
         v_level = 3 if self.show_model else (2 if self.show_review else 1)
         packer = LIRPacker(self.hw_config_name, verbosity=v_level)
-        packer.emit_from_instructions(physical_instrs, output_dir, program=program)
+        smc_num = self._compute_smc_num(operator)
+        if self.show_review and smc_num:
+            print(f"[RUNNER] parallel_dim={getattr(operator, 'parallel_dim', None)} "
+                  f"→ multi-SMC emit smc_num={smc_num}")
+        packer.emit_from_instructions(
+            physical_instrs, output_dir, program=program, smc_num=smc_num
+        )
         self._patch_max_cycles(output_dir, safe_max_cycles)
         
         # 🛸 [V5.4 FIX] 保存物理指令供审计员使用
@@ -140,6 +146,21 @@ class PipelineRunner:
             "sim_success": (res.returncode == 0),
             "ops": ops
         }
+
+    def _compute_smc_num(self, operator: Any):
+        """
+        ADR-018 v7 D5.d (task #18 sub-5): parallel_dim 算子触发多 SMC emit 路径。
+
+        - parallel_dim ∈ {"N", "K"} → smc_num = PARAM_SMC_NUM (=32)
+        - parallel_dim = None / 算子无此属性 → smc_num = None (单 SMC 向后兼容)
+
+        emitter.emit_from_instructions 看到 smc_num=None 走 _emit_single_smc
+        (旧 smc_0/ layout)；smc_num>=2 走 _emit_multi_smc (smc_{k}/ layout)。
+        """
+        parallel_dim = getattr(operator, "parallel_dim", None)
+        if parallel_dim is None:
+            return None
+        return self.spec.params.PARAM_SMC_NUM
 
     def _patch_max_cycles(self, output_dir: str, max_cycles: int):
         conf_path = os.path.join(output_dir, "..", "sim_config.json")

@@ -420,5 +420,54 @@ class TestShiftupMirToLirLowering(unittest.TestCase):
         self.assertEqual(payload.get("VALID"), 1)
 
 
+class TestPipelineRunnerSmcNumDispatch(unittest.TestCase):
+    """
+    ADR-018 v7 Stage 1 X (task #18 sub-5): pipeline_runner 多 SMC dispatch。
+    PipelineRunner._compute_smc_num 据 operator.parallel_dim 决定 emit smc_num，
+    传给 emitter.emit_from_instructions（None / PARAM_SMC_NUM）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        from verification_v2.infra.pipeline_runner import PipelineRunner
+        cls.runner = PipelineRunner(hw_config_name="hw_config", show_review=False)
+        cls.PARAM_SMC_NUM = cls.runner.spec.params.PARAM_SMC_NUM
+
+    def test_no_parallel_dim_returns_none(self):
+        """单 SMC 算子（无 parallel_dim 属性 / =None）→ smc_num None（单 SMC emit 路径）."""
+        class _SingleSmcOp:
+            pass
+        self.assertIsNone(self.runner._compute_smc_num(_SingleSmcOp()))
+
+        class _NoneOp:
+            parallel_dim = None
+        self.assertIsNone(self.runner._compute_smc_num(_NoneOp()))
+
+    def test_parallel_dim_n_returns_param_smc_num(self):
+        """parallel_dim='N' → smc_num = PARAM_SMC_NUM (32)."""
+        class _ParallelN:
+            parallel_dim = "N"
+        self.assertEqual(self.runner._compute_smc_num(_ParallelN()), self.PARAM_SMC_NUM)
+
+    def test_parallel_dim_k_returns_param_smc_num(self):
+        """parallel_dim='K' (Stage 2) 同样触发多 SMC emit (smc_num=PARAM_SMC_NUM)."""
+        class _ParallelK:
+            parallel_dim = "K"
+        self.assertEqual(self.runner._compute_smc_num(_ParallelK()), self.PARAM_SMC_NUM)
+
+    def test_configurable_op_fma_parallel_n_dispatches_multi_smc(self):
+        """加载 fma_parallel_n.yaml → ConfigurableOperator.parallel_dim='N' → smc_num=32."""
+        from verification_v2.ops.configurable import ConfigurableOperator
+        op = ConfigurableOperator("verification_v2/ops/fma_parallel_n.yaml")
+        self.assertEqual(self.runner._compute_smc_num(op), self.PARAM_SMC_NUM)
+
+    def test_configurable_op_no_parallel_dim_dispatches_single_smc(self):
+        """加载未带 parallel_dim 的 yaml（如 horner_v3） → smc_num=None."""
+        from verification_v2.ops.configurable import ConfigurableOperator
+        op = ConfigurableOperator("verification_v2/ops/horner_v3.yaml")
+        self.assertIsNone(self.runner._compute_smc_num(op))
+
+
 if __name__ == "__main__":
     unittest.main()
