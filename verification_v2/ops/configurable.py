@@ -136,10 +136,17 @@ class ConfigurableOperator(BaseOperator):
 
         ur_to_shiftup: Dict[str, str] = {}
         new_ops = list(ops)
+        # sim/smc_simulator/core/kernel.py:508 硬连 SHIFTUP 的 local data = ur_bank.get_read_data(0)
+        # = ur-r0 端口。第 1 个 broadcast 输入 pin 到 ur-r0 (iq_id=30) 保证 SHIFTUP 拿到真实 data；
+        # 多 broadcast (如 matmul a0..a3) sim 端无法正确路由，需 ADR-020 sim 重构。
+        # 本函数不阻塞 DFG 注入 (axiom-trigger 测试仍可用)；e2e 多 broadcast 已知 sub-7 退化。
+        UR_R0_IQ_ID = spec.config.get("iq_registry", {}).get("UR_READ", 30) + 0
         for op in ops:
             if (op.op_type.upper() == "UR_READ"
                     and op.metadata.get("meta_name") in broadcast_names
                     and op.metadata.get("role") == "input"):
+                if len(ur_to_shiftup) == 0:
+                    op.metadata["iq_id"] = UR_R0_IQ_ID  # pin only first broadcast UR_READ
                 sup_id = f"shiftup_{op.trace_id}"
                 sup_op = MIROp(
                     op_type="SHIFTUP", logic_cycle=0, trace_id=sup_id,
@@ -196,6 +203,16 @@ class ConfigurableOperator(BaseOperator):
         return new_ops
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        # ADR-018 v7 Stage 1 X (task #18 sub-7): parallel_dim=N 多 SMC golden
+        # partitioned 输入 2D 时，per-SMC 各算一份 y[k] = f(a, b[k], c[k], ...)。
+        if self.parallel_dim == "N":
+            partitioned_2d = any(
+                isinstance(v, np.ndarray) and v.ndim == 2
+                for v in input_data.values()
+            )
+            if partitioned_2d:
+                return self._get_golden_parallel_n(input_data)
+
         if self.name == "matmul":
             # [V8.0] 对齐真实硬件行为：
             # 每次外层迭代（vector_lanes 行）执行 4 次独立计算（step k, k=0..3）：
@@ -249,7 +266,36 @@ class ConfigurableOperator(BaseOperator):
             "intermediates": [] 
         }
 
-    def prepare_input(self, n_rows: int) -> Dict[str, np.ndarray]:
+    def _get_golden_parallel_n(self, input_data: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        """ADR-018 v7 Stage 1 X: parallel_dim=N per-SMC golden = f(a, b[k], c[k], ...)。
+        broadcast 输入 (1D) 复用所有 k；partitioned 输入 (2D shape=(smc_num,n_rows)) 取第 k 切片。
+        Returns {"y": np.ndarray shape (smc_num, n_rows), "intermediates": []}.
+        """
+        expr = self.formula
+        sorted_syms = sorted(str(s) for s in expr.free_symbols)
+        smc_num = None
+        for s in sorted_syms:
+            v = input_data.get(s)
+            if isinstance(v, np.ndarray) and v.ndim == 2:
+                smc_num = v.shape[0]
+                break
+        assert smc_num is not None, "_get_golden_parallel_n 需至少 1 个 partitioned 2D 输入"
+
+        func = sp.lambdify([sp.Symbol(s) for s in sorted_syms], expr, "numpy")
+        goldens = []
+        for k in range(smc_num):
+            args = {}
+            for s in sorted_syms:
+                v = input_data.get(s)
+                if v is None:
+                    continue
+                args[s] = v[k] if (isinstance(v, np.ndarray) and v.ndim == 2) else v
+            goldens.append(func(**args))
+        return {"y": np.array(goldens, dtype=self.dtype), "intermediates": []}
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        if self.parallel_dim == "N" and smc_num > 1:
+            return self._prepare_input_parallel_n(n_rows, smc_num)
         inputs = {}
         addr_to_data = {}
         for name, cfg in self.tensors_cfg.items():
@@ -276,6 +322,64 @@ class ConfigurableOperator(BaseOperator):
             inputs[name] = data
             addr_to_data[addr_key] = data
         return inputs
+
+    def _prepare_input_parallel_n(self, n_rows: int, smc_num: int) -> Dict[str, np.ndarray]:
+        """ADR-018 v7 Stage 1 X: parallel_dim=N 数据形态。
+        - broadcast tensor: 1D shape (n_rows,) 全 SMC 共享
+        - partitioned tensor: 2D shape (smc_num, n_rows) 每 SMC 独立
+        固定 seed 确保 hw-parity bit-perfect 对比稳定（matmul_op 同模式）。
+        """
+        rng = np.random.default_rng(0)
+        inputs: Dict[str, np.ndarray] = {}
+        for name, cfg in self.tensors_cfg.items():
+            if cfg.get("role") == "output":
+                continue
+            smc_layout = cfg.get("smc_layout")
+            if smc_layout == "broadcast":
+                inputs[name] = rng.uniform(1.0, 5.0, n_rows).astype(self.dtype)
+            elif smc_layout == "partitioned":
+                inputs[name] = rng.uniform(1.0, 5.0, (smc_num, n_rows)).astype(self.dtype)
+            else:
+                # smc_layout 缺省 (legacy 字段)：作 broadcast 处理（保守不破单 SMC 默认）
+                inputs[name] = rng.uniform(1.0, 5.0, n_rows).astype(self.dtype)
+        return inputs
+
+    def inject_data_per_smc(
+        self, programs: List[Any], input_data: Dict[str, np.ndarray],
+        vector_lanes: int, spec: Any = None,
+    ):
+        """ADR-018 v7 D5.d task #18 sub-7: 多 SMC 数据注入。
+        - broadcast 输入：只注入 programs[0]（OQ-1 数据源 SMC_0）；SMC_k>0 SHIFTUP 由 chain 供值
+        - partitioned 输入：每 SMC k 注入 input_data[name][k]
+        - output role：跳过（仿真器写入）
+        """
+        for name, cfg in self.tensors_cfg.items():
+            if cfg.get("role") == "output":
+                continue
+            data = input_data.get(name)
+            if data is None:
+                continue
+            addr_base = self.get_bank_addr(name, spec)
+            stride = cfg.get("stride", 1 if cfg.get("role") == "input" else 0)
+            smc_layout = cfg.get("smc_layout")
+
+            if smc_layout == "broadcast":
+                assert data.ndim == 1, (
+                    f"broadcast tensor {name} 应 1D, got shape {data.shape}"
+                )
+                programs[0].inject_vector(addr_base, data, stride=stride)
+            elif smc_layout == "partitioned":
+                assert data.ndim == 2 and data.shape[0] == len(programs), (
+                    f"partitioned tensor {name} 应 2D shape=({len(programs)}, n_rows), "
+                    f"got {data.shape}"
+                )
+                for k, prog in enumerate(programs):
+                    prog.inject_vector(addr_base, data[k], stride=stride)
+            else:
+                # 未声明 smc_layout：复制到所有 SMC（保守兼容）
+                for prog in programs:
+                    if data.ndim == 1:
+                        prog.inject_vector(addr_base, data, stride=stride)
 
     def inject_data(self, program: Any, input_data: Dict[str, np.ndarray], vector_lanes: int, spec: Any = None):
         # 1. 注入常规张量

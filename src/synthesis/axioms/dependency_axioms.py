@@ -50,6 +50,14 @@ class DependencyAxioms(AxiomBase):
                 if not producer:
                     continue
                 lat_p = spec.delays.get(producer.op_type.upper(), 1)
+                # ADR-018 v7 D3.b (task #18 sub-7): SHIFTUP/SHIFTDN 跨 SMC chain RAW.
+                # SPMD 模型 consumer 单 t_var 必须满足最差 SMC_{smc_id_en} 数据到达，
+                # 故 chain_stage_latency × smc_id_en 计入 producer 有效 lat。
+                if producer.op_type.upper() in ('SHIFTUP', 'SHIFTDN'):
+                    smc_id_en = producer.metadata.get('smc_id_en', 0)
+                    if isinstance(smc_id_en, int) and smc_id_en > 0:
+                        chain_stage_latency = 1  # ADR-018 D3.b
+                        lat_p += smc_id_en * chain_stage_latency
                 # 🛸 [V6.0 LATCH OPTIMIZATION - HYBRID MODEL] 异步锁存与严格对齐混合建模
                 # 创设虚拟锁存时间变量 t_latch
                 t_latch = z3.Int(f"t_latch_{op.trace_id}_{prod_id}")

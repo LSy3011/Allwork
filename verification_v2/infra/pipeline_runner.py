@@ -24,12 +24,26 @@ class PipelineRunner:
         
         # 🛸 [V5.4 FIX] 注入硬件 Spec 和数据类型到模拟内存层
         from verification_v2.infra.mock_memory import MockProgram
-        program = MockProgram(spec=self.spec, dtype=operator.dtype)
-        
+
         vector_width_bits = self.spec.params.PARAM_SMC_VECTOR_WIDTH
         element_bits = operator.element_bits
         vector_lanes = vector_width_bits // element_bits
-        
+
+        # ADR-018 v7 D5.d task #18 sub-7: parallel_dim 算子需 per-SMC programs
+        # + 多 SMC 数据 reshape（broadcast 1D / partitioned 2D shape=(smc_num,n_rows)）。
+        smc_num_eff = self._compute_smc_num(operator)
+        is_multi_smc = smc_num_eff is not None and smc_num_eff >= 2
+        if is_multi_smc:
+            first_val = next(iter(input_data.values()))
+            n_rows_actual = first_val.shape[-1]
+            input_data = operator.prepare_input(n_rows_actual, smc_num=smc_num_eff)
+            programs = [MockProgram(spec=self.spec, dtype=operator.dtype)
+                        for _ in range(smc_num_eff)]
+            program = programs[0]  # for tensor metadata / 兼容
+        else:
+            program = MockProgram(spec=self.spec, dtype=operator.dtype)
+            programs = None
+
         ops = operator.get_dfg(spec=self.spec)
         if self.show_model:
             print("\n[DEBUG] DFG Nodes Metadata:")
@@ -58,7 +72,12 @@ class PipelineRunner:
         num_loop_iters = len(input_data[input_key]) // vector_lanes
         physical_instrs = assembler.assemble(ops, II=II, num_iterations=num_loop_iters)
  
-        operator.inject_data(program, input_data, vector_lanes=vector_lanes, spec=self.spec)
+        if is_multi_smc and hasattr(operator, "inject_data_per_smc"):
+            operator.inject_data_per_smc(
+                programs, input_data, vector_lanes=vector_lanes, spec=self.spec
+            )
+        else:
+            operator.inject_data(program, input_data, vector_lanes=vector_lanes, spec=self.spec)
         golden_res = operator.get_golden(input_data, vector_lanes=vector_lanes)
         
         for name, config in operator.tensor_configs.items():
@@ -83,12 +102,13 @@ class PipelineRunner:
 
         v_level = 3 if self.show_model else (2 if self.show_review else 1)
         packer = LIRPacker(self.hw_config_name, verbosity=v_level)
-        smc_num = self._compute_smc_num(operator)
-        if self.show_review and smc_num:
+        if self.show_review and is_multi_smc:
             print(f"[RUNNER] parallel_dim={getattr(operator, 'parallel_dim', None)} "
-                  f"→ multi-SMC emit smc_num={smc_num}")
+                  f"→ multi-SMC emit smc_num={smc_num_eff}")
+        # 多 SMC 模式：传 programs list；emitter._emit_multi_smc 据此 per-SMC inject_data
+        emit_program = programs if is_multi_smc else program
         packer.emit_from_instructions(
-            physical_instrs, output_dir, program=program, smc_num=smc_num
+            physical_instrs, output_dir, program=emit_program, smc_num=smc_num_eff
         )
         self._patch_max_cycles(output_dir, safe_max_cycles)
         

@@ -168,11 +168,18 @@ class LIRPacker:
             )
 
             if program:
-                # 当前 program data 只复制到 SMC_0（per-SMC 数据切片由 Stage 2 K-partition 后续 ADR 处理）
-                if smc_id == 0:
+                # ADR-018 v7 D5.d task #18 sub-7: 多 SMC per-program 数据注入。
+                # program 可为 (a) 单 MockProgram (legacy，仅 SMC_0 注入；其余空 bank)；
+                # (b) List[MockProgram] 长度 = smc_num，每 SMC 独立 inject。
+                if isinstance(program, list):
+                    per_smc_program = program[smc_id]
+                    # sim_conf.tensors 只填一次（共享 metadata：layout 各 SMC 同 logical_addr）
+                    target_conf = sim_conf if smc_id == 0 else {"tensors": []}
+                    self._handle_program_data(per_smc_program, ur_dir, target_conf)
+                elif smc_id == 0:
                     self._handle_program_data(program, ur_dir, sim_conf)
                 else:
-                    # 其他 SMC 给空 bank.hex（默认 0），保持 sim_config layout 一致
+                    # legacy 单 program 模式：其他 SMC 给空 bank.hex（默认 0），保持 layout 一致
                     for b_id in range(bank_num):
                         (ur_dir / f"bank{b_id}.hex").touch()
 

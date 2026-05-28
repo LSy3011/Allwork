@@ -532,5 +532,99 @@ class TestPhysicalRunnerMultiSmcDispatch(unittest.TestCase):
                 self.assertEqual(args[2], 4, "_run_multi_smc 应收 smc_num=4")
 
 
+class TestSub7PerSmcDataAndGolden(unittest.TestCase):
+    """
+    ADR-018 v7 Stage 1 X (task #18 sub-7): per-SMC data injection + golden.
+    数据形态：broadcast 1D / partitioned 2D shape=(smc_num, n_rows)。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        cls.spec = HardwareSpec.load("hw_config")
+        cls.SMC_NUM = cls.spec.params.PARAM_SMC_NUM
+
+    def _load(self):
+        from verification_v2.ops.configurable import ConfigurableOperator
+        return ConfigurableOperator("verification_v2/ops/fma_parallel_n.yaml")
+
+    def test_prepare_input_parallel_n_shapes(self):
+        op = self._load()
+        data = op.prepare_input(n_rows=4, smc_num=self.SMC_NUM)
+        # broadcast a: 1D shape (n_rows,)
+        self.assertEqual(data["a"].shape, (4,))
+        # partitioned b, c: 2D shape (smc_num, n_rows)
+        self.assertEqual(data["b"].shape, (self.SMC_NUM, 4))
+        self.assertEqual(data["c"].shape, (self.SMC_NUM, 4))
+
+    def test_get_golden_parallel_n_shape(self):
+        op = self._load()
+        data = op.prepare_input(n_rows=4, smc_num=self.SMC_NUM)
+        golden = op.get_golden(data, vector_lanes=4)
+        # 应得 (smc_num, n_rows) per-SMC golden
+        self.assertEqual(golden["y"].shape, (self.SMC_NUM, 4))
+        # 数值 sanity: y[k] = a * b[k] + c[k]
+        import numpy as np
+        for k in range(min(3, self.SMC_NUM)):
+            expected = data["a"] * data["b"][k] + data["c"][k]
+            np.testing.assert_allclose(golden["y"][k], expected, rtol=1e-5)
+
+    def test_inject_data_per_smc_distributes(self):
+        """inject_data_per_smc: broadcast → SMC_0 only; partitioned → 每 SMC k 独立."""
+        from verification_v2.infra.mock_memory import MockProgram
+        op = self._load()
+        data = op.prepare_input(n_rows=4, smc_num=self.SMC_NUM)
+        programs = [MockProgram(spec=self.spec, dtype=op.dtype) for _ in range(self.SMC_NUM)]
+        op.inject_data_per_smc(programs, data, vector_lanes=4, spec=self.spec)
+
+        # broadcast 'a' (bank 0) 应只在 SMC_0 (其余 0)
+        a_smc0 = programs[0].memory_allocator.banks[0][0]
+        import numpy as np
+        np.testing.assert_allclose(a_smc0, data["a"][:4], rtol=1e-5)
+        # SMC_1 bank0 应为 0 (未注入)
+        a_smc1 = programs[1].memory_allocator.banks[0][0]
+        self.assertTrue(np.all(a_smc1 == 0), "SMC_1 broadcast bank 应为 0 (chain 供值)")
+
+        # partitioned 'b' (bank 1) 每 SMC 独立
+        for k in range(min(3, self.SMC_NUM)):
+            b_smc_k = programs[k].memory_allocator.banks[1][0]
+            np.testing.assert_allclose(b_smc_k, data["b"][k][:4], rtol=1e-5)
+
+    def test_d3b_chain_raw_axiom_extends_shiftup_latency(self):
+        """ADR-018 v7 D3.b: SHIFTUP 下游 consumer t_var 必 >= t_shiftup + 1 + smc_id_en."""
+        from synthesis.ucode_solver import UCodeSynthesizer
+        op = self._load()
+        ops = op.get_dfg(self.spec)
+        syn = UCodeSynthesizer(self.spec)
+        res = syn.solve_with_units(ops, MII=1, MAX_II=16)
+        self.assertIsNotNone(res, "D3.b 加 chain extra lat 后仍应 SAT")
+
+        sched = res["schedule"]
+        sup = next(o for o in ops if o.op_type == "SHIFTUP")
+        smc_id_en = sup.metadata["smc_id_en"]  # = PARAM_SMC_NUM - 1
+        # consumer FPMUL 的 t 应 >= t_shiftup + 1 (shiftup lat) + smc_id_en (chain) + 1 (RTOVR sample to consumer)
+        # = t_shiftup + smc_id_en + 2
+        fpmul = next(o for o in ops if o.op_type == "FPMUL")
+        expected_min = sched[sup.trace_id] + smc_id_en + 2
+        self.assertGreaterEqual(sched[fpmul.trace_id], expected_min,
+            f"D3.b 应延 FPMUL: t_fpmul={sched[fpmul.trace_id]} >= "
+            f"t_shiftup({sched[sup.trace_id]}) + smc_id_en({smc_id_en}) + 2 = {expected_min}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Known limitation (sub-7 documented gap):
+#
+# 当前 fma_parallel_n e2e 仅 SMC_0 bit-perfect。SMC_k>0 fail 因 sim 的
+# SHIFTUP body 单次发射 + cluster.propagate_chain_inputs 1-cycle delay 模型：
+#   - SHIFTUP IQ body 每 SMC 只 fire 1 次 (loops 应使其 fire 44 次但实测 1 次)
+#   - chain 需 32 cycle 完整 propagate，但 body 只 fire 1 次，chain 只跨 1 stage
+#   - 结果: SMC_1..31.SHIFTUP.dr_d 永远 = 0
+#
+# 这是 sim 端 chain propagation 模型与 SPMD 同步发射 (OQ-8 i) 不匹配的产物。
+# 修复需 ADR-020：sim 内 within-cycle 顺序传播 OR IQ body loop 修复。
+# Stage 1 框架完整：SMT D3.d/e/b + 多 SMC dispatch + per-SMC data 均落地。
+# ─────────────────────────────────────────────────────────────────────
+
+
 if __name__ == "__main__":
     unittest.main()

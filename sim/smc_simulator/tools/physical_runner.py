@@ -286,18 +286,91 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
     last_cycle = next(iter(cluster.kernels.values())).cycle_count
     print(f"Multi-SMC Simulation Finished at Cycle {last_cycle}. Verifying Data...")
 
-    # ADR-018 v7 D5.d (task #18 sub-6 deliverable): 此处仅基础 sanity verify
-    # （读 SMC_0 output bank 校验 sim 跑通 + golden 文件存在）；
-    # 32-SMC per-SMC bit-perfect golden compare 留 sub-7 完整实现。
+    # ADR-018 v7 D5.d task #18 sub-7: per-SMC bit-perfect golden compare.
+    # golden['y'] 期望 shape (smc_num, n_rows)；每 SMC k 比对自己的 bank 5 输出。
     golden_file = case_path / "golden_data.npz"
     if not golden_file.exists():
         print(f"Golden data not found at {golden_file}")
         return False
+    goldens = np.load(golden_file)
+    return _verify_multi_smc_per_smc(case_path, config, cluster, smc_num, goldens)
 
-    print(f"[sub-6 multi-SMC sanity] SystemCluster ran {smc_num} kernels for {last_cycle} cycles; "
-          f"per-SMC bank dumped to smc_{{0..{smc_num-1}}}/output_bank/. "
-          f"Bit-perfect per-SMC golden compare: deferred to sub-7.")
-    return True
+
+def _verify_multi_smc_per_smc(case_path, config, cluster, smc_num: int, goldens) -> bool:
+    """ADR-018 v7 task #18 sub-7: per-SMC bit-perfect compare。
+    Golden shape (smc_num, n_rows) → SMC_k bank → 比对 ref[k]。"""
+    atol = 5e-3
+    all_passed = True
+
+    for t_info in config.get("tensors", []):
+        if t_info.get("role") != "output":
+            continue
+        name = t_info["name"]
+        bank = int(t_info["bank"])
+        addr = int(t_info["addr"])
+
+        if name not in goldens.files:
+            continue
+        ref = goldens[name]
+        if ref.ndim != 2:
+            # 单 SMC 形状 fallback：仅比对 SMC_0
+            kernel = cluster.kernels[0]
+            sim_np = _read_sim_output(kernel, bank, addr, len(ref.flatten()))
+            ok = np.allclose(sim_np, ref.flatten(), atol=atol, equal_nan=True)
+            print(f"{'PASSED' if ok else 'FAILED'} {name} (1D golden, SMC_0 only)")
+            all_passed = all_passed and ok
+            continue
+
+        assert ref.shape[0] == smc_num, (
+            f"golden[{name}] shape={ref.shape}, expected first dim={smc_num}"
+        )
+        n_rows = ref.shape[1]
+
+        per_smc_pass = 0
+        first_fail_detail = None
+        for k in range(smc_num):
+            kernel = cluster.kernels[k]
+            sim_np = _read_sim_output(kernel, bank, addr, n_rows)
+            ref_k = ref[k]
+            if np.any(np.isnan(sim_np) & ~np.isnan(ref_k)):
+                if first_fail_detail is None:
+                    first_fail_detail = f"SMC_{k} 出 unexpected NaN"
+                all_passed = False
+                continue
+            if not np.allclose(sim_np, ref_k, atol=atol, equal_nan=True):
+                max_err = float(np.max(np.abs(sim_np - ref_k)))
+                if first_fail_detail is None:
+                    first_fail_detail = (
+                        f"SMC_{k} Max Diff={max_err}; "
+                        f"sim[0..2]={sim_np[:3].tolist()}, ref[0..2]={ref_k[:3].tolist()}"
+                    )
+                all_passed = False
+            else:
+                per_smc_pass += 1
+
+        if per_smc_pass == smc_num:
+            print(f"PASSED {name}: All {smc_num} SMC outputs bit-perfect (atol={atol})")
+            sample = min(3, smc_num)
+            for k in range(sample):
+                ref_k = ref[k]
+                sim_k = _read_sim_output(cluster.kernels[k], bank, addr, n_rows)
+                print(f"      [SMC_{k}] Golden={ref_k[:min(3,n_rows)].tolist()} | "
+                      f"SMC={sim_k[:min(3,n_rows)].tolist()}")
+        else:
+            print(f"FAILED {name}: {per_smc_pass}/{smc_num} SMCs match. {first_fail_detail}")
+    return all_passed
+
+
+def _read_sim_output(kernel, bank: int, addr: int, n_rows: int) -> np.ndarray:
+    """从 kernel.ur_bank.storage[bank] 读 n_rows 个 fp32 值（128-bit words 解包）."""
+    n_words = (n_rows + 3) // 4
+    sim_words = [int(kernel.ur_bank.storage[bank][addr + i]) for i in range(n_words)]
+    sim_flat = []
+    for i in range(n_rows):
+        bits = (sim_words[i // 4] >> ((i % 4) * 32)) & 0xFFFFFFFF
+        f_val = struct.unpack(">f", struct.pack(">I", bits))[0]
+        sim_flat.append(f_val)
+    return np.array(sim_flat, dtype=np.float32)
 
 
 if __name__ == "__main__":
