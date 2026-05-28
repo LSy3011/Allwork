@@ -81,3 +81,15 @@ iq_config:
     EN_LOOPS: true
     BITS_LOOPS: 10
     BITS_CODE: 7
+
+  IQ_SHIFTUP:
+    module: SHIFTUP
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 22 # VALID(1) + broadcast(1) + smc_id_en(5) + MODE(4) + AMOUNT(8) + SRC_PREC(2) + UPDATE_ST(1)
+
+  IQ_SHIFTDN:
+    module: SHIFTDN
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 19 # VALID(1) + smc_id_en(5) + MODE(4) + AMOUNT(8) + UPDATE_ST(1)

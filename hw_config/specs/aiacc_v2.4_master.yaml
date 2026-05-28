@@ -469,18 +469,24 @@ functional_units:
             condition: UPDATE_ST == 'YES'
   SHIFTUP:
     unit_name: SHIFTUP
-    latency: 0
+    latency: 1
+    code_bits: 22
     attributes:
       throughput: 1
-      desc: Generated spec for SHIFTUP
+      desc: Cross-SMC chain shift (upward), supports broadcast and point-to-point modes
+      cross_smc_chain: true
+      cross_smc_data_source: SMC_0
+      chain_direction: ascending
     ports:
       inputs:
-      - name: S0
+      - name: CRU_SHIFTUP_I
         width: 128
-      - name: S1
-        width: 128
+        cross_smc_src: true
       outputs:
-      - name: D
+      - name: CRU_SHIFTUP_O
+        width: 128
+        cross_smc_dst: true
+      - name: DR_SHIFTUP_D
         width: 128
         type: data
         rtovr_src_id: 29
@@ -491,6 +497,14 @@ functional_units:
       encoding:
         0: INVALID
         1: VALID
+    - field: broadcast
+      width: 1
+      default: 0
+      encoding:
+        0: P2P
+        1: BROADCAST
+    - field: smc_id_en
+      width: 5
     - field: MODE
       width: 4
     - field: AMOUNT
@@ -737,19 +751,28 @@ functional_units:
           primitive: fp_mul_hw
   SHIFTDN:
     unit_name: SHIFTDN
-    latency: 0
+    latency: 1
+    code_bits: 19
     attributes:
       throughput: 1
-      desc: Generated spec for SHIFTDN
+      desc: Cross-SMC chain shift (downward), point-to-point only (no broadcast, OQ-5)
+      cross_smc_chain: true
+      cross_smc_data_source: dynamic
+      chain_direction: descending
     ports:
       inputs:
-      - name: S0
+      - name: CRU_SHIFTDN_I
         width: 128
-      - name: S1
+        cross_smc_src: true
+      - name: DVR_SHIFTDN_S
         width: 128
       outputs:
+      - name: CRU_SHIFTDN_O
+        width: 128
+        cross_smc_dst: true
       - name: D
         width: 128
+        type: data
     micro_instructions:
     - field: VALID
       width: 1
@@ -757,6 +780,8 @@ functional_units:
       encoding:
         0: INVALID
         1: VALID
+    - field: smc_id_en
+      width: 5
     - field: MODE
       width: 4
     - field: AMOUNT

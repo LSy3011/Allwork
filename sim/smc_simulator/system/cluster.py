@@ -64,35 +64,50 @@ class BusArbiter:
 
 class SystemCluster:
     """
-    Multi-Kernel System Cluster.
-    Contains multiple ParallelKernel instances and a BusArbiter.
+    Multi-Kernel System Cluster (ADR-018 v7 + ADR-019 v6).
+    - Contains multiple ParallelKernel instances; each kernel binds to its smc_id
+    - 跨 SMC chain 互联（SHIFTUP 上行 / SHIFTDN 下行；OQ-7 ring 闭合留 Stage 3+）
+    - BusArbiter 死代码原型保留 (ADR-018 D6) 但不复活；AXI 通路独立 ADR-021+
     """
     def __init__(self, num_kernels: int = 2):
         self.loader = SpecLoader()
         self.kernels: Dict[int, ParallelKernel] = {}
         for i in range(num_kernels):
-            k = ParallelKernel(self.loader)
+            k = ParallelKernel(self.loader, smc_id=i)
             k.logger = logging.getLogger(f"Kernel-{i}")
             self.kernels[i] = k
-            
+
         self.bus = BusArbiter()
         self.cycle_count = 0
         self.logger = logging.getLogger("SystemCluster")
 
+    def _propagate_chain_inputs(self):
+        """
+        ADR-019 D5：跨 SMC chain wire 互联（在 kernel.step() 之前注入上游 chain output）
+        - SHIFTUP（向上）：SMC_{k+1}.chain_inputs['shiftup'] <- SMC_k.units['shiftup'].cru_o
+        - SHIFTDN（向下）：SMC_k.chain_inputs['shiftdn']   <- SMC_{k+1}.units['shiftdn'].cru_o
+        - SMC_0 / SMC_{N-1} 链头/链尾 chain_input 保持 0（线性 chain，非 ring；OQ-7 P2）
+        """
+        n = len(self.kernels)
+        for k in range(n - 1):
+            up_o = self.kernels[k].units['shiftup'].get_chain_output()
+            self.kernels[k + 1].chain_inputs['shiftup'] = up_o
+
+            dn_o = self.kernels[k + 1].units['shiftdn'].get_chain_output()
+            self.kernels[k].chain_inputs['shiftdn'] = dn_o
+
     def step(self):
-        # 1. Step all kernels
+        # 1. ADR-019 D5: 跨 SMC chain 注入（上游 chain output → 本 kernel chain_inputs）
+        self._propagate_chain_inputs()
+
+        # 2. Step all kernels
         for k_id, kernel in self.kernels.items():
-            # Kernels run their own internal logic
-            # In a real system, kernels might block on IO. 
-            # Here we just step them. 
-            # Note: We need a mechanism for Kernel to initiate transfer.
-            # For this prototype, we'll handle transfers externally or via special IO instruction emulation.
             try:
                 kernel.step()
             except Exception as e:
                 self.logger.error(f"Kernel {k_id} error: {e}")
 
-        # 2. Step Bus
+        # 3. Step Bus
         completed_transfers = self.bus.tick()
         
         # 3. Handle completed transfers (Write to Destination Kernel)

@@ -1,39 +1,61 @@
 unit_name: SHIFTUP
-latency: 0
+latency: 1
+code_bits: 22
 attributes:
   throughput: 1
-  desc: Generated spec for SHIFTUP
+  desc: Cross-SMC chain shift (upward), supports broadcast and point-to-point modes
+  cross_smc_chain: true
+  # 推断（ADR-019 OQ-E1）：SMC_0 物理上接专用 chain head 入口；若硬件 RTL 实为 ring 拓扑（OQ-7 P2）则触发 ADR-020 重做
+  cross_smc_data_source: SMC_0
+  chain_direction: ascending
 ports:
   inputs:
-  - name: S0
-    width: 128
-  - name: S1
-    width: 128
+    - name: CRU_SHIFTUP_I
+      width: 128
+      cross_smc_src: true
   outputs:
-  - name: D
-    width: 128
-    type: data
-    rtovr_src_id: 29      # RtoVRInputSource.DR_SHIFTUP_D
+    - name: CRU_SHIFTUP_O
+      width: 128
+      cross_smc_dst: true
+    - name: DR_SHIFTUP_D
+      width: 128
+      type: data
+      rtovr_src_id: 29
 micro_instructions:
-- field: VALID
-  width: 1
-  default: 0
-  encoding:
-    0: INVALID
-    1: VALID
-- field: MODE
-  width: 4
-- field: AMOUNT
-  width: 8
-- field: SRC_PREC
-  width: 2
-  default: 1
-  encoding:
-    0: PREC_16
-    1: PREC_32
-- field: UPDATE_ST
-  width: 1
-  default: 1
-  encoding:
-    0: 'NO'
-    1: 'YES'
+  - field: VALID
+    width: 1
+    default: 0
+    encoding:
+      0: INVALID
+      1: VALID
+  - field: broadcast
+    width: 1
+    default: 0
+    encoding:
+      0: P2P
+      1: BROADCAST
+  - field: smc_id_en
+    width: 5
+    desc: "broadcast=0 时为目标 SMC ID；broadcast=1 时为广播 mask 上界（SMC_ID ≤ smc_id_en 暴露 DR_SHIFTUP_D）"
+  - field: MODE
+    width: 4
+  - field: AMOUNT
+    width: 8
+  - field: SRC_PREC
+    width: 2
+    default: 1
+    encoding:
+      0: PREC_16
+      1: PREC_32
+  - field: UPDATE_ST
+    width: 1
+    default: 1
+    encoding:
+      0: 'NO'
+      1: 'YES'
+behavioral_semantics:
+  chain_propagation: "SMC_ID <= smc_id_en: CRU_SHIFTUP_O <- CRU_SHIFTUP_I"
+  endpoint_expose: "broadcast=0 & SMC_ID == smc_id_en: DR_SHIFTUP_D <- CRU_SHIFTUP_O"
+  broadcast_expose: "broadcast=1 & SMC_ID <= smc_id_en: DR_SHIFTUP_D <- CRU_SHIFTUP_O"
+  chain_stage_latency: 1
+  iq_slot_consumption: "SMC_ID <= smc_id_en 沿途每 SMC 在 t=t0（同步发射，OQ-8 (i)）各消耗自己的 SHIFTUP IQ slot"

@@ -1,33 +1,50 @@
 unit_name: SHIFTDN
-latency: 0
+latency: 1
+code_bits: 19
 attributes:
   throughput: 1
-  desc: Generated spec for SHIFTDN
+  desc: Cross-SMC chain shift (downward), point-to-point only (no broadcast, OQ-5 user 确认)
+  cross_smc_chain: true
+  # 推断（ADR-019 OQ-E1）：SHIFTDN 起点 = SMC_{smc_id_en}（由 SMT 解出 smc_id_en 决定）
+  cross_smc_data_source: dynamic
+  chain_direction: descending
 ports:
   inputs:
-  - name: S0
-    width: 128
-  - name: S1
-    width: 128
+    - name: CRU_SHIFTDN_I
+      width: 128
+      cross_smc_src: true
+    - name: DVR_SHIFTDN_S
+      width: 128
   outputs:
-  - name: D
-    width: 128
+    - name: CRU_SHIFTDN_O
+      width: 128
+      cross_smc_dst: true
+    # 保留现 yaml 的 D output（ADR-019 v6 F6：实施前需 grep 算子 yaml 确认 SHIFTDN_D 零引用后再决定是否删；本 ADR 保留）
+    - name: D
+      width: 128
+      type: data
 micro_instructions:
-- field: VALID
-  width: 1
-  default: 0
-  encoding:
-    0: INVALID
-    1: VALID
-- field: MODE
-  width: 4
-- field: AMOUNT
-  width: 8
-- field: UPDATE_ST
-  width: 1
-  default: 1
-  encoding:
-    0: 'NO'
-    1: 'YES'
+  - field: VALID
+    width: 1
+    default: 0
+    encoding:
+      0: INVALID
+      1: VALID
+  - field: smc_id_en
+    width: 5
+    desc: "起点 SMC ID（SMC_ID == smc_id_en 从本地 DVR_SHIFTDN_S 取数；SMC_ID < smc_id_en 从 CRU_SHIFTDN_I 取数）"
+  - field: MODE
+    width: 4
+  - field: AMOUNT
+    width: 8
+  - field: UPDATE_ST
+    width: 1
+    default: 1
+    encoding:
+      0: 'NO'
+      1: 'YES'
 behavioral_semantics:
-  latching: pre_load_on_valid_or_nonzero # 支持“数据先到、指令后发”模式
+  start_point: "SMC_ID == smc_id_en: CRU_SHIFTDN_O <- DVR_SHIFTDN_S"
+  chain_propagation: "SMC_ID < smc_id_en: CRU_SHIFTDN_O <- CRU_SHIFTDN_I"
+  chain_stage_latency: 1
+  iq_slot_consumption: "SMC_ID <= smc_id_en 沿途每 SMC 在 t=t0（同步发射，OQ-8 (i)）各消耗自己的 SHIFTDN IQ slot"

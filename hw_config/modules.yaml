@@ -197,3 +197,31 @@ modules:
       - {name: VALID, bits: 1}
       - {name: DST_REG, bits: 2}
       - {name: smc_id_en, bits: 5}
+
+  SHIFTUP:
+    type: cross_smc_chain
+    latency: 1
+    inputs: [CRU_SHIFTUP_I]
+    outputs: [CRU_SHIFTUP_O, DR_SHIFTUP_D]
+    code_bits: 22
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: broadcast, bits: 1}
+      - {name: smc_id_en, bits: 5}
+      - {name: MODE, bits: 4}
+      - {name: AMOUNT, bits: 8}
+      - {name: SRC_PREC, bits: 2}
+      - {name: UPDATE_ST, bits: 1}
+
+  SHIFTDN:
+    type: cross_smc_chain
+    latency: 1
+    inputs: [CRU_SHIFTDN_I, DVR_SHIFTDN_S]
+    outputs: [CRU_SHIFTDN_O, D]
+    code_bits: 19
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: smc_id_en, bits: 5}
+      - {name: MODE, bits: 4}
+      - {name: AMOUNT, bits: 8}
+      - {name: UPDATE_ST, bits: 1}

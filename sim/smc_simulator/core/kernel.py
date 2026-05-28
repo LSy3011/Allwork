@@ -49,7 +49,7 @@ class ParallelKernel:
     3. Execute: 处理数据路由 (RtoVR) 及计算引擎评估。
     4. Commit: 推进时钟边沿 (Tick)。
     """
-    def __init__(self, spec_loader: SpecLoader = None):
+    def __init__(self, spec_loader: SpecLoader = None, smc_id: int = 0):
         if not spec_loader: spec_loader = SpecLoader()
         self.spec_loader = spec_loader
         self.sys_spec = spec_loader.get_system_core()
@@ -101,6 +101,12 @@ class ParallelKernel:
         self.cycle_count = 0
         self.logger = logging.getLogger("ParallelKernel")
         self.trace_recorder = None
+
+        # ADR-019 D5: 跨 SMC chain 支持
+        # smc_id：本 kernel 在 cluster 中的位置；N=1 模式（单 ParallelKernel）默认 0
+        # chain_inputs：cluster 注入上游 chain 输出；N=1 模式无 cluster 时缺省 0（等价旧"本地直通"）
+        self.smc_id = smc_id
+        self.chain_inputs = {'shiftup': 0, 'shiftdn': 0}
 
 
     def enable_trace(self):
@@ -494,13 +500,20 @@ class ParallelKernel:
             's1_valid': get_port_valid(RtoVROutput.DVR_INT8TOFP16_S1)
         })
         
-        # Shift Units
+        # Shift Units（ADR-019 D3/D4：跨 SMC chain 支持；N=1 模式 chain_inputs 默认 0 等价旧本地直通）
         self.units['shiftup'].evaluate({
-            'ctrl': controls.get('shiftup', 0), 
-            'data': self.ur_bank.get_read_data(0) # 模拟器惯例：ShiftUp 直接读 R0 (无RtoVR)
+            'ctrl': controls.get('shiftup', 0),
+            'smc_id': self.smc_id,
+            'cru_shiftup_i': self.chain_inputs.get('shiftup', 0),
+            'data': self.ur_bank.get_read_data(0)  # SMC_0 chain head 本地数据源；其他 SMC 不用此字段
         })
         self.units['shiftdn'].evaluate({
-            'ctrl': controls.get('shiftdn', 0), 
+            'ctrl': controls.get('shiftdn', 0),
+            'smc_id': self.smc_id,
+            'cru_shiftdn_i': self.chain_inputs.get('shiftdn', 0),
+            'dvr_shiftdn_s': get_port_data(RtoVROutput.DVR_SHIFTDN_S),
+            'dvr_shiftdn_s_valid': get_port_valid(RtoVROutput.DVR_SHIFTDN_S),
+            # 兼容旧字段名（shift_dn_unit 已兼容 fallback）
             's': get_port_data(RtoVROutput.DVR_SHIFTDN_S),
             's_valid': get_port_valid(RtoVROutput.DVR_SHIFTDN_S)
         })
