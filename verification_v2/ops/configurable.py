@@ -94,14 +94,106 @@ class ConfigurableOperator(BaseOperator):
                 inputs_meta["constants"]["logical_addr_list"] = logical_addr_list
         
         # 3. 编译
-        out_name = "y" 
-        return self.compile_with_adpc(
-            expr, 
-            inputs_meta, 
+        out_name = "y"
+        ops = self.compile_with_adpc(
+            expr,
+            inputs_meta,
             out_name=out_name,
-            out_addr=self.get_bank_addr(out_name, spec), 
+            out_addr=self.get_bank_addr(out_name, spec),
             spec=spec
         )
+
+        # ADR-018 v7 Stage 1 X · parallel_dim=N：把 broadcast 输入的 UR_READ 后插 SHIFTUP MIROp。
+        # 数据源固定 SMC_0（OQ-1），smc_id_en=PARAM_SMC_NUM-1 广播到全部 SMC。
+        if self.parallel_dim == "N":
+            ops = self._inject_shiftup_broadcast(ops, spec)
+
+        return ops
+
+    def _inject_shiftup_broadcast(self, ops: List[Any], spec: Any) -> List[Any]:
+        """
+        ADR-018 v7 D4 Stage 1 X 模式 (Output-stationary by N) DFG 后处理：
+        对 smc_layout=broadcast 的 input UR_READ 插入 SHIFTUP MIROp，
+        consumer RTOVR 的 sel 改为 SHIFTUP_D=29（rtovr_config.yaml consumers_dr.29）。
+
+        前置：tensors_cfg[name].smc_layout == "broadcast"。
+        D5.c emitter 后续在 SMC_0..smc_id_en 各份 hex 同 cycle emit 此 SHIFTUP（沿途
+        SMC_k>0 data 字段填 0，硬件 cru_shiftup_i 接上游 chain，本地 data 忽略）。
+        """
+        from ir.mir.mir_op import MIROp
+        from driver.hw_resource import ResourceType as RT
+
+        smc_num = self._get_hw_param(spec, "PARAM_SMC_NUM", 32)
+        smc_id_en = smc_num - 1
+        broadcast_names = {
+            name for name, cfg in self.tensors_cfg.items()
+            if cfg.get("smc_layout") == "broadcast"
+        }
+        if not broadcast_names:
+            return ops
+
+        SHIFTUP_D_SEL = 29  # rtovr_config.yaml consumers_dr.29 = SHIFTUP_D
+
+        ur_to_shiftup: Dict[str, str] = {}
+        new_ops = list(ops)
+        for op in ops:
+            if (op.op_type.upper() == "UR_READ"
+                    and op.metadata.get("meta_name") in broadcast_names
+                    and op.metadata.get("role") == "input"):
+                sup_id = f"shiftup_{op.trace_id}"
+                sup_op = MIROp(
+                    op_type="SHIFTUP", logic_cycle=0, trace_id=sup_id,
+                    metadata={
+                        "depends_on": [op.trace_id],
+                        "iq_type": RT.SHIFTUP,
+                        "broadcast": 1,
+                        "smc_id_en": smc_id_en,
+                        "smc_id": 0,  # OQ-1: 数据源固定 SMC_0
+                        "math": f"shiftup_broadcast({op.metadata.get('meta_name')})",
+                        "dep_port": "D",
+                    },
+                )
+                new_ops.append(sup_op)
+                ur_to_shiftup[op.trace_id] = sup_id
+
+        if not ur_to_shiftup:
+            return ops
+
+        shiftup_ids = set(ur_to_shiftup.values())
+
+        # Rewrite consumer deps（跳过 SHIFTUP 自身——它合法地 dep on UR_READ）
+        for op in new_ops:
+            if op.trace_id in shiftup_ids:
+                continue
+            deps = op.metadata.get("depends_on", [])
+            if any(d in ur_to_shiftup for d in deps):
+                op.metadata["depends_on"] = [
+                    ur_to_shiftup[d] if d in ur_to_shiftup else d
+                    for d in deps
+                ]
+                if op.op_type.upper() == "RTOVR":
+                    op.metadata["sel"] = SHIFTUP_D_SEL
+
+        # Rebuild rtovr_deps from scratch（清旧 stale UR_READ 条目，避免与新 SHIFTUP 条目并存
+        # 双重约束 t_fpmul == t_ur_read+lat+1 vs t_shiftup+lat+1）
+        for op in new_ops:
+            if "rtovr_deps" in op.metadata:
+                op.metadata["rtovr_deps"] = {}
+        for op in new_ops:
+            if op.op_type.upper() != "RTOVR":
+                continue
+            prod_ids = op.metadata.get("depends_on", [])
+            if not prod_ids:
+                continue
+            prod_id = prod_ids[0]
+            for consumer in new_ops:
+                if op.trace_id in consumer.metadata.get("depends_on", []):
+                    consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                        "dvr": op.metadata.get("dvr", -1),
+                        "sel": op.metadata.get("sel", -1),
+                    }
+
+        return new_ops
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
         if self.name == "matmul":

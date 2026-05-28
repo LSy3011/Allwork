@@ -210,5 +210,81 @@ class TestEmitterMultiSMC(unittest.TestCase):
                 self.packer.emit_from_instructions([instr], tmp, smc_num=33)
 
 
+class TestFrontendParallelDimNInjection(unittest.TestCase):
+    """ADR-018 v7 D4 Stage 1 X: ConfigurableOperator parallel_dim=N SHIFTUP 注入."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        cls.spec = HardwareSpec.load("hw_config")
+
+    def _load_gemm_op(self):
+        from verification_v2.ops.configurable import ConfigurableOperator
+        return ConfigurableOperator("verification_v2/ops/matmul_parallel_n.yaml")
+
+    def test_shiftup_injected_per_broadcast_input(self):
+        """matmul_parallel_n 有 4 个 broadcast 输入 (a0..a3) → 应注入 4 个 SHIFTUP MIROp."""
+        op = self._load_gemm_op()
+        ops = op.get_dfg(self.spec)
+        shiftup_ops = [o for o in ops if o.op_type == "SHIFTUP"]
+        self.assertEqual(len(shiftup_ops), 4,
+            f"应注入 4 个 SHIFTUP（每 broadcast 输入一个），实际 {len(shiftup_ops)}")
+
+    def test_shiftup_metadata_axiom_triggers(self):
+        """每 SHIFTUP MIROp 应 broadcast=1 + smc_id_en=PARAM_SMC_NUM-1 + smc_id=0 (OQ-1)."""
+        op = self._load_gemm_op()
+        ops = op.get_dfg(self.spec)
+        smc_id_en_expected = self.spec.params.PARAM_SMC_NUM - 1
+        for sup in [o for o in ops if o.op_type == "SHIFTUP"]:
+            self.assertEqual(sup.metadata.get("broadcast"), 1,
+                f"{sup.trace_id} broadcast 应为 1（D3.d 唯一源 axiom 触发条件）")
+            self.assertEqual(sup.metadata.get("smc_id_en"), smc_id_en_expected,
+                f"{sup.trace_id} smc_id_en 应为 PARAM_SMC_NUM-1={smc_id_en_expected}")
+            self.assertEqual(sup.metadata.get("smc_id"), 0,
+                f"{sup.trace_id} smc_id 应为 0 (OQ-1 数据源固定 SMC_0)")
+
+    def test_consumer_rtovr_sel_rewritten_to_shiftup_d(self):
+        """consumer RTOVR 的 sel 应改为 29 (rtovr_config.yaml consumers_dr.29 = SHIFTUP_D)."""
+        op = self._load_gemm_op()
+        ops = op.get_dfg(self.spec)
+        shiftup_ids = {o.trace_id for o in ops if o.op_type == "SHIFTUP"}
+        rtovr_after_shiftup = [
+            o for o in ops
+            if o.op_type == "RTOVR"
+            and any(d in shiftup_ids for d in o.metadata.get("depends_on", []))
+        ]
+        self.assertGreater(len(rtovr_after_shiftup), 0,
+            "应有至少 1 个 RTOVR 在 SHIFTUP 后")
+        for r in rtovr_after_shiftup:
+            self.assertEqual(r.metadata.get("sel"), 29,
+                f"{r.trace_id} sel 应为 29 (SHIFTUP_D)，实际 {r.metadata.get('sel')}")
+
+    def test_no_stale_ur_read_rtovr_deps_on_fpmul(self):
+        """下游 FPMUL 的 rtovr_deps 不应残留 broadcast 输入 UR_READ 条目
+        （否则会同时约束 t_fpmul == t_ur_read+lat+1 和 t_shiftup+lat+1 → 过约束）."""
+        op = self._load_gemm_op()
+        ops = op.get_dfg(self.spec)
+        broadcast_ur_ids = {
+            o.trace_id for o in ops
+            if o.op_type == "UR_READ"
+            and o.metadata.get("meta_name") in {"a0", "a1", "a2", "a3"}
+            and o.metadata.get("role") == "input"
+        }
+        for fpm in [o for o in ops if o.op_type == "FPMUL"]:
+            rdeps = fpm.metadata.get("rtovr_deps", {})
+            stale = set(rdeps.keys()) & broadcast_ur_ids
+            self.assertEqual(stale, set(),
+                f"{fpm.trace_id} rtovr_deps 残留 broadcast UR_READ 键 {stale}")
+
+    def test_parallel_dim_none_no_injection_backward_compat(self):
+        """parallel_dim 未设的 yaml（如 horner_v3） get_dfg 不应注入任何 SHIFTUP."""
+        from verification_v2.ops.configurable import ConfigurableOperator
+        op = ConfigurableOperator("verification_v2/ops/horner_v3.yaml")
+        ops = op.get_dfg(self.spec)
+        shiftup_ops = [o for o in ops if o.op_type == "SHIFTUP"]
+        self.assertEqual(len(shiftup_ops), 0,
+            "parallel_dim=None 应保持单 SMC 模式，无 SHIFTUP 注入")
+
+
 if __name__ == "__main__":
     unittest.main()
