@@ -170,17 +170,16 @@ class TestEmitterMultiSMC(unittest.TestCase):
                     content = f.read().strip()
                 self.assertEqual(content, "", f"SMC_{k} 应跳过 emit (smc_id > smc_id_en)")
 
-    def test_broadcast_followers_have_identical_hex(self):
+    def test_broadcast_smc0_data_distinct_from_followers(self):
         """
-        ADR-018 v7 D5.c: SHIFTUP broadcast 沿途 SMC_k>0 hex 应一致（都是 data=0 + 同 smc_id_en/broadcast 字段）。
-        注: SHIFTUP data 字段当前不在 yaml micro_instructions（ADR-019 v6 已知 gap，hardware spec
-        把 data 列为 128-bit 微指令字段；待新 errata 补齐）。SMC_0 vs SMC_k>0 hex 当前**相同**——
-        本测试只验证沿途 SMC hex 内部一致性，不验证 SMC_0 vs SMC_k>0 差异（待 data 字段补齐后 enable）。
+        ADR-018 v7 D5.c + ADR-019 errata task #19: SHIFTUP broadcast 沿途 SMC_k>0 data 字段填 0；
+        SMC_0 含 真实 data，故 SMC_0 hex ≠ SMC_k>0 hex (data 字段差异)。
+        沿途 SMC_k>0 (k=1,2,3) hex 应一致（都是 data=0 + 同 smc_id_en/broadcast）。
         """
         instr = PhysicalInstruction(
             iq_name='shiftup',
             header=SMIHeader(),
-            payload={'data': 0xcafe, 'broadcast': 1, 'smc_id_en': 3, 'MODE': 0, 'AMOUNT': 0, 'SRC_PREC': 1, 'UPDATE_ST': 1, 'VALID': 1},
+            payload={'data': 0xcafe, 'broadcast': 1, 'smc_id_en': 3, 'VALID': 1},
             abs_t=0,
             op_type='SHIFTUP',
             stage='BODY'
@@ -191,11 +190,12 @@ class TestEmitterMultiSMC(unittest.TestCase):
             for k in range(4):
                 with open(os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")) as f:
                     hexes.append(f.read().strip())
-            # 沿途 SMC 一致 (broadcast=1, smc_id_en=3 → 4 个 SMC 沿途)
-            self.assertEqual(hexes[1], hexes[2], "SMC_1/2 沿途 hex 一致")
-            self.assertEqual(hexes[2], hexes[3], "SMC_2/3 沿途 hex 一致")
-            # TODO(ADR-019-errata): 待 data 字段补入 micro_instructions 后，re-enable:
-            # self.assertNotEqual(hexes[0], hexes[1], "SMC_0 含 data vs SMC_1 data=0 应不同")
+            # 沿途 SMC_1/2/3 (data=0) 完全一致
+            self.assertEqual(hexes[1], hexes[2], "SMC_1/2 沿途 data=0 → hex 一致")
+            self.assertEqual(hexes[2], hexes[3], "SMC_2/3 沿途 data=0 → hex 一致")
+            # SMC_0 (data=0xcafe) 与 SMC_1 (data=0) 必不同
+            self.assertNotEqual(hexes[0], hexes[1],
+                "SMC_0 含 data=0xcafe vs SMC_1 data=0 必不同")
 
     def test_smc_id_5bit_fail_fast_at_overflow(self):
         """

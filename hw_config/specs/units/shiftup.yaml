@@ -1,33 +1,43 @@
 unit_name: SHIFTUP
 latency: 1
-code_bits: 22
+code_bits: 135  # vld(1) + data(128) + broadcast(1) + smc_id_en(5) — 严格按硬件 spec 表 544
 attributes:
   throughput: 1
   desc: Cross-SMC chain shift (upward), supports broadcast and point-to-point modes
   cross_smc_chain: true
-  # 推断（ADR-019 OQ-E1）：SMC_0 物理上接专用 chain head 入口；若硬件 RTL 实为 ring 拓扑（OQ-7 P2）则触发 ADR-020 重做
+  # 推断（ADR-019 v7 errata task #19）：SMC_0 物理上接专用 chain head 入口；
+  # 若硬件 RTL 实为 ring 拓扑（OQ-7 P2）则触发 ADR-020 重做。
   cross_smc_data_source: SMC_0
   chain_direction: ascending
 ports:
   inputs:
     - name: CRU_SHIFTUP_I
-      width: 128
+      width: 135  # 寄存器宽度 = 整个 microinstruction（硬件 spec 表 542）
       cross_smc_src: true
+    - name: SMC_ID
+      width: 5    # 接口信号（硬件输入；非 microinstruction 字段）
+      desc: "本模块所在 SMC 的 ID 编码（硬件接口，emitter 无需注入）"
   outputs:
     - name: CRU_SHIFTUP_O
-      width: 128
+      width: 135
       cross_smc_dst: true
     - name: DR_SHIFTUP_D
       width: 128
       type: data
       rtovr_src_id: 29
 micro_instructions:
+  # 严格按硬件 spec 表 544，仅 4 个字段。
+  # OQ-4 当时答 "(b) 保留 MODE/AMOUNT/SRC_PREC/UPDATE_ST" 已被新 spec supersede（ADR-019 errata task #19）。
   - field: VALID
     width: 1
     default: 0
     encoding:
       0: INVALID
       1: VALID
+  - field: data
+    width: 128
+    default: 0
+    desc: "SMC_0 chain head 本地数据；非起点 SMC 该字段在硬件层不被使用（emitter D5.c 清 0）"
   - field: broadcast
     width: 1
     default: 0
@@ -37,25 +47,9 @@ micro_instructions:
   - field: smc_id_en
     width: 5
     desc: "broadcast=0 时为目标 SMC ID；broadcast=1 时为广播 mask 上界（SMC_ID ≤ smc_id_en 暴露 DR_SHIFTUP_D）"
-  - field: MODE
-    width: 4
-  - field: AMOUNT
-    width: 8
-  - field: SRC_PREC
-    width: 2
-    default: 1
-    encoding:
-      0: PREC_16
-      1: PREC_32
-  - field: UPDATE_ST
-    width: 1
-    default: 1
-    encoding:
-      0: 'NO'
-      1: 'YES'
 behavioral_semantics:
   chain_propagation: "SMC_ID <= smc_id_en: CRU_SHIFTUP_O <- CRU_SHIFTUP_I"
-  endpoint_expose: "broadcast=0 & SMC_ID == smc_id_en: DR_SHIFTUP_D <- CRU_SHIFTUP_O"
-  broadcast_expose: "broadcast=1 & SMC_ID <= smc_id_en: DR_SHIFTUP_D <- CRU_SHIFTUP_O"
+  endpoint_expose: "broadcast=0 & SMC_ID == smc_id_en: DR_SHIFTUP_D <- CRU_SHIFTUP_O[data]"
+  broadcast_expose: "broadcast=1 & SMC_ID <= smc_id_en: DR_SHIFTUP_D <- CRU_SHIFTUP_O[data]"
   chain_stage_latency: 1
   iq_slot_consumption: "SMC_ID <= smc_id_en 沿途每 SMC 在 t=t0（同步发射，OQ-8 (i)）各消耗自己的 SHIFTUP IQ slot"

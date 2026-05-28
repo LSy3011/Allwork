@@ -510,7 +510,8 @@ class ParallelKernel:
         self.units['shiftdn'].evaluate({
             'ctrl': controls.get('shiftdn', 0),
             'smc_id': self.smc_id,
-            'cru_shiftdn_i': self.chain_inputs.get('shiftdn', 0),
+            # 硬件 spec 表 545: CRD_SHIFTDN_I (下行链寄存器，区别 SHIFTUP CRU)
+            'crd_shiftdn_i': self.chain_inputs.get('shiftdn', 0),
             'dvr_shiftdn_s': get_port_data(RtoVROutput.DVR_SHIFTDN_S),
             'dvr_shiftdn_s_valid': get_port_valid(RtoVROutput.DVR_SHIFTDN_S),
             # 兼容旧字段名（shift_dn_unit 已兼容 fallback）

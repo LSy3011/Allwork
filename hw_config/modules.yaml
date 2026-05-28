@@ -201,27 +201,21 @@ modules:
   SHIFTUP:
     type: cross_smc_chain
     latency: 1
-    inputs: [CRU_SHIFTUP_I]
+    inputs: [CRU_SHIFTUP_I, SMC_ID]
     outputs: [CRU_SHIFTUP_O, DR_SHIFTUP_D]
-    code_bits: 22
+    code_bits: 135  # 严格按硬件 spec 表 544（vld+data+broadcast+smc_id_en）
     code_fields:
       - {name: VALID, bits: 1}
+      - {name: data, bits: 128}
       - {name: broadcast, bits: 1}
       - {name: smc_id_en, bits: 5}
-      - {name: MODE, bits: 4}
-      - {name: AMOUNT, bits: 8}
-      - {name: SRC_PREC, bits: 2}
-      - {name: UPDATE_ST, bits: 1}
 
   SHIFTDN:
     type: cross_smc_chain
     latency: 1
-    inputs: [CRU_SHIFTDN_I, DVR_SHIFTDN_S]
-    outputs: [CRU_SHIFTDN_O, D]
-    code_bits: 19
+    inputs: [CRD_SHIFTDN_I, DVR_SHIFTDN_S, SMC_ID]  # 硬件 spec 表 545：CRD（下行）不是 CRU
+    outputs: [CRD_SHIFTDN_O]
+    code_bits: 129  # 严格按硬件 spec 表 547（仅 vld + data）
     code_fields:
       - {name: VALID, bits: 1}
-      - {name: smc_id_en, bits: 5}
-      - {name: MODE, bits: 4}
-      - {name: AMOUNT, bits: 8}
-      - {name: UPDATE_ST, bits: 1}
+      - {name: data, bits: 128}

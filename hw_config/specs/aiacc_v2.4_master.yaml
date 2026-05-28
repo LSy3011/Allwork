@@ -488,7 +488,7 @@ functional_units:
   SHIFTUP:
     unit_name: SHIFTUP
     latency: 1
-    code_bits: 22
+    code_bits: 135  # 严格按硬件 spec 表 544（vld+data+broadcast+smc_id_en）
     attributes:
       throughput: 1
       desc: Cross-SMC chain shift (upward), supports broadcast and point-to-point modes
@@ -498,23 +498,30 @@ functional_units:
     ports:
       inputs:
       - name: CRU_SHIFTUP_I
-        width: 128
+        width: 135  # 硬件 spec 表 542：寄存器宽度 = 整个 microinstruction
         cross_smc_src: true
+      - name: SMC_ID
+        width: 5
+        desc: "本模块所在 SMC ID 编码（硬件接口；emitter 无需注入）"
       outputs:
       - name: CRU_SHIFTUP_O
-        width: 128
+        width: 135
         cross_smc_dst: true
       - name: DR_SHIFTUP_D
         width: 128
         type: data
         rtovr_src_id: 29
     micro_instructions:
+    # 严格按硬件 spec 表 544，仅 4 个字段（OQ-4 答案被新 spec supersede，ADR-019 errata task #19）
     - field: VALID
       width: 1
       default: 0
       encoding:
         0: INVALID
         1: VALID
+    - field: data
+      width: 128
+      default: 0
     - field: broadcast
       width: 1
       default: 0
@@ -523,22 +530,6 @@ functional_units:
         1: BROADCAST
     - field: smc_id_en
       width: 5
-    - field: MODE
-      width: 4
-    - field: AMOUNT
-      width: 8
-    - field: SRC_PREC
-      width: 2
-      default: 1
-      encoding:
-        0: PREC_16
-        1: PREC_32
-    - field: UPDATE_ST
-      width: 1
-      default: 1
-      encoding:
-        0: 'NO'
-        1: 'YES'
   INTTOFP:
     unit_name: INTTOFP
     latency: 1
@@ -770,48 +761,41 @@ functional_units:
   SHIFTDN:
     unit_name: SHIFTDN
     latency: 1
-    code_bits: 19
+    code_bits: 129  # 严格按硬件 spec 表 547（仅 vld + data）
     attributes:
       throughput: 1
-      desc: Cross-SMC chain shift (downward), point-to-point only (no broadcast, OQ-5)
+      desc: Cross-SMC chain shift (downward), no broadcast field (spec 表 547)
       cross_smc_chain: true
       cross_smc_data_source: dynamic
       chain_direction: descending
     ports:
       inputs:
-      - name: CRU_SHIFTDN_I
-        width: 128
+      - name: CRD_SHIFTDN_I   # 硬件 spec 表 545：CRD（下行寄存器）不是 CRU
+        width: 129
         cross_smc_src: true
       - name: DVR_SHIFTDN_S
         width: 128
+      - name: SMC_ID
+        width: 5
+        desc: "本模块所在 SMC ID 编码（硬件接口）"
       outputs:
-      - name: CRU_SHIFTDN_O
-        width: 128
+      - name: CRD_SHIFTDN_O
+        width: 129
         cross_smc_dst: true
-      - name: D
-        width: 128
-        type: data
     micro_instructions:
+    # 严格按硬件 spec 表 547，仅 2 个字段（spec gap: 功能公式用 smc_id_en 但 spec 表均未列）
     - field: VALID
       width: 1
       default: 0
       encoding:
         0: INVALID
         1: VALID
-    - field: smc_id_en
-      width: 5
-    - field: MODE
-      width: 4
-    - field: AMOUNT
-      width: 8
-    - field: UPDATE_ST
-      width: 1
-      default: 1
-      encoding:
-        0: 'NO'
-        1: 'YES'
+    - field: data
+      width: 128
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
+      smc_id_en_source: "spec gap — 功能公式用 smc_id_en 但 spec 表 545/547 均未列；sim fallback PARAM_SMC_NUM-1"
   UR_WRITE:
     unit_name: UR_WRITE
     latency: 1

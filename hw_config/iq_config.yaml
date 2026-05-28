@@ -86,10 +86,10 @@ iq_config:
     module: SHIFTUP
     EN_LOOPS: true
     BITS_LOOPS: 10
-    BITS_CODE: 22 # VALID(1) + broadcast(1) + smc_id_en(5) + MODE(4) + AMOUNT(8) + SRC_PREC(2) + UPDATE_ST(1)
+    BITS_CODE: 135 # vld(1) + data(128) + broadcast(1) + smc_id_en(5) — 严格按硬件 spec 表 544 (ADR-019 errata task #19)
 
   IQ_SHIFTDN:
     module: SHIFTDN
     EN_LOOPS: true
     BITS_LOOPS: 10
-    BITS_CODE: 19 # VALID(1) + smc_id_en(5) + MODE(4) + AMOUNT(8) + UPDATE_ST(1)
+    BITS_CODE: 129 # vld(1) + data(128) — 严格按硬件 spec 表 547

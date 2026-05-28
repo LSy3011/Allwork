@@ -11,13 +11,14 @@ from aiacc_hardware.src.spec_loader import SpecLoader
 
 class ShiftDnUnit(Component):
     """
-    SHIFTDN 单元（ADR-019 v6 重构，跨 SMC chain）。
-    - 功能：链路下行（SMC_{smc_id_en} → ... → SMC_0）；OQ-5 确认无 broadcast 字段
-    - 起点 SMC = SMC_{smc_id_en}（动态，由 SMT 解出 smc_id_en 决定）从本地 DVR_SHIFTDN_S 取数
-    - 链中 SMC（SMC_ID < smc_id_en）从上游 CRU_SHIFTDN_I 取数
-    - OQ-2 + OQ-8 (i)：沿途每 SMC 在 t=t0 同步发射
-    - N=1 退化兼容：cru_shiftdn_i 缺省 0；dvr_shiftdn_s 仍从本 SMC RtoVR 出口取
+    SHIFTDN 单元（ADR-019 errata task #19，严格按新硬件 spec 表 545-547）。
+    - microinstruction = vld(1) + data(128) = 129 bit
+    - 寄存器名 CRD_SHIFTDN_O/I（下行，区别于 SHIFTUP 的 CRU）
+    - **spec gap**：功能公式用 smc_id_en 但 spec 表均未列；本 sim fallback PARAM_SMC_NUM-1 (=31)
+    - N=1 退化兼容：cru_shiftdn_i / crd_shiftdn_i 缺省 0；dvr_shiftdn_s 仍从本 SMC RtoVR 出口取
     """
+    SMC_ID_EN_FALLBACK = 31  # PARAM_SMC_NUM - 1; spec gap workaround
+
     def __init__(self, name: str, latency: int = 1):
         super().__init__(name)
         self.latency = latency
@@ -26,7 +27,7 @@ class ShiftDnUnit(Component):
         spec = loader.get_unit("SHIFTDN")
         self.decoder = InstructionDecoder(spec)
 
-        self.cru_o = 0       # CRU_SHIFTDN_O（链输出寄存器）
+        self.cru_o = 0       # CRD_SHIFTDN_O（输出寄存器；属性名保留 cru_o 兼容历史调用）
         self.regs_s0 = 0     # 保留旧 latch 行为（兼容 behavioral_semantics: pre_load_on_valid_or_nonzero）
         self._next_cru_o = 0
 
@@ -37,9 +38,10 @@ class ShiftDnUnit(Component):
 
     def evaluate(self, inputs: Dict[str, Any], cycle: int = 0):
         ctrl_code = inputs.get('ctrl', 0)
-        smc_id = inputs.get('smc_id', 0)              # cluster 注入；N=1 默认 0
-        chain_in = inputs.get('cru_shiftdn_i', 0)     # 来自 SMC_{smc_id+1}；N=1 默认 0
-        # 兼容旧调用：'s' / 's_valid' 字段是 kernel.py 历史命名；新字段 'dvr_shiftdn_s' 是 ADR-019 D2 标准
+        smc_id = inputs.get('smc_id', 0)
+        # 兼容新命名 crd_shiftdn_i + 旧命名 cru_shiftdn_i（向后兼容期）
+        chain_in = inputs.get('crd_shiftdn_i', inputs.get('cru_shiftdn_i', 0))
+        # 兼容旧调用：'s' / 's_valid' 是 kernel.py 历史命名；新字段 'dvr_shiftdn_s' 是 ADR-019 D2 标准
         dvr_s = inputs.get('dvr_shiftdn_s', inputs.get('s', 0))
         dvr_s_valid = inputs.get('dvr_shiftdn_s_valid', inputs.get('s_valid', False))
 
@@ -50,25 +52,26 @@ class ShiftDnUnit(Component):
         instr = self.decoder.decode(ctrl_code)
 
         if instr.VALID != "VALID":
-            self._next_cru_o = self.cru_o             # Hold
+            self._next_cru_o = self.cru_o
             return
 
-        smc_id_en = instr.smc_id_en                   # 小写
+        # spec gap：SHIFTDN microinstruction 未列 smc_id_en；fallback 到 PARAM_SMC_NUM-1
+        # 若硬件 spec 后续澄清 smc_id_en 真实来源，改此 fallback。
+        smc_id_en = self.SMC_ID_EN_FALLBACK
 
-        # 起点 SMC：取本地 DVR_SHIFTDN_S
-        # 链中 SMC：取上游 CRU_SHIFTDN_I
+        # 功能公式（spec 完整描述）
         if smc_id == smc_id_en:
             self._next_cru_o = self.regs_s0 & ((1 << 128) - 1)
         elif smc_id < smc_id_en:
             self._next_cru_o = chain_in & ((1 << 128) - 1)
         else:
-            self._next_cru_o = self.cru_o             # 不在链上
+            self._next_cru_o = self.cru_o
 
     def tick(self):
         self.cru_o = self._next_cru_o
 
     def get_outputs(self) -> Dict[str, int]:
-        return {'O': self.cru_o, 'CRU_SHIFTDN_O': self.cru_o}
+        return {'O': self.cru_o, 'CRD_SHIFTDN_O': self.cru_o, 'CRU_SHIFTDN_O': self.cru_o}
 
     # 跨 SMC chain wire 接口（cluster.py D5 调用）
     def get_chain_output(self) -> int:

@@ -1,50 +1,44 @@
 unit_name: SHIFTDN
 latency: 1
-code_bits: 19
+code_bits: 129  # vld(1) + data(128) — 严格按硬件 spec 表 547
 attributes:
   throughput: 1
-  desc: Cross-SMC chain shift (downward), point-to-point only (no broadcast, OQ-5 user 确认)
+  desc: Cross-SMC chain shift (downward), no broadcast field (OQ-5 + spec 表 547)
   cross_smc_chain: true
-  # 推断（ADR-019 OQ-E1）：SHIFTDN 起点 = SMC_{smc_id_en}（由 SMT 解出 smc_id_en 决定）
   cross_smc_data_source: dynamic
   chain_direction: descending
 ports:
   inputs:
-    - name: CRU_SHIFTDN_I
-      width: 128
+    - name: CRD_SHIFTDN_I   # 硬件 spec 表 545：CRD 不是 CRU（下行寄存器）
+      width: 129            # 寄存器宽度 = 整个 microinstruction
       cross_smc_src: true
     - name: DVR_SHIFTDN_S
       width: 128
+    - name: SMC_ID
+      width: 5
+      desc: "本模块所在 SMC 的 ID 编码（硬件接口，emitter 无需注入）"
   outputs:
-    - name: CRU_SHIFTDN_O
-      width: 128
+    - name: CRD_SHIFTDN_O
+      width: 129
       cross_smc_dst: true
-    # 保留现 yaml 的 D output（ADR-019 v6 F6：实施前需 grep 算子 yaml 确认 SHIFTDN_D 零引用后再决定是否删；本 ADR 保留）
-    - name: D
-      width: 128
-      type: data
 micro_instructions:
+  # 严格按硬件 spec 表 547，仅 2 个字段。
+  # 注意 spec gap：SHIFTDN 功能公式用 smc_id_en，但 spec 表 545（接口）+ 表 547（微指令）均未列。
+  # sim 层暂 fallback 到 PARAM_SMC_NUM-1 = 31（注：ADR-019 errata task #19 known gap，
+  # 待硬件 spec 进一步澄清）。
   - field: VALID
     width: 1
     default: 0
     encoding:
       0: INVALID
       1: VALID
-  - field: smc_id_en
-    width: 5
-    desc: "起点 SMC ID（SMC_ID == smc_id_en 从本地 DVR_SHIFTDN_S 取数；SMC_ID < smc_id_en 从 CRU_SHIFTDN_I 取数）"
-  - field: MODE
-    width: 4
-  - field: AMOUNT
-    width: 8
-  - field: UPDATE_ST
-    width: 1
-    default: 1
-    encoding:
-      0: 'NO'
-      1: 'YES'
+  - field: data
+    width: 128
+    default: 0
+    desc: "起点 SMC 通过 DVR_SHIFTDN_S 输入；该 microinstruction data 字段为读出数据"
 behavioral_semantics:
-  start_point: "SMC_ID == smc_id_en: CRU_SHIFTDN_O <- DVR_SHIFTDN_S"
-  chain_propagation: "SMC_ID < smc_id_en: CRU_SHIFTDN_O <- CRU_SHIFTDN_I"
+  start_point: "SMC_ID == smc_id_en: CRD_SHIFTDN_O <- DVR_SHIFTDN_S"
+  chain_propagation: "SMC_ID < smc_id_en: CRD_SHIFTDN_O <- CRD_SHIFTDN_I"
   chain_stage_latency: 1
+  smc_id_en_source: "spec gap — 功能公式用但 spec 表均未列；sim fallback PARAM_SMC_NUM-1"
   iq_slot_consumption: "SMC_ID <= smc_id_en 沿途每 SMC 在 t=t0（同步发射，OQ-8 (i)）各消耗自己的 SHIFTDN IQ slot"
