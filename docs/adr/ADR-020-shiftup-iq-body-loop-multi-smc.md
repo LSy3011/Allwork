@@ -1,6 +1,6 @@
 ---
 adr_id: ADR-020
-title: SHIFTUP 多 SMC bit-perfect 收尾（v4：bug #3 cycle-level 锁定 → compiler axiom vs sim 实现语义不一致）
+title: SHIFTUP 多 SMC bit-perfect 收尾（v5：hco 复核选 B 方向 → emitter per-SMC stagger + ADR-018 D3.b worst-case fold 订正）
 decided: 2026-05-28
 last_verified: 2026-05-28
 still_holds: partial
@@ -16,7 +16,8 @@ still_holds: partial
 > - evidence-gathering 三步（同日下午）：实测**否定 v1 假设**，揭示假"真根因方向"（见 §Context Evidence v1/v2）
 > - **v2（同日下午）**：决策从 "iq_unit.py 状态机" 转向 "SHIFTUP chain 数据流时序"；H1/H2/H3/H4 待 cycle-level 调试
 > - **v3（同日晚 prior session）**：drill-down dump 后 **H1/H2/H3/H4 + H5/H6/H7 全排除**；真根因裂为 4 层独立 bug（input_data 双源 / Auditor parser 缺 smc_id / sim 真数值错 / expected_val_map trace_id 映射错）；bug #1/#2 修，bug #3/#4 留 v4
-> - **v4（本版，同日晚 本 session）**：bug #3 cycle-level dump 锁定 → **compiler axiom vs sim 实现语义不一致**：`dependency_axioms.py:56-60` SHIFTUP producer `lat_p += smc_id_en` 假设 chain 提供 N-cycle 缓冲；`shift_up_unit.py` 实现为 1-stage register（无 buffer）→ SMC_0 chain head 收到 a 的 iter 偏移 +(smc_num-1)=+31
+> - **v4（同日晚 prior turn）**：bug #3 cycle-level dump 锁定 → **compiler axiom vs sim 实现语义不一致**：`dependency_axioms.py:56-60` SHIFTUP producer `lat_p += smc_id_en` 假设 chain 提供 N-cycle 缓冲；`shift_up_unit.py` 实现为 1-stage register（无 buffer）→ SMC_0 chain head 收到 a 的 iter 偏移 +(smc_num-1)=+31
+> - **v5（本版，同日晚 本 session）**：hco subagent 独立复核 4 方向 → **reject A/C/D，选 B**（emitter per-SMC stagger）。关键判读重定位 v4 误判：**spec yaml 是对的**（SHIFTUP 单拍 chain register 无 N-stage buffer 语义），**sim 是对的**（严格按 spec），**真错在 axiom 实现**（`dependency_axioms.py:56-60` 把 ADR-018 D3.b per-SMC RAW 公式 fold 成单 t_var worst-case）。hco 另揭 v4 未充分认识的：**SMC_1..30 chain 中段全部错位**（不只 SMC_0），方向 D 被彻底否决
 
 ## Context
 
@@ -542,3 +543,119 @@ self.units['shiftup'].evaluate({
 - `build/verification_v2/fma_parallel_n/smc_0/output_bank/bank5_final.hex` · actual 输出 line 0/1（E11/E14 验证）
 - `build/verification_v2/fma_parallel_n/physical_instructions.json` · abs_t 排程（a_read=2, fpmul=36, fpadd=41, ur-w0=46）
 - commit `52babc2` · ADR-018 Stage 1 收尾时遗留（"SMC_0 bit-perfect ✓" 反向 claim 不成立的回归引入点之一）
+
+---
+
+## v5 · hco 复核 + B 方向选定（2026-05-28 晚 · 本 session）
+
+### Context · 复核背景
+
+v4 落盘后调 hco subagent 独立复核 4 修法方向（A/B/C/D）。hco 不见主对话上下文，仅按 ADR-020 v4 + `src/synthesis/axioms/dependency_axioms.py` + `sim/smc_simulator/units/shift_up_unit.py` + `hw_config/specs/units/shiftup.yaml` + `hw_config/modules.yaml` + `hw_config/pipeline_delays.yaml` + `ADR-018 D3.b` 原文做独立判读。
+
+主对话 v4 §D8 当前倾向（短期 D / 长期 C）**被 hco 全部 reject**。
+
+### v5 真根因再校准（v4 描述误判订正）
+
+v4 §"真根因 v4" 段写的是 "compiler axiom 假设 chain 提供 N-stage 延迟 FIFO；sim 实现为 1-stage register；二者不一致"。这个 framing 隐含**两端都有错**。hco 判读颠覆此 framing：
+
+| 层 | v4 framing | v5 hco 校准 |
+|---|---|---|
+| spec yaml（`hw_config/specs/units/shiftup.yaml` L20-29, 50-55） | 模糊 | ✅ **对**：`latency: 1` + `chain_stage_latency: 1`，behavioral_semantics 明文单拍 chain hop，**无任何 N-stage buffer 字段** |
+| sim 实现（`shift_up_unit.py:39-78`） | 模糊 | ✅ **对**：严格按 spec 1-stage register |
+| **axiom 实现**（`dependency_axioms.py:56-60`） | "假设 N-cycle buffer" | ❌ **唯一错点**：把 ADR-018 D3.b 原始 per-SMC RAW 公式 fold 成单 t_var worst-case |
+
+**ADR-018 D3.b 原始公式（`docs/adr/ADR-018-multi-smc-scheduling-design.md:99-104`）**：
+```
+∀ chain op, ∀ k ∈ [0, smc_id_en]:
+    Implies(k <= smc_id_en,
+            t_DR_SHIFTUP_D_at_SMC_k >= t_issue + k * chain_stage_latency)
+```
+注意 `t_DR_SHIFTUP_D_at_SMC_k` —— **per-SMC 独立 t_var**。
+
+**axiom 实现 fold**（`dependency_axioms.py:53-60`，task #18 sub-7 引入）：
+```python
+# SPMD 模型 consumer 单 t_var 必须满足最差 SMC_{smc_id_en} 数据到达
+lat_p += smc_id_en * chain_stage_latency  # 折成 op.t_var 单维 worst-case
+```
+
+**fold 的代价**：所有 SMC 的 consumer fire 被绑到同一 `op.t_var`，编译器把 chain tail (k=smc_id_en) 的延迟需求强加到所有 SMC。对 chain tail 自身（SMC_31）—— 大致对齐；对 chain head（SMC_0）—— 数据早 31 cycle 到达后被覆盖，等到 fire 时已 +31 iter 漂移；**对 chain 中段（SMC_1..30）—— 漂移 +(smc_id_en - k) iter**。
+
+→ **v4 §Open Question 1（SMC_31 是否真 bit-perfect）优先级因 hco 判读下降**：即便 SMC_31 真对，SMC_1..30 仍全错位，方向 D（只修 SMC_0）失效。
+
+### v5 4 方向最终评估（hco 表）
+
+| 方向 | 违 spec? | 违 axiom? | 违 SPMD? | 违 chain 拓扑? | 物理可信? | hco 裁定 |
+|---|---|---|---|---|---|---|
+| **A** sim N-stage buffer | **YES**（spec 仅 1-stage；32-deep FIFO 伪造 hw） | NO | NO | NO | NO | **reject** |
+| **B** emitter per-SMC stagger | NO | **YES**（破坏 fold 后的单 t_var SPMD 模型；axiom 须订正 ≠ 破坏 D3.b 数学） | YES（但本属 D5.c lowering 层差异化的自然延伸） | NO | YES | **✅ 选** |
+| **C** spec 改 N-stage internal pipeline | NO | NO | NO | NO | **NO**（≈ 16 KB SRAM 跨 chain，远超 SHIFTUP 当前预算；需 RTL 团队介入） | **reject** |
+| **D** SMC_0 局部直读 | NO | NO（axiom 仍守 SMC_1..31） | **YES** | **YES**（chain head 不再参与 chain 暴露） | partial | **reject**（未解 SMC_1..30 中段，仅 hard-code chain head） |
+
+**v4 数值校准**：v4 §D7 估方向 C "16 KB SRAM 仅 SHIFTUP 一处"算错；hco 订正 = 单 SMC 32×128 bit = 512 B/SMC × 32 SMC = **16 KB 全 chain**，仍远超 SHIFTUP 当前硬件预算（chain register 共 256 bit）。
+
+### v5 Decision · 选 B（emitter per-SMC stagger）
+
+#### D10 · B 选型 3 理由（hco 给）
+
+1. **B 是唯一与 spec + sim 现状对齐且能根治 SMC_0..30 全 chain 的方向**。spec L54 明文 `chain_stage_latency: 1`，sim 严格 1-stage。要让 chain 每 SMC 在同一 fire cycle 拿到同一 iter，consumer fire cycle 必须 per-SMC stagger：SMC_k fire 在 `t0 + (smc_id_en - k) × 1`。
+
+2. **B 不破 ADR-018 D3.b 公式本身**。D3.b 原文是 per-SMC `t_DR_SHIFTUP_D_at_SMC_k` 公式，本就承认 per-SMC 时序差异；axiom 当前 fold 成单 t_var 是过度简化。**B 把 D3.b 原始 per-SMC 时序约束真正下推到 emitter**。
+
+3. **"违 SPMD" 是表象**。ADR-018 D5.b/D5.c 已经接受 emitter 在 lowering 阶段做 per-SMC hex 差异化（每 SMC hex 不同 NOP padding）。Per-SMC abs_t stagger 是 D5.c lowering 自然延伸，**SMT 模型层仍 1 个逻辑 op，stagger 只发生在 hex emit 阶段**，不构成 SPMD 编译模型颠覆。
+
+#### D11 · 修法范围（hco 审定）
+
+**必动文件**：
+- `src/synthesis/axioms/dependency_axioms.py:53-60` —— 删 `lat_p += smc_id_en × chain_stage_latency` worst-case fold；恢复 ADR-018 D3.b per-SMC RAW 公式（per-SMC consumer t_var 而非单 t_var），**或**在 emitter 层 lowering 后插入 per-SMC NOP padding 实现等价效果
+- `src/driver/emitter.py`（或同模块）—— 实现 consumer op per-SMC abs_t stagger：SMC_k.fire = `t_logical + (smc_id_en - k) × chain_stage_latency`
+- ADR-020 v6（实施 commit 后）：记录 B 落地代码改动 + 回归结果
+- `docs/adr/ADR-018-multi-smc-scheduling-design.md:93-103` —— D3.b 段加 errata 标记 "worst-case fold deprecated by ADR-020 v5"（**不动 D3.b 原始公式本身**，原始公式仍正确）
+
+**不动文件**（防 scope creep）：
+- `hw_config/specs/units/shiftup.yaml`（spec 是对的）
+- `hw_config/modules.yaml:201-211`（同上）
+- `hw_config/pipeline_delays.yaml:16`（`SHIFTUP: 1` 正确）
+- `sim/smc_simulator/units/shift_up_unit.py`（sim 严格按 spec）
+- `sim/smc_simulator/system/cluster.py:84-97`（chain propagation 结构正确）
+
+**退役/订正**：
+- `dependency_axioms.py:53-55` 注释（"SPMD 模型 consumer 单 t_var 必须满足最差 SMC_{smc_id_en} 数据到达"）须明确订正：worst-case SPMD fold 已 deprecated；改 per-SMC stagger（ADR-020 v5）
+
+**测试覆盖**：
+- `fma_parallel_n` 32-SMC（主验证点，必须 bit-perfect 全 32 SMC）
+- `horner` / `activation` / `matmul` 等非 SHIFTUP chain 算子（回归不应破）
+- 含 `SHIFTUP broadcast=1` 的所有算子（`grep -rn 'SHIFTUP' verification_v2/ops/` 定位）
+- 新增 `tests/unit/test_smt_adversarial.py` 用例：构造 2-SMC SHIFTUP broadcast 算例，断言 emitter 输出 SMC_0 / SMC_1 abs_t 差 1
+
+### v5 风险列表（hco 给的 4 条）
+
+1. **emitter 复杂度上升 O(SMC_NUM)**：lowering 阶段须 per-SMC 计算 abs_t offset；II 计算（`II = max abs_t span`）可能因 stagger 变大。需重跑 II 回归（horner II=7、activation II=?）确认无回退。
+
+2. **下游 op 链式 stagger 传播**：consumer（FPMUL）下游还有 op（FPADD、UR_WRITE），若 a 通路 stagger 而 b/c partitioned 不 stagger，**FPMUL S0/S1 输入会同 cycle 错对齐**。必须解 v4 §OQ #3（`abs_t(FPMUL) - abs_t(a_read) = 34` vs axiom `lat_p = 32` 差 2 cycle 的来源），否则 B 落地后可能引入新 off-by-K。**此风险阻塞 B 实施**。
+
+3. **全量 SMT 回归**：ADR-018 D3.b "worst-case fold" 被订正后，所有依赖该 fold 的 SMT 算例（task #18 sub-7/7 跑过的 32-SMC e2e）须全量回归。已知 `a0f5b99`（task #18 sub-7）commit 引入该 fold，可能其他 op 也踩过类似坑但未被发现。
+
+4. **Per-SMC stagger 与 IQ slot 占用二阶效应**：ADR-018 D3.e `add_chain_iq_propagation_axiom` 假设"沿途 SMC 同 cycle 占 IQ slot"（L139-142）。consumer op stagger 不直接影响 SHIFTUP 自身 IQ 占用（SHIFTUP fire 仍同步），但 consumer FPMUL 的 per-SMC stagger 会让 FPMUL IQ slot 在不同 SMC 落在不同 cycle，**资源 modulo 约束需要 per-SMC 重算**，否则可能 over-constrain。
+
+### v5 Open Questions（v4 OQ 校准）
+
+1. ~~SMC_31 是否真 bit-perfect？~~ **降级**（即便 SMC_31 对，SMC_1..30 仍全错位，D 已 reject；SMC_31 状态对 B 选型不再关键，但仍可作 B 落地后的回归基线）
+2. ~~方向 D 副作用~~ **关闭**（D reject）
+3. **`abs_t(FPMUL) - abs_t(a_read) = 34` vs axiom `lat_p = 32` 差 2 cycle 来源** —— **升级为 v5 高优先级阻塞项**：B 落地前必须解，否则 stagger 量取值无依据
+4. **bug #4（Auditor expected_val_map）独立性** —— 仍未触碰
+5. **ADR-018 Stage 2 D3.b 决策回溯（v4 §OQ 5）**：hco 自查标记 ADR-018 三/四审遗漏 producer-side holding 语义；ADR-020 v6 落地时需在 ADR-018 加 errata 反向链回
+
+### v5 hco 复核结论引
+
+> **给主对话**：reject 主对话当前的"短期 D / 长期 C"路径。D 不修 SMC_1..30，C 重定义硬件。B 是 ADR-018 D3.b 公式真正下推到 lowering 层，是 spec + sim + axiom 数学层唯一一致的修法。短期就走 B。
+
+### v5 References
+
+- 本 commit · ADR-020 v5 段（hco 复核 + B 选型 + 修法范围）
+- hco subagent 独立复核报告（本 session 触发，aeea859ea... agent id）
+- `docs/adr/ADR-018-multi-smc-scheduling-design.md:93-115` · D3.b 原始 per-SMC RAW 公式（**B 修法基础**）
+- `src/synthesis/axioms/dependency_axioms.py:53-60` · 当前 worst-case fold 实现（**待删订正点**）
+- `src/driver/emitter.py` · per-SMC stagger 实施目标点（具体行号 v6 落地时确认）
+- `hw_config/specs/units/shiftup.yaml:20-29, 50-55` · spec 真源（不动）
+- v4 §D7/D8（本文件 L491-512）· 4 方向 inventory（hco 否定主对话推荐路径）
+- v4 §OQ #3 · `abs_t` 差 2 cycle 来源 → **v5 升级高优先级阻塞项**
