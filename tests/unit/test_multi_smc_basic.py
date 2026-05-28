@@ -469,5 +469,68 @@ class TestPipelineRunnerSmcNumDispatch(unittest.TestCase):
         self.assertIsNone(self.runner._compute_smc_num(op))
 
 
+class TestPhysicalRunnerMultiSmcDispatch(unittest.TestCase):
+    """
+    ADR-018 v7 Stage 1 X (task #18 sub-6): physical_runner 据 sim_config.smc_num
+    分流到 _run_multi_smc (SystemCluster) 路径。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        project_root = Path(__file__).parent.parent.parent
+        sys.path.append(str(project_root))
+        sys.path.append(str(project_root / "sim"))
+
+    def test_single_smc_config_routes_to_parallelkernel(self):
+        """sim_config 无 smc_num (旧单 SMC layout) → 走 ParallelKernel 路径 (向后兼容)."""
+        import json
+        from unittest.mock import patch
+        from pathlib import Path as P
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = P(tmp)
+            (tmp_path / "smc_0").mkdir()
+            cfg = {"smc_id": 0, "iq_init": {}, "ur_init": {}, "tensors": [], "max_cycles": 1}
+            (tmp_path / "sim_config.json").write_text(json.dumps(cfg))
+            (tmp_path / "golden_data.npz").touch()  # 防 golden_file not found 早退
+
+            from smc_simulator.tools import physical_runner as pr
+            with patch.object(pr, "_run_multi_smc") as mock_multi:
+                # 不执行真 sim；ParallelKernel.run 可能失败但本测试只验路由
+                try:
+                    pr.run_physical_verification(str(tmp_path))
+                except Exception:
+                    pass
+                self.assertFalse(mock_multi.called,
+                    "smc_num 缺省 → 不应进 _run_multi_smc")
+
+    def test_multi_smc_config_routes_to_system_cluster(self):
+        """sim_config.smc_num >= 2 → 走 _run_multi_smc (SystemCluster) 路径."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path as P
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = P(tmp)
+            cfg = {
+                "smc_num": 4,
+                "smc_id_list": [0, 1, 2, 3],
+                "per_smc_iq_init": [{}] * 4,
+                "per_smc_ur_init": [{}] * 4,
+                "tensors": [],
+                "max_cycles": 1,
+            }
+            (tmp_path / "sim_config.json").write_text(json.dumps(cfg))
+
+            from smc_simulator.tools import physical_runner as pr
+            with patch.object(pr, "_run_multi_smc", return_value=True) as mock_multi:
+                pr.run_physical_verification(str(tmp_path))
+                mock_multi.assert_called_once()
+                args, _ = mock_multi.call_args
+                self.assertEqual(args[2], 4, "_run_multi_smc 应收 smc_num=4")
+
+
 if __name__ == "__main__":
     unittest.main()

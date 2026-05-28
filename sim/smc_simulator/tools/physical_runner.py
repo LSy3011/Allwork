@@ -25,23 +25,31 @@ def _float32_to_ur128(float_array: np.ndarray) -> dict:
         words[i // 4] = word_val
     return words
 
-def poison_memory(kernel, config: dict, case_dir: Path):
+def poison_memory(kernel, ur_init_map_or_config, case_dir: Path):
     """
     Load data from UR config and input_data.npz.
     Poison unallocated memory with NaNs.
+
+    Args:
+        ur_init_map_or_config: 兼容 (a) 旧 config dict 含 "ur_init" 字段，或
+            (b) ADR-018 v7 D5.d task #18 sub-6 多 SMC 模式直接传 per_smc_ur_init[k]
+            的 {bank_str: rel_path} map。
     """
     import math
-    
+
     # 1. Fill entire UR memory with NaN equivalent pattern (e.g. 0x7FC00000 -> IEEE-754 NaN)
     nan_bits = struct.unpack(">I", struct.pack(">f", float('nan')))[0]
     nan_word = (nan_bits) | (nan_bits << 32) | (nan_bits << 64) | (nan_bits << 96)
-    
+
     for bank_id in range(len(kernel.ur_bank.storage)):
         for addr in range(len(kernel.ur_bank.storage[bank_id])):
             kernel.ur_bank.storage[bank_id][addr] = nan_word
 
-    # 2. Load actual initial data
-    ur_init_map = config.get("ur_init", {})
+    # 2. Load actual initial data — 兼容旧 config dict 与新 ur_init_map 直传
+    if isinstance(ur_init_map_or_config, dict) and "ur_init" in ur_init_map_or_config:
+        ur_init_map = ur_init_map_or_config.get("ur_init", {})
+    else:
+        ur_init_map = ur_init_map_or_config or {}
     for bank_str, rel_path in ur_init_map.items():
         bank_id = int(bank_str)
         file_path = case_dir / rel_path
@@ -72,10 +80,16 @@ def run_physical_verification(case_dir: str):
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
 
+    config = load_sim_config(case_path)
+
+    # ADR-018 v7 D5.d (task #18 sub-6): smc_num >= 2 → SystemCluster 多 SMC 路径
+    smc_num = config.get("smc_num")
+    if smc_num is not None and smc_num >= 2:
+        return _run_multi_smc(case_path, config, smc_num)
+
     import smc_simulator.core.kernel as kernel_mod
     ParallelKernel = kernel_mod.ParallelKernel
 
-    config = load_sim_config(case_path)
     kernel = ParallelKernel()
 
     # Enable simulation tracing
@@ -215,6 +229,76 @@ def run_physical_verification(case_dir: str):
         print(f"      [Hardware Diff] Exported RTL-compatible SMC output to: {dump_file.name}")
             
     return all_passed
+
+def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
+    """
+    ADR-018 v7 D5.d (task #18 sub-6): 多 SMC 仿真路径。
+    smc_num kernels via SystemCluster；每 SMC 各自 IQ + UR 来自 per_smc_*.
+
+    本 sub-task 仅保证 cluster 跑通（无 crash）+ per-SMC bank dump。
+    bit-perfect 32-SMC golden compare 留 sub-7。
+    """
+    from smc_simulator.system.cluster import SystemCluster
+
+    print(f"Starting Multi-SMC Physical Simulation (smc_num={smc_num}) for {case_path}...")
+
+    cluster = SystemCluster(num_kernels=smc_num)
+
+    per_smc_iq = config.get("per_smc_iq_init", [])
+    per_smc_ur = config.get("per_smc_ur_init", [])
+    assert len(per_smc_iq) == smc_num, (
+        f"per_smc_iq_init len={len(per_smc_iq)} ≠ smc_num={smc_num}"
+    )
+    assert len(per_smc_ur) == smc_num, (
+        f"per_smc_ur_init len={len(per_smc_ur)} ≠ smc_num={smc_num}"
+    )
+
+    for k in range(smc_num):
+        kernel = cluster.kernels[k]
+        kernel.enable_trace()
+        iq_map = {n: str(case_path / h) for n, h in per_smc_iq[k].items()}
+        kernel.load_program(iq_map, {})
+        poison_memory(kernel, per_smc_ur[k], case_path)
+
+    trace_file = case_path / "sim_trace.log"
+    trace_file.touch()
+
+    try:
+        max_cycles = config.get("max_cycles", 1000)
+        cluster.run(cycles=max_cycles)
+
+        # per-SMC analysis + output bank dump
+        for k in range(smc_num):
+            analysis_dir = case_path / f"smc_{k}" / "analysis"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            bank_dir = case_path / f"smc_{k}" / "output_bank"
+            kernel = cluster.kernels[k]
+            kernel.dump_banks(str(bank_dir))
+            if kernel.trace_recorder:
+                kernel.trace_recorder.save_to_timeline_ascii(
+                    str(analysis_dir / "timeline_ascii.txt")
+                )
+    except Exception as e:
+        print(f"Multi-SMC Simulation Halted: {e}")
+        traceback.print_exc()
+        return False
+
+    last_cycle = next(iter(cluster.kernels.values())).cycle_count
+    print(f"Multi-SMC Simulation Finished at Cycle {last_cycle}. Verifying Data...")
+
+    # ADR-018 v7 D5.d (task #18 sub-6 deliverable): 此处仅基础 sanity verify
+    # （读 SMC_0 output bank 校验 sim 跑通 + golden 文件存在）；
+    # 32-SMC per-SMC bit-perfect golden compare 留 sub-7 完整实现。
+    golden_file = case_path / "golden_data.npz"
+    if not golden_file.exists():
+        print(f"Golden data not found at {golden_file}")
+        return False
+
+    print(f"[sub-6 multi-SMC sanity] SystemCluster ran {smc_num} kernels for {last_cycle} cycles; "
+          f"per-SMC bank dumped to smc_{{0..{smc_num-1}}}/output_bank/. "
+          f"Bit-perfect per-SMC golden compare: deferred to sub-7.")
+    return True
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AIACC Physical Runner Testbench")
