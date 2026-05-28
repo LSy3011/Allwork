@@ -1,0 +1,21 @@
+# ADR-018 v7 Stage 1 X · Output-stationary by N（per-SMC formula）
+# A 行经 SHIFTUP broadcast 到 32 SMC；每 SMC 持 B 的 1 列，算 C 的 1 列。
+# - a* (K=4 broadcast)：源在 SMC_0，SHIFTUP smc_id_en=PARAM_SMC_NUM-1=31 到 SMC_1..31
+# - b* (per-SMC partition)：每 SMC k 的 bank 1 持自己的 4 元素列
+# - y (per-SMC output)：每 SMC k 写自己的 bank 5
+# chain_reduce_depth 仅 parallel_dim=K 适用，本 yaml 不写。
+name: "matmul_parallel_n"
+parallel_dim: "N"
+formula: "a0*b0 + a1*b1 + a2*b2 + a3*b3"
+tensors:
+  a0: { bank: 0, offset: 0, role: "input",  precision: "fp32", stride: 4, smc_layout: "broadcast" }
+  a1: { bank: 0, offset: 1, role: "input",  precision: "fp32", stride: 4, smc_layout: "broadcast" }
+  a2: { bank: 0, offset: 2, role: "input",  precision: "fp32", stride: 4, smc_layout: "broadcast" }
+  a3: { bank: 0, offset: 3, role: "input",  precision: "fp32", stride: 4, smc_layout: "broadcast" }
+
+  b0: { bank: 1, offset: 0, role: "input",  precision: "fp32", stride: 4, smc_layout: "partitioned" }
+  b1: { bank: 1, offset: 1, role: "input",  precision: "fp32", stride: 4, smc_layout: "partitioned" }
+  b2: { bank: 1, offset: 2, role: "input",  precision: "fp32", stride: 4, smc_layout: "partitioned" }
+  b3: { bank: 1, offset: 3, role: "input",  precision: "fp32", stride: 4, smc_layout: "partitioned" }
+
+  y:  { bank: 5, offset: 0, role: "output", precision: "fp32", smc_layout: "partitioned" }
