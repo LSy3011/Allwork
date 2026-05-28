@@ -17,7 +17,9 @@ still_holds: partial
 > - **v2（同日下午）**：决策从 "iq_unit.py 状态机" 转向 "SHIFTUP chain 数据流时序"；H1/H2/H3/H4 待 cycle-level 调试
 > - **v3（同日晚 prior session）**：drill-down dump 后 **H1/H2/H3/H4 + H5/H6/H7 全排除**；真根因裂为 4 层独立 bug（input_data 双源 / Auditor parser 缺 smc_id / sim 真数值错 / expected_val_map trace_id 映射错）；bug #1/#2 修，bug #3/#4 留 v4
 > - **v4（同日晚 prior turn）**：bug #3 cycle-level dump 锁定 → **compiler axiom vs sim 实现语义不一致**：`dependency_axioms.py:56-60` SHIFTUP producer `lat_p += smc_id_en` 假设 chain 提供 N-cycle 缓冲；`shift_up_unit.py` 实现为 1-stage register（无 buffer）→ SMC_0 chain head 收到 a 的 iter 偏移 +(smc_num-1)=+31
-> - **v5（本版，同日晚 本 session）**：hco subagent 独立复核 4 方向 → **reject A/C/D，选 B**（emitter per-SMC stagger）。关键判读重定位 v4 误判：**spec yaml 是对的**（SHIFTUP 单拍 chain register 无 N-stage buffer 语义），**sim 是对的**（严格按 spec），**真错在 axiom 实现**（`dependency_axioms.py:56-60` 把 ADR-018 D3.b per-SMC RAW 公式 fold 成单 t_var worst-case）。hco 另揭 v4 未充分认识的：**SMC_1..30 chain 中段全部错位**（不只 SMC_0），方向 D 被彻底否决
+> - **v5（同日晚 prior session）**：hco subagent 独立复核 4 方向 → **reject A/C/D，选 B**（emitter per-SMC stagger）。关键判读重定位 v4 误判：**spec yaml 是对的**（SHIFTUP 单拍 chain register 无 N-stage buffer 语义），**sim 是对的**（严格按 spec），**真错在 axiom 实现**（`dependency_axioms.py:56-60` 把 ADR-018 D3.b per-SMC RAW 公式 fold 成单 t_var worst-case）。hco 另揭 v4 未充分认识的：**SMC_1..30 chain 中段全部错位**（不只 SMC_0），方向 D 被彻底否决
+> - **v5.1（同日晚 prior session）**：OQ #3 解（"差 2 cycle"来源 = base lat 边）+ B stagger 精确公式（`delta_k = (smc_id_en - k) × chain_stage_latency = 31 - k`）+ 链式传播范围审定（a 通路全 stagger / b/c partitioned 配套提前），代码全未动
+> - **v6（本版，2026-05-28 同日下一 session）**：hco subagent 独立复核 §OQ #1 选型（emitter 后处理 vs SMT 重算）→ **选 A 路径（emitter 后处理）+ 2 项硬性补丁**：P1（fold 公式注释订正语义，消除 "misleading 32" audit 误读）+ P2（emitter post-stagger 后必须复跑 ResourceAxioms 做 per-SMC verifier，否则 hex 层资源冲突 SMT 不知）。counter-evidence spike 测求解器代价（HCO 信心最低点）→ Δ ≈ 0%，理由 #3 弱化但不改选型（理由 #1 抽象层切分 / #2 已 per-SMC axiom 不重复造轮子 更根本）。本版状态 **Proposed**（决策证据已锁，实现未落）
 
 ## Context
 
@@ -804,4 +806,176 @@ for each consumer_op in DFG (topological order):
 - `hw_config/pipeline_delays.yaml:2-22` · UR_READ=1, RTOVR=1, SHIFTUP=1, FPMUL=4, FPADD=4 base latencies
 - `docs/adr/ADR-018-multi-smc-scheduling-design.md:99-103` · D3.b 原始 per-SMC 公式
 - `docs/adr/ADR-018-multi-smc-scheduling-design.md:139-153` · D3.e SHIFTUP IQ propagation（v5.1 OQ #3 关联）
+
+---
+
+## v6 · HCO OQ#1 复核（emitter 后处理 vs SMT 重算选型）+ counter-evidence spike（2026-05-28 同日下一 session · 本版本 Proposed）
+
+### 状态变更
+
+v5.1 §Open Question #1（B 修法 per-SMC stagger 应在 emitter 后处理层还是 SMT 求解层实现）→ 由 hco subagent 独立复核裁定，选 A 路径（emitter 后处理）+ 2 项硬性补丁。counter-evidence spike 实测确认 HCO 自标信心最低点（求解器代价）不构成 A 路径决定性论据，但抽象层切分 + 已 per-SMC axiom 不重复造轮子两条更根本理由保住选型。**本版 Proposed → emitter / axiom 代码全未动；hco 二次复核 + 全量回归通过后升 Accepted**。
+
+### Decision · 选 A 路径 + 补丁 P1 + 补丁 P2
+
+**A 路径**：SMT 求解器仍按现 fold `lat_p = 1 + smc_id_en × chain_stage_latency` 算单 t_var 统一 abs_t（与现 axiom 行为等价，求解器复杂度不变）；emitter 在 lowering 阶段对每条 op 在 SMC_k 输出时 subtract `delta_k = (smc_id_en - k) × chain_stage_latency`，按 v5.1 §"实施算法"（L760-772）+ 风险 #4（反向 BFS 传播 b/c partitioned 通路）做 forward topo + backward propagation 双 pass。
+
+**补丁 P1（doc-only · `dependency_axioms.py:53-60`）**：fold 公式**不动**，但注释扩写为多行明示：
+
+```
+lat_p in fold 表示 SMC_{smc_id_en} 数据到达 RTOVR 的 worst-case latency
+边界（含 chain 累加），不是 SHIFTUP 自身的 unit lat。emitter post-stagger
+阶段会按 SMC_k 减 delta_k = (smc_id_en - k) × chain_stage_latency 修正
+实际 fire cycle。详见 ADR-020 v6 §HCO OQ#1 复核 + ADR-018 D3.b errata。
+```
+
+**补丁 P2（emitter 新增 `_verify_post_stagger_resources`）**：emitter post-stagger 后必须复跑 ResourceAxioms 做 per-SMC sanity check。HCO 已确认工程上可行（构造 mock t_vars dict 把 `abs_t_at_SMC_k` 当作 `t_vars["op@smc_k"]` 喂入 ResourceAxioms 类接口）。**否则 hex 层资源冲突 SMT 不知**（具体反例见 §HCO 风险 #2）。
+
+### HCO 复核摘要（5 条核心理由）
+
+#### 理由 1 · SMT 抽象层与 emitter 抽象层的职责切分（最强论据）
+
+ADR-018 D5.b/D5.c 已立"SMC 维度 ≠ SMT 求解维度"先例：
+
+- **SMT 视图**：DFG 算子（trace_id）的逻辑时序——单 op 1 个 t_var 求出何时 fire
+- **emitter 视图**：把单 op 物化为 SMC_NUM 份 hex（lowering），数据流跨 SMC 通过物理 chain 延迟到达
+
+`src/driver/emitter.py:139-149` 已经在 lowering 阶段做 broadcast 复制 + chain 沿途 follower SMC payload data 清 0（D5.c）。**SHIFTUP/SHIFTDN 的 SMC 维度从来就不在 SMT 里**——没有 32 个 SHIFTUP t_var，只有 1 个 t_var + emitter 复制 32 份。"per-SMC stagger 也是 emitter 维度"是同质问题。
+
+路径 B 反其道而行：把 lowering 的 broadcast 物理事实回灌成 32 × t_var per op，破坏 ADR-018 已经稳定的"SMT 守逻辑层 / emitter 守 SMC 物理层"分层。**这是抽象层错位，不是 cost 问题**。
+
+#### 理由 2 · 资源 modulo per-SMC 已在 axiom 层实现（B 重复造轮子）
+
+`resource_axioms.py:46-54`（add_modulo_constraint）、`:172-188`（add_bank_conflict_axiom）、`:343-387`（add_chain_iq_propagation_axiom）已全部按 `(u_type, smc_id)` / `(smc_id, bid)` / `(chain_type, smc_k)` 二维 key 分池——**SMC 维度的资源独立性早在 ADR-018 D2 落定**。
+
+也就是说：SMT 已经按"每 SMC 私有 IQ / private Bank"建模资源，**唯一漏掉的就是 dependency_axioms.py:56-60 那一条 SHIFTUP→RTOVR 边的 latency**。路径 B 要把所有 op 的 t_var 都 per-SMC 化才能让那一条边真值化，但其余资源 axiom 早就 per-SMC 了——这是把一根筋的局部偏差扩大成全模型重构，违反"最小变更修复偏差"原则。
+
+#### 理由 3 · 求解器复杂度估算（HCO 信心最低点 → v6-3 spike 已弱化此论据）
+
+`ucode_solver.py:354` 创建 t_vars 一次 `O(ops)`。当前 fma_parallel_n 65 ops → 65 个 t_var。
+
+路径 B 下：
+- t_vars × 32 = 2080 个整数变量
+- `add_iq_latch_protect_axiom`（`physical_axioms.py:69-110`）的 `O(N²) consumer-pair` 在 cross-SMC 下退化为 O((N×32)²) = O(N²×1024)（但已 skip cross-SMC pair `:81-83`，实际不膨胀）
+- z3 wall-clock 上界估算（HCO 原始判断）：SAT 阶段 100s–10min 量级
+
+**v6-3 spike 实测结果（见下节）**：变量数膨胀本身不是 z3 瓶颈（deterministic 约束零成本）。**理由 #3 部分弱化**，但理由 #1/#2 仍保住选型。
+
+#### 理由 4 · "Misleading 32" 不是 B 才能解（A 加 P1 等价解）
+
+v5 hco 提到 B 的卖点是"axiom 不再 lie"。但 *axiom 谎言 = fold 公式的物理语义错位*——只要把 dependency_axioms.py:60 那行注释 + 边语义订正为 "lat_p = worst-case `1 + smc_id_en × chain_stage_latency`，即 SMC_{smc_id_en} 到达时间，作为单 t_var 必须满足的最晚边界"，axiom 就不再 misleading，只是 *conservative*——而保守是 SMT 合法行为（safe over-approximation）。emitter 后处理减去 delta_k 等价于"事后说：SMC_k 实际比这个 worst-case 早 delta_k cycle 完成"，这是 *refinement after-the-fact*，符合 ADR-018 lowering 范式。
+
+#### 理由 5 · 回归边界
+
+路径 A 改动局限 emitter 后处理 + dependency_axioms 注释订正——按 v5.1 §"实施算法" L757-772 算 stagger，**不动求解器**。回归只需重跑 fma_parallel_n（32-SMC SHIFTUP-broadcast 算子）+ horner / activation / matmul（非 chain，本应 delta = 0 无影响）。如果 stagger 算法在 `delta_k = 0` 时输出与原 emitter 字节级一致（这是必须的属性测试），那么非 chain 算子的回归是 free pass。
+
+路径 B 改 `t_vars` 数据结构 → backend.py validate_physical_schedule、emit_from_instructions、`schedule[op.trace_id]` 全链路（unit_assignments 注入 latch_time `:467-473`）都要适配 per-SMC schedule。所有算子的 SAT/UNSAT 边界都可能漂动（II 重算 ⇒ v5.1 OQ #2）。
+
+### HCO 风险点（按严重度排序）
+
+#### 风险 #1（高）· "fold misleading 32" 误导后续 audit
+`dependency_axioms.py:60` 当前的 fold `lat_p += smc_id_en × chain_stage_latency` 在 fma_parallel_n 下数值 = 32，但 **物理上没有任何一条边真有 32 cycle latency**——SHIFTUP 自己只有 1 cycle base lat。下次有人读 SMT compiler_schedule.json 看到 SHIFTUP→RTOVR 边权 = 32 时，可能误判为 "SHIFTUP unit 有 32 cycle latency" → 触发错误的 hw_spec 修改。
+
+**A 路径回归断言点（补丁 P1）**：
+- `dependency_axioms.py:53-60` 注释扩写为多行明示语义（见 §Decision 补丁 P1 原文）
+- 在 compiler_schedule.json 输出层附 `physical_meaning: "worst_case_smc_{smc_id_en}_arrival"` 字段（v6-6 task 处理）
+
+#### 风险 #2（高）· OQ #3 资源 modulo per-SMC 重算 vs hex 层资源冲突
+v5.1 OQ #3 已识别但**没解**：consumer FPMUL 在 SMC_0 落 cycle 5、SMC_31 落 cycle 35，**modulo II=1 下 r=0 vs r=0 仍同 slot**（fma_parallel_n 现状 II=1），但 II>1 时会落到不同 slot。SMT 现在按统一 t_var 算 modulo，emitter post-stagger 后 hex 层实际 r 可能 ≠ SMT 算的 r。
+
+**A 路径下的具体反例**：
+- 假设某未来算子 II=8，2 个 SHIFTUP-broadcast 后下游各跟 1 个 UR_WRITE，落同 Bank
+- SMT 按 fold 算 t_a=40, t_b=44 → r_a=0, r_b=4 → bank_gap 通过
+- emitter post-stagger 后 SMC_0：t_a → 9, t_b → 13 → 仍 r_a=1, r_b=5（II=8）
+- 但 SMC_15：t_a → 25, t_b → 29 → r_a=1, r_b=5
+- 看似 OK，但跨 SMC 同 Bank 共享场景（如 broadcast 写回）会 r_a 不一致 → hex 层 bank 冲突，SMT 不知
+
+→ 这是补丁 P2 的存在理由：**emitter post-stagger 后必须复跑资源 axiom 做 sanity check**。
+
+**A 路径回归断言点（补丁 P2）**：
+- `src/driver/emitter.py` 加 `_verify_post_stagger_resources(stream_per_smc)`，逻辑是把 ResourceAxioms 重新跑一遍但输入是 `abs_t_at_SMC_k` 而非 SMT t_var
+- 反证测试（v6-7）：构造 2 SHIFTUP-broadcast + 1 UR_WRITE 同 Bank，stagger 后某 SMC r 冲突 → verifier 必须 FAIL
+
+#### 风险 #3（中）· II 真值（OQ #2）
+A 路径下 SMT 算的 II 是基于 worst-case fold 的保守值。real per-SMC II 可能更小（SMC_0 自己 critical path 比 fold 短）。
+
+- A 接受 *over-estimation* —— II 偏高是 safe over-approximation
+- B 路径下 II 真正反映 per-SMC critical path —— 可能解锁更小 II
+
+**判断**：II 保守 = 算子吞吐打折但不出错。II 真值需求是 *optimization*，不是 *correctness*。v6 阶段先求对，再求优。**接受 A 的 II 保守是正确选型**。
+
+#### 风险 #4（中）· stagger 算法的拓扑反向传播
+v5.1 §"b/c 通路 partitioned 配套提前" 已审定 b_read/c_read 也要 stagger。emitter 需要做**反向 BFS 传播**——consumer 的 stagger 反传到 producer。这与 v5.1 实施算法 L760-772 的 forward topo + max 不完全一致。
+
+**A 路径回归断言点**：
+- 实施时算法须为：`pass 1 forward topo (a 通路 stagger 计算) → pass 2 backward propagation (b/c 通路 producer 提前)`
+- 反证测试：fma_parallel_n 32-SMC 修后 `b_read_4 SMC_0 abs_t = 3`（v5.1 L750）必须实测验证
+
+#### 风险 #5（低）· 调试 mental mapping
+A 路径下 SMT compiler_schedule.json 显示统一 abs_t，sim trace 显示 per-SMC fire cycle，**调试需 mental mapping `sim_t = smt_t - delta_k`**。
+
+**缓解**（v6-6 task）：
+- emitter 在 `physical_instructions.json` 多写一列 `original_smt_abs_t` + `delta_k` + `effective_smc_k_abs_t`
+- ADR-020 v6 文档化这个 mapping
+
+### v6-3 Spike · Counter-evidence 实测（HCO 信心最低点验证）
+
+#### Spike 设计
+
+按 HCO §counter-evidence 推荐：在 develop 分支临时 patch `dependency_axioms.py:56-60`，对 SHIFTUP→RTOVR 边引入 `K=smc_id_en+1=32` 个 deterministic per-SMC t_var（约束 `t_smc_k == t_prod + 1 + k × chain_stage_latency`），不删原 fold（保留 latch_vars 依赖不破），纯测变量数膨胀代价。跑 `python3 verification_v2/main_verify.py --op fma_parallel_n --mode smt-unit --quiet --no-review` 各 3 次。
+
+#### Spike 实测
+
+| 指标 | Baseline (无 spike) | Spike (+32 deterministic per-SMC t_var) |
+|---|---|---|
+| Run 1 | 23.2s (cold) | 20.4s |
+| Run 2 | 20.4s | 20.2s |
+| Run 3 | 20.4s | 20.5s |
+| **稳态均值（排 cold）** | **20.4s** | **20.3s** |
+| Δ | — | **≈ 0% (噪音范围)** |
+
+#### Spike 结论
+
+变量数本身**不是 z3 瓶颈**（deterministic 约束一旦 base t_var 固定，per-SMC t_var 立即决定，不引入新搜索分支）。HCO 理由 #3 **部分论据被推翻**。
+
+#### Spike 局限
+
+1. 仅 +32 deterministic 约束（z3 不必搜索）；真 B 路径下 per-SMC t_var 是 *non-deterministic*（参与求解，与 resource_axioms 等其他 axiom 交互）
+2. fma_parallel_n 仅 1 条 SHIFTUP→RTOVR 边；真 B 下 ~65 ops × 32 SMC = 2080 t_var
+3. HCO 自己已承认 `iq_latch_protect` cross-SMC pair 已 skip（`physical_axioms.py:81-83`，不会 O(N²×SMC²) 膨胀）
+
+#### Spike 对选型的影响
+
+理由 #3 **弱化 → 不再是 A vs B 的决定性论据**。但**最终选 A 不变** —— HCO 理由 #1（抽象层切分）+ #2（已 per-SMC axiom 不重复造轮子）是更根本的论据，与求解器代价无关。
+
+#### Spike 清理
+
+`git restore src/synthesis/axioms/dependency_axioms.py`；pytest 65/65 ✓；工作树 clean；spike patch 不入 commit。
+
+### v6 Implementation 清单（emitter / axiom 代码全未动 · Proposed 状态待 v6 落地后转 Accepted）
+
+| # | 文件 | 改动 | 风险 | 必经 |
+|---|---|---|---|---|
+| 1 | `src/synthesis/axioms/dependency_axioms.py:53-60` | 补丁 P1：fold 注释扩写（doc-only，公式不动） | 低 | hco 二次复核 |
+| 2 | `src/driver/emitter.py` | 新增 `_compute_per_smc_stagger(stream)`（forward topo + backward BFS 双 pass） | 高 | hco 二次复核 |
+| 3 | `src/driver/emitter.py` | 补丁 P2：新增 `_verify_post_stagger_resources(per_smc_stream)`（复跑 ResourceAxioms） | 高 | hco 二次复核 |
+| 4 | `src/driver/emitter.py` 输出 | `physical_instructions.json` 加 `original_smt_abs_t` / `delta_k` / `effective_smc_k_abs_t` 三列（debug aid） | 低 | – |
+| 5 | `tests/unit/test_smt_adversarial.py` | 新增 stagger 用例 + P2 verifier 反证 case | 中 | – |
+| 6 | `docs/adr/ADR-018-multi-smc-scheduling-design.md:93-103` | D3.b 段加 errata 标记（指向本 v6） | 低 | – |
+| 7 | 回归 | fma_parallel_n 32-SMC + horner + activation + matmul + grep SHIFTUP 全算子 + pytest 65→≥65 + II 回归 | – | – |
+| 8 | ADR-020 v6 § Implementation 段补具体行号 + 状态升 Accepted | – | – | hco 三审 |
+
+### v6 Open Questions
+
+1. **v5.1 OQ #2（II 真值）继承**：A 路径接受 II over-approximation 作为 safe 边界。若 future profiling 显示 II 保守过头影响吞吐，再考虑分阶段 B（HCO 不推荐分阶段 B，工程上不如直接 A + emitter）。**状态：Deferred（不阻塞 v6 落地）**
+2. **v5.1 OQ #3（资源 modulo per-SMC 重算）**：补丁 P2 verifier 解决。**状态：v6 落地后 closed by P2**
+3. **stagger 算法 `delta_k = 0` 时字节级一致性属性**（HCO 理由 #5）：实施时须显式断言 horner / activation / matmul 等非 chain 算子 emitter 输出与 v5.1 baseline 字节级一致。**状态：Open（v6-7 反证测试覆盖）**
+
+### v6 References
+
+- 本 session HCO 复核报告（agentId `a0004457276a40d50`，markdown 输出已嵌入本节）
+- `dependency_axioms.py:56-60` · 补丁 P1 目标行
+- `src/driver/emitter.py:139-149` · D5.c broadcast 复制现有 lowering 先例（与 P2 同模板）
+- `src/synthesis/axioms/resource_axioms.py:46-54 / 172-188 / 343-387` · 已 per-SMC 资源 axiom（理由 #2 证据）
+- `src/synthesis/axioms/physical_axioms.py:81-83` · iq_latch_protect cross-SMC skip（理由 #3 / spike 局限 #3）
+- `docs/adr/ADR-018-multi-smc-scheduling-design.md:139-153` · D5.b/D5.c lowering 先例（理由 #1）
 - v5 §D11 修法范围 · v6 落地必动/不动清单（v5.1 不扩范围）
