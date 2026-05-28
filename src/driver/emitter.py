@@ -17,17 +17,30 @@ class LIRPacker:
         self.hw_spec = HardwareSpec.load(config_dir)
         self.verbosity = verbosity
 
-    def emit_from_instructions(self, instructions: List[PhysicalInstruction], case_root: str, program=None):
+    def emit_from_instructions(self, instructions: List[PhysicalInstruction], case_root: str, program=None, smc_num: int = None):
+        """
+        ADR-018 v7 D5.a/d 入口（N=1 默认向后兼容；N>1 多 SMC 模式 dispatch）。
+
+        Args:
+            smc_num: None / 1 → 单 SMC 路径（旧 smc_0/ layout）；>=2 → 多 SMC 路径（smc_{k}/ layout）
+        """
+        if smc_num is None or smc_num == 1:
+            return self._emit_single_smc(instructions, case_root, program)
+        else:
+            return self._emit_multi_smc(instructions, case_root, program, smc_num)
+
+    def _emit_single_smc(self, instructions: List[PhysicalInstruction], case_root: str, program=None):
+        """N=1 单 SMC emit 路径（ADR-018 v7 D5.a 向后兼容）。"""
         root = Path(case_root)
         smc0 = root / "smc_0"
         ur_dir, bank_dir, analysis = smc0/"ur_data", smc0/"output_bank", smc0/"analysis"
         for d in [smc0, ur_dir, bank_dir, analysis]: os.makedirs(d, exist_ok=True)
-        
+
         for old_hex in smc0.glob("iq_*.hex"):
             old_hex.unlink()
-        
+
         (root / "sim_trace.log").touch()
-        
+
         iq_buckets: Dict[str, List[PhysicalInstruction]] = {}
         for instr in instructions:
             iq_buckets.setdefault(instr.iq_name, []).append(instr)
@@ -38,7 +51,7 @@ class LIRPacker:
             lookup_type = self._get_lookup_type(iq_name)
             total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type)
             hex_chars = (total_bits + 3) // 4
-            
+
             hex_lines = []
             for instr in stream:
                 is_body_stage = (instr.stage == "BODY")
@@ -50,11 +63,11 @@ class LIRPacker:
                     **instr.header.to_dict()
                 )
                 hex_lines.append(f"{val:0{hex_chars}x}")
-            
+
             hex_file_name = f"iq_{iq_name}.hex"
             with open(smc0 / hex_file_name, "w") as f:
                 f.write("\n".join(hex_lines) + "\n")
-            
+
             iq_init[iq_name.replace("_", "-")] = f"smc_0/{hex_file_name}"
 
         # 🛸 [V5.1 FIX] 动态获取 Bank 数量，不再死磕 range(8)
@@ -66,12 +79,139 @@ class LIRPacker:
             "max_cycles": DEFAULT_MAX_CYCLES,
             "tensors": []
         }
-        
+
         if program:
             self._handle_program_data(program, ur_dir, sim_conf)
 
         with open(root / "sim_config.json", "w") as f:
             json.dump(sim_conf, f, indent=2)
+
+    def _emit_multi_smc(self, instructions: List[PhysicalInstruction], case_root: str, program, smc_num: int):
+        """
+        N>1 多 SMC emit 路径（ADR-018 v7 D5.a/d）。
+        - 同一份 instructions 复制到 smc_{k}/ k ∈ [0, smc_num)
+        - payload 中 SMC_ID 字段填本机 k（ADR-018 D5.a）
+        - LOGIC SMC_ID 4-bit 安全 fail-fast（smc_num > 16 时 LOGIC 会撞 mask 上界）
+        - smc_id_en 字段不动（由 SMT solver 解出后已注入 instr.payload；D5.b 阶段完整支持）
+        - broadcast 多 hex 分发（沿途 SMC_0..smc_id_en 同 cycle emit + SMC_k k>0 data 填 0）由 D5.c 阶段实现
+        - sim_config.json 扩展 per_smc layout（D5.d）
+        """
+        root = Path(case_root)
+        bank_num = getattr(self.hw_spec.params, "PARAM_UR_BANK_NUM", 8)
+
+        # 准备 per-SMC sim_config 元数据
+        sim_conf = {
+            "smc_num": smc_num,
+            "smc_id_list": list(range(smc_num)),
+            "per_smc_iq_init": [],     # List[Dict[iq_name, hex_path]]，index = smc_id
+            "per_smc_ur_init": [],     # List[Dict[bank_id, hex_path]]
+            "max_cycles": DEFAULT_MAX_CYCLES,
+            "tensors": []
+        }
+
+        (root / "sim_trace.log").touch()
+
+        # 按 iq_name 分桶（所有 SMC 共享同一份 instruction 集，按 SMC_ID 在 payload 注入区分）
+        iq_buckets: Dict[str, List[PhysicalInstruction]] = {}
+        for instr in instructions:
+            iq_buckets.setdefault(instr.iq_name, []).append(instr)
+
+        for smc_id in range(smc_num):
+            smc_dir = root / f"smc_{smc_id}"
+            ur_dir = smc_dir / "ur_data"
+            for d in [smc_dir, ur_dir, smc_dir/"output_bank", smc_dir/"analysis"]:
+                os.makedirs(d, exist_ok=True)
+            for old_hex in smc_dir.glob("iq_*.hex"):
+                old_hex.unlink()
+
+            iq_init = {}
+            for iq_name, stream in iq_buckets.items():
+                stream.sort(key=lambda x: x.abs_t)
+                lookup_type = self._get_lookup_type(iq_name)
+                total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type)
+                hex_chars = (total_bits + 3) // 4
+
+                # LOGIC 4-bit SMC_ID 安全检查（modules.yaml line 67 LOGIC SMC_ID = 4 bit）
+                self._check_smc_id_field_width(lookup_type, smc_id)
+
+                hex_lines = []
+                for instr in stream:
+                    is_body_stage = (instr.stage == "BODY")
+                    # 注入本 SMC 的 SMC_ID 字段（BitPacker 自动按 module.code_fields 查找匹配字段）
+                    payload_per_smc = self._inject_smc_id(instr.payload, lookup_type, smc_id)
+                    val = BitPacker.pack_capsule(
+                        spec=self.hw_spec,
+                        unit_type=lookup_type,
+                        payload_dict=payload_per_smc,
+                        is_body=is_body_stage,
+                        **instr.header.to_dict()
+                    )
+                    hex_lines.append(f"{val:0{hex_chars}x}")
+
+                hex_file_name = f"iq_{iq_name}.hex"
+                with open(smc_dir / hex_file_name, "w") as f:
+                    f.write("\n".join(hex_lines) + "\n")
+
+                iq_init[iq_name.replace("_", "-")] = f"smc_{smc_id}/{hex_file_name}"
+
+            sim_conf["per_smc_iq_init"].append(iq_init)
+            sim_conf["per_smc_ur_init"].append(
+                {str(b): f"smc_{smc_id}/ur_data/bank{b}.hex" for b in range(bank_num)}
+            )
+
+            if program:
+                # 当前 program data 只复制到 SMC_0（per-SMC 数据切片由 Stage 2 K-partition 后续 ADR 处理）
+                if smc_id == 0:
+                    self._handle_program_data(program, ur_dir, sim_conf)
+                else:
+                    # 其他 SMC 给空 bank.hex（默认 0），保持 sim_config layout 一致
+                    for b_id in range(bank_num):
+                        (ur_dir / f"bank{b_id}.hex").touch()
+
+        with open(root / "sim_config.json", "w") as f:
+            json.dump(sim_conf, f, indent=2)
+
+    def _check_smc_id_field_width(self, lookup_type: str, smc_id: int):
+        """
+        ADR-018 v7 D5.a binding：LOGIC SMC_ID 4-bit 特例 fail-fast。
+        其他单元 SMC_ID 5-bit 容纳 0..31 没问题；LOGIC 4-bit 上限 15。
+        """
+        u_type = lookup_type.upper().replace("-", "_")
+        if "UR_R" in u_type: u_type = "UR_READ"
+        if "UR_W" in u_type: u_type = "UR_WRITE"
+        if u_type not in self.hw_spec.modules:
+            return
+        module = self.hw_spec.modules[u_type]
+        for field in module.code_fields:
+            if field.name.upper() == "SMC_ID":
+                max_val = (1 << field.bits) - 1
+                if smc_id > max_val:
+                    raise ValueError(
+                        f"[ADR-018 D5.a] unit '{u_type}' SMC_ID field width = {field.bits} bit "
+                        f"(max {max_val}); 但 emitter 要求 SMC_ID = {smc_id}，"
+                        f"silent truncate 会导致 hex 错误。增加 SMC_ID 字段位宽或重新设计算子分配。"
+                    )
+                break
+
+    def _inject_smc_id(self, payload: Dict[str, Any], lookup_type: str, smc_id: int) -> Dict[str, Any]:
+        """
+        ADR-018 v7 D5.a：复制 payload 并注入 SMC_ID 字段（深拷贝防止跨 SMC 污染）。
+        仅当 module.code_fields 包含 SMC_ID 字段时才注入；smc_id_en 字段不动（D5.b 处理）。
+        """
+        u_type = lookup_type.upper().replace("-", "_")
+        if "UR_R" in u_type: u_type = "UR_READ"
+        if "UR_W" in u_type: u_type = "UR_WRITE"
+        if u_type not in self.hw_spec.modules:
+            return payload
+
+        module = self.hw_spec.modules[u_type]
+        has_smc_id = any(f.name.upper() == "SMC_ID" for f in module.code_fields)
+        if not has_smc_id:
+            return payload
+
+        new_payload = copy.deepcopy(payload)
+        new_payload["SMC_ID"] = smc_id
+        return new_payload
 
     def _get_lookup_type(self, iq_name: str) -> str:
         """
