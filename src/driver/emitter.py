@@ -136,9 +136,17 @@ class LIRPacker:
 
                 hex_lines = []
                 for instr in stream:
+                    # ADR-018 v7 D5.c: SHIFTUP/SHIFTDN chain 分发——smc_id > smc_id_en 跳过 emit
+                    # 非沿途 SMC 不持有该 chain 指令 (IQ 流不增加此行；PC 独立推进同步)
+                    if self._should_skip_chain_instr(instr, smc_id):
+                        continue
+
                     is_body_stage = (instr.stage == "BODY")
-                    # 注入本 SMC 的 SMC_ID 字段（BitPacker 自动按 module.code_fields 查找匹配字段）
+                    # 注入本 SMC 的 SMC_ID 字段 + D5.c 沿途 SHIFTUP broadcast 的 SMC_k>0 data 清 0
                     payload_per_smc = self._inject_smc_id(instr.payload, lookup_type, smc_id)
+                    payload_per_smc = self._zero_broadcast_data_for_followers(
+                        payload_per_smc, instr, smc_id
+                    )
                     val = BitPacker.pack_capsule(
                         spec=self.hw_spec,
                         unit_type=lookup_type,
@@ -192,6 +200,49 @@ class LIRPacker:
                         f"silent truncate 会导致 hex 错误。增加 SMC_ID 字段位宽或重新设计算子分配。"
                     )
                 break
+
+    def _should_skip_chain_instr(self, instr: PhysicalInstruction, smc_id: int) -> bool:
+        """
+        ADR-018 v7 D5.c：SHIFTUP/SHIFTDN chain 指令在 smc_id > smc_id_en 时跳过 emit。
+        非沿途 SMC 不持有该 chain 指令，IQ stream 自然不增加此行；PC 独立推进保证沿途同步。
+        - 非 SHIFTUP/SHIFTDN op 不影响（return False）
+        - smc_id_en 缺省 PARAM_SMC_NUM-1（全沿途，等价不跳过）
+        """
+        if instr.op_type.upper() not in ('SHIFTUP', 'SHIFTDN'):
+            return False
+        # payload 中 smc_id_en 字段命名小写（ADR-019 D1/D2）
+        smc_id_en = instr.payload.get('smc_id_en')
+        if smc_id_en is None:
+            # 缺省：全沿途广播（PARAM_SMC_NUM - 1）
+            smc_id_en = self.hw_spec.params.PARAM_SMC_NUM - 1
+        return smc_id > int(smc_id_en)
+
+    def _zero_broadcast_data_for_followers(
+        self, payload: Dict[str, Any], instr: PhysicalInstruction, smc_id: int
+    ) -> Dict[str, Any]:
+        """
+        ADR-018 v7 D5.c：SHIFTUP broadcast 沿途 SMC_k (k>0) 的 data 字段填 0。
+        硬件 spec 规定：SMC_k>0 的 CRU_SHIFTUP_I 接上游不接本地 data，故 data 字段值无关。
+        显式约定填 0 避免 silent bug（如 emitter 错把上一个 SMC 的 data 复制过来）。
+
+        - 仅对 SHIFTUP op 且 broadcast=1 且 smc_k>0 触发
+        - SHIFTDN 无 broadcast 字段（OQ-5 确认），不适用
+        - SHIFTUP broadcast=0 (P2P)：data 来源仍是 SMC_0 chain head，逻辑同 broadcast=1，
+          沿途 SMC_k>0 的 data 也无意义，统一清 0
+        """
+        if instr.op_type.upper() != 'SHIFTUP':
+            return payload
+        if smc_id == 0:
+            return payload
+        # SMC_k > 0 SHIFTUP：data 字段填 0
+        if 'data' in payload or 'DATA' in payload:
+            new_payload = dict(payload)
+            if 'data' in new_payload:
+                new_payload['data'] = 0
+            if 'DATA' in new_payload:
+                new_payload['DATA'] = 0
+            return new_payload
+        return payload
 
     def _inject_smc_id(self, payload: Dict[str, Any], lookup_type: str, smc_id: int) -> Dict[str, Any]:
         """

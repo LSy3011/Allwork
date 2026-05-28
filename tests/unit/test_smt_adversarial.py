@@ -251,5 +251,83 @@ class TestSMTRefutation(unittest.TestCase):
             msg="II=1 同 FPADD 实例同 slot 必 UNSAT；若 SAT 则 add_resource_constraint 缺 ALU 排他")
 
 
+class TestMultiSMCAxioms(unittest.TestCase):
+    """
+    ADR-018 v7 Stage 1 multi-SMC axiom-triggering tests.
+
+    通过 op.metadata 注入 smc_id / broadcast / smc_id_en 字段 trigger D2/D3.d/D3.e axiom。
+    依赖之前的 N=1 baseline 测试集（同 SMC 行为不变）。
+    """
+
+    def setUp(self):
+        self.spec = HardwareSpec.load("hw_config")
+        self.synthesizer = UCodeSynthesizer(self.spec)
+
+    def _assert_unsat(self, ops, II, msg):
+        status, _ = self.synthesizer._solve_for_ii_with_units(ops, II=II)
+        self.assertEqual(status, SolverStatus.UNSAT, msg)
+
+    def _assert_sat(self, ops, II, msg):
+        status, _ = self.synthesizer._solve_for_ii_with_units(ops, II=II)
+        self.assertEqual(status, SolverStatus.SAT, msg)
+
+    def test_cross_smc_bank_non_conflict(self):
+        """
+        ADR-018 v7 D2: 跨 SMC 同 bank_id 不同 SMC → 不同物理 Bank → 应 SAT。
+        2 个 UR_READ：(smc_id=0, bank=2) vs (smc_id=1, bank=2) at II=1 → SAT
+        """
+        b = MIROpBuilder()
+        b.make_op("UR_READ", "r_smc0", RT.UR_READ, [], "R0", bank=2, smc_id=0)
+        b.make_op("UR_READ", "r_smc1", RT.UR_READ, [], "R1", bank=2, smc_id=1)
+        ops = b.get_dfg()
+        for op in ops:
+            op.metadata["manual_bank"] = 2
+
+        self._assert_sat(ops, II=1,
+            msg="跨 SMC 同 bank_id 不冲突（不同物理 Bank）→ II=1 应 SAT；"
+                "若 UNSAT 则 D2 bank_conflict key (smc_id, bid) 维度扩展未生效")
+
+    def test_same_smc_bank_conflict_still_unsat(self):
+        """ADR-018 v7 D2: 同 SMC 同 bank 仍按 ADR-008/009 互斥 (旧行为保留)"""
+        b = MIROpBuilder()
+        b.make_op("UR_READ", "r_a", RT.UR_READ, [], "RA", bank=2, smc_id=0)
+        b.make_op("UR_READ", "r_b", RT.UR_READ, [], "RB", bank=2, smc_id=0)
+        ops = b.get_dfg()
+        for op in ops:
+            op.metadata["manual_bank"] = 2
+
+        self._assert_unsat(ops, II=1,
+            msg="同 SMC 同 bank 同 II=1 必 UNSAT (D2 旧行为不变)")
+
+    def test_broadcast_unique_source_at_ii_1(self):
+        """
+        ADR-018 v7 D3.d: 2 个 SHIFTUP broadcast=1 同 modulo slot 0 → UNSAT (At-Most-1 per cycle)
+        """
+        b = MIROpBuilder()
+        b.make_op("SHIFTUP", "bc_0", RT.SHIFTUP, [], "BC0",
+                  broadcast=1, smc_id_en=31, smc_id=0)
+        b.make_op("SHIFTUP", "bc_1", RT.SHIFTUP, [], "BC1",
+                  broadcast=1, smc_id_en=31, smc_id=0)
+        ops = b.get_dfg()
+
+        self._assert_unsat(ops, II=1,
+            msg="2 个 SHIFTUP broadcast=1 at II=1 同 slot → 应 UNSAT (D3.d 唯一源)")
+
+    def test_chain_iq_propagation_at_ii_1(self):
+        """
+        ADR-018 v7 D3.e: 2 个 SHIFTUP smc_id_en=3 沿途 SMC_0..3 都消耗 chain IQ slot；
+        at II=1 同 slot 必冲突 → UNSAT
+        """
+        b = MIROpBuilder()
+        b.make_op("SHIFTUP", "ch_0", RT.SHIFTUP, [], "CH0",
+                  broadcast=0, smc_id_en=3, smc_id=0)
+        b.make_op("SHIFTUP", "ch_1", RT.SHIFTUP, [], "CH1",
+                  broadcast=0, smc_id_en=3, smc_id=0)
+        ops = b.get_dfg()
+
+        self._assert_unsat(ops, II=1,
+            msg="2 SHIFTUP 沿途 SMC_0..3 都占同 chain IQ slot → UNSAT (D3.e)")
+
+
 if __name__ == "__main__":
     unittest.main()

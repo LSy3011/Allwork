@@ -142,6 +142,61 @@ class TestEmitterMultiSMC(unittest.TestCase):
             self.assertEqual(len(set(hexes)), 4,
                 f"4 SMC 的 FPMUL hex 应互不相同 (SMC_ID 注入)，实际: {hexes}")
 
+    def test_broadcast_shiftup_distribution(self):
+        """
+        ADR-018 v7 D5.c: broadcast SHIFTUP smc_id_en=3，N=8 时仅 SMC_0..3 emit；
+        SMC_4..7 跳过此 instr。沿途 SMC_k>0 data 字段填 0。
+        """
+        instr = PhysicalInstruction(
+            iq_name='shiftup',
+            header=SMIHeader(),
+            payload={'data': 0xdeadbeef, 'broadcast': 1, 'smc_id_en': 3, 'MODE': 0, 'AMOUNT': 0, 'SRC_PREC': 1, 'UPDATE_ST': 1, 'VALID': 1},
+            abs_t=0,
+            op_type='SHIFTUP',
+            stage='BODY'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.packer.emit_from_instructions([instr], tmp, smc_num=8)
+            # SMC_0..3 应有 hex；SMC_4..7 hex 为空
+            for k in range(4):
+                hex_path = os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")
+                self.assertTrue(os.path.exists(hex_path))
+                with open(hex_path) as f:
+                    content = f.read().strip()
+                self.assertNotEqual(content, "", f"SMC_{k} 应 emit SHIFTUP")
+            for k in range(4, 8):
+                hex_path = os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")
+                with open(hex_path) as f:
+                    content = f.read().strip()
+                self.assertEqual(content, "", f"SMC_{k} 应跳过 emit (smc_id > smc_id_en)")
+
+    def test_broadcast_followers_have_identical_hex(self):
+        """
+        ADR-018 v7 D5.c: SHIFTUP broadcast 沿途 SMC_k>0 hex 应一致（都是 data=0 + 同 smc_id_en/broadcast 字段）。
+        注: SHIFTUP data 字段当前不在 yaml micro_instructions（ADR-019 v6 已知 gap，hardware spec
+        把 data 列为 128-bit 微指令字段；待新 errata 补齐）。SMC_0 vs SMC_k>0 hex 当前**相同**——
+        本测试只验证沿途 SMC hex 内部一致性，不验证 SMC_0 vs SMC_k>0 差异（待 data 字段补齐后 enable）。
+        """
+        instr = PhysicalInstruction(
+            iq_name='shiftup',
+            header=SMIHeader(),
+            payload={'data': 0xcafe, 'broadcast': 1, 'smc_id_en': 3, 'MODE': 0, 'AMOUNT': 0, 'SRC_PREC': 1, 'UPDATE_ST': 1, 'VALID': 1},
+            abs_t=0,
+            op_type='SHIFTUP',
+            stage='BODY'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.packer.emit_from_instructions([instr], tmp, smc_num=4)
+            hexes = []
+            for k in range(4):
+                with open(os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")) as f:
+                    hexes.append(f.read().strip())
+            # 沿途 SMC 一致 (broadcast=1, smc_id_en=3 → 4 个 SMC 沿途)
+            self.assertEqual(hexes[1], hexes[2], "SMC_1/2 沿途 hex 一致")
+            self.assertEqual(hexes[2], hexes[3], "SMC_2/3 沿途 hex 一致")
+            # TODO(ADR-019-errata): 待 data 字段补入 micro_instructions 后，re-enable:
+            # self.assertNotEqual(hexes[0], hexes[1], "SMC_0 含 data vs SMC_1 data=0 应不同")
+
     def test_smc_id_5bit_fail_fast_at_overflow(self):
         """
         SMC_ID 5-bit (max 31)；smc_num=33 时 emit 到 SMC_32 应 fail-fast 防 silent truncate。
