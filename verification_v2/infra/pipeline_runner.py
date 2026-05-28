@@ -164,7 +164,11 @@ class PipelineRunner:
             "physical_instrs": physical_instrs,
             "num_iterations": num_loop_iters,
             "sim_success": (res.returncode == 0),
-            "ops": ops
+            "ops": ops,
+            # ADR-020 v3：multi-SMC 路径在本函数内 line 39 重生成 input_data（_prepare_input_parallel_n,
+            # rng.uniform(1,5) + default_rng(0)），与 main_verify.run_test 入口前 prepare_input(n_rows)
+            # 的 randn 输出不一致。Auditor 须用 sim 实际吃到的这份算 expected，否则系统性 mismatch。
+            "input_data": input_data,
         }
 
     def _compute_smc_num(self, operator: Any):

@@ -38,7 +38,7 @@ class RtoVRUnit(Component):
                  src_id = (inst >> 1) & 0x3F
                  if 0 <= port_id < self.num_outputs:
                       val = sources.get(src_id, 0)
-                      print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:RTOVR Tag:ROUTE Port:{port_id} Src:{src_id} V0:{val:032x}")
+                      print(f">>> [AUDIT-DATA] SMC_ID:{getattr(self, 'smc_id', 0)} Cyc:{cycle} Unit:RTOVR Tag:ROUTE Port:{port_id} Src:{src_id} V0:{val:032x}")
                       self._next_outputs[port_id] = val
                       self._next_valid.add(port_id)
 

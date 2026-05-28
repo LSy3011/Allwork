@@ -108,6 +108,14 @@ class ParallelKernel:
         self.smc_id = smc_id
         self.chain_inputs = {'shiftup': 0, 'shiftdn': 0}
 
+        # ADR-020 v3 bug #2 修法：把 smc_id 下传给所有 [AUDIT-DATA] 打印主体，
+        # 让 Auditor 解析 sim_log 时能区分同 cycle 不同 SMC 的同名 unit 条目；
+        # 否则 32 个 SMC 共写 stdout，后写覆盖前写，Auditor 误读 SMC_31 当 SMC_0。
+        self.ur_bank.smc_id = smc_id
+        self.rtovr.smc_id = smc_id
+        for _u in self.units.values():
+            _u.smc_id = smc_id
+
 
     def enable_trace(self):
         """Enable trace recording"""

@@ -107,11 +107,18 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
         return False
         
     sim_ok = ctx.get("sim_success", True)
+    # ADR-020 v3：multi-SMC 路径 run_full_stack 内部会重生成 input_data；优先用 ctx 里的"sim 实吃版"。
+    # Auditor 检查 SMC_0 truth alignment，partitioned 张量 2D (smc_num, n_rows) 须切到 SMC_0 视角 [0]。
+    effective_input_data = ctx.get("input_data", input_data)
+    auditor_input_data = {
+        k: (v[0] if hasattr(v, "ndim") and v.ndim == 2 else v)
+        for k, v in effective_input_data.items()
+    }
     align_ok = auditor.audit_truth_alignment(
-        ctx["log_path"], 
+        ctx["log_path"],
         num_iterations=ctx["num_iterations"],
         ops=ctx.get("ops"),
-        input_data=input_data
+        input_data=auditor_input_data
     )
     
     if align_ok and sim_ok:

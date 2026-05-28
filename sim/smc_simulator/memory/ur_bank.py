@@ -65,7 +65,7 @@ class URBank(Component):
                 if 0 <= b < self.num_banks and 0 <= a < self.bank_size:
                     val = self.storage[b][a]
                     self._next_read_ports_out[i] = val
-                    print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:UR-READ Tag:READ Port:{i} Bank:{b} Addr:{a} V0:{val:032x}")
+                    print(f">>> [AUDIT-DATA] SMC_ID:{getattr(self, 'smc_id', 0)} Cyc:{cycle} Unit:UR-READ Tag:READ Port:{i} Bank:{b} Addr:{a} V0:{val:032x}")
 
 
         # 写逻辑
@@ -76,7 +76,7 @@ class URBank(Component):
                 b, a, d = req['bank'], req['addr'], req.get('data', 0)
                 if 0 <= b < self.num_banks and 0 <= a < self.bank_size:
                     self._pending_writes[(b, a)] = d
-                    print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:UR-WRITE Tag:WRITE Port:{i} Bank:{b} Addr:{a} V0:{d:032x}")
+                    print(f">>> [AUDIT-DATA] SMC_ID:{getattr(self, 'smc_id', 0)} Cyc:{cycle} Unit:UR-WRITE Tag:WRITE Port:{i} Bank:{b} Addr:{a} V0:{d:032x}")
 
     def tick(self, cycle: int = -1):
         self.read_ports_out = self._next_read_ports_out

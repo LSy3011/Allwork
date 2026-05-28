@@ -159,7 +159,7 @@ class FPAddUnit(Component):
             stages_str = " | ".join([f"S{i}:" + (f"{from_bits(s['result']):.4f}" if s['valid'] else "IDLE") for i, s in enumerate(self.pipeline)])
             self.logger.info(f"[Unit:{self.name}] Cycle {cycle} Pipeline: {stages_str}")
         if valid_trigger:
-            print(f">>> [AUDIT-DATA] Cyc:{cycle} Unit:{self.name} Tag:COMPUTE S0:{self.regs_s0:032x} S1:{self.regs_s1:032x}")
+            print(f">>> [AUDIT-DATA] SMC_ID:{getattr(self, 'smc_id', 0)} Cyc:{cycle} Unit:{self.name} Tag:COMPUTE S0:{self.regs_s0:032x} S1:{self.regs_s1:032x}")
         
         self._next_pipeline = [{
             'result': res_val, 'st': st_val, 

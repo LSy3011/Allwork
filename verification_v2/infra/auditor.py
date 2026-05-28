@@ -325,7 +325,7 @@ class Auditor:
                 
         return env
 
-    def audit_truth_alignment(self, log_path: str, num_iterations: int = 1, ops: List[Any] = None, input_data: Dict[str, np.ndarray] = None):
+    def audit_truth_alignment(self, log_path: str, num_iterations: int = 1, ops: List[Any] = None, input_data: Dict[str, np.ndarray] = None, audit_smc: int = 0):
         """进行时序对齐与数值审计（智能静默模式）。"""
         # 🛸 延迟/调试模式控制头信息打印
         self._header_printed = False
@@ -361,6 +361,9 @@ class Auditor:
                     expected_val_map[(iter_idx, t_id)] = val
 
         # 2. 解析仿真 Log 中的数值
+        # ADR-020 v3 bug #2 修法：multi-SMC 模式 32 个 kernel 共写一份 stdout，
+        # AUDIT-DATA 行带 SMC_ID 前缀；本 Audit 只取 audit_smc 对应行（默认 SMC_0）。
+        # 单 SMC 旧日志（无 SMC_ID 字段）解析为 smc_id=0，与默认 audit_smc=0 匹配，向后兼容。
         actual_values = {}
         if os.path.exists(log_path):
             with open(log_path, "r") as f:
@@ -368,10 +371,19 @@ class Auditor:
                     if "[AUDIT-DATA]" in line:
                         try:
                             parts = line.strip().split()
-                            cyc = int(parts[2].split(":")[1])
-                            unit_name = parts[3].split(":")[1].lower()
-                            tag = parts[4].split(":")[1]
-                            data = {p.split(":")[0]: p.split(":")[1] for p in parts[5:] if ":" in p}
+                            # 探测可选 SMC_ID 前缀（parts[2] 形如 'SMC_ID:0' 时切偏移）
+                            if len(parts) > 2 and parts[2].startswith("SMC_ID:"):
+                                smc_id = int(parts[2].split(":")[1])
+                                head_off = 3
+                            else:
+                                smc_id = 0
+                                head_off = 2
+                            if smc_id != audit_smc:
+                                continue
+                            cyc = int(parts[head_off].split(":")[1])
+                            unit_name = parts[head_off + 1].split(":")[1].lower()
+                            tag = parts[head_off + 2].split(":")[1]
+                            data = {p.split(":")[0]: p.split(":")[1] for p in parts[head_off + 3:] if ":" in p}
                             if unit_name == "rtovr":
                                 port = data.get("Port")
                                 actual_values[(cyc, f"rtovr-{port}")] = {"tag": tag, "data": data}
