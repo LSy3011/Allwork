@@ -5,7 +5,10 @@ decided: 2026-05-29
 last_verified: 2026-05-29
 still_holds: proposed
 supersedes_decision_in: [ADR-020, ADR-018-D3.b]
+superseded_by: ADR-022
 ---
+
+> ⚠ **[ADR-022](ADR-022-single-smi-global-instruction-stream-model.md) 推翻本 ADR 所依赖的 per-SMC 独立指令流模型**（2026-05-29，user 给 RTL spec 表 542–548 纠正：硬件是单 SMI 全局指令流 + SMC_ID 寻址）。本 ADR 的「32/32 bit-perfect」是 **Python 仿真器 vs golden** 自洽，但仿真器同构建模 per-SMC，**不保证与 VCS/RTL 一致**。「删 fold」在修正模型下去留待重新推导；「保持 PARAM_SMC_NUM=32」决策已被 ADR-022 改为 8。引用本 ADR 前先读 ADR-022。
 
 # ADR-021 · 删除 SHIFTUP→RTOVR worst-case fold（fold-is-bug）
 

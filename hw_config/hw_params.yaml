@@ -1,5 +1,5 @@
 hardware_params:
-  PARAM_SMC_NUM:              32     # SMC数量
+  PARAM_SMC_NUM:              8      # SMC数量
   PARAM_SMC_VECTOR_WIDTH:     128    # 向量位宽(bit)
   PARAM_IQ_DEPTH:             256    # 每个IQ的深度
   PARAM_OUTSTANDING_INST_NUM: 4      # 最大outstanding指令数
