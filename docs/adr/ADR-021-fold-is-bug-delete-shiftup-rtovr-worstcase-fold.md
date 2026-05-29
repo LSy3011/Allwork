@@ -88,6 +88,7 @@ spike = 注释 3 处 fold（`dependency_axioms.py:68` + `ucode_solver.py:238` + 
 - fma_parallel_n 32/32 bit-perfect（v8 主验收点达成），fix 范围 = 删 3 处 fold + 4 项配套，**非 7 文件全模型重构 / 非架构缺口**。
 - 推翻了"ADR-018 D5.b/c lowering 架构对 broadcast-chain⊗partitioned 类算子表达力不足"的架构级悲观结论（HCO 重裁 §D）—— 现有架构足够，只是 fold 这条约束错了。
 - 删 fold 后 SMT 求解更紧凑（II 不升反降；`rt_a` t 33→2），无负面性能影响。
+- **编译器兼容 8 和 32 SMC（实测确认，2026-05-29）**：`PARAM_SMC_NUM=32` 是 spec 目标，真实硬件当前流片 **8 SMC**。临时设 `PARAM_SMC_NUM=8` 跑 fma e2e → `PASSED y: All 8 SMC outputs bit-perfect` + 全审计 SUCCESS（与 32/32 完全一致）。fix **与 smc_num 无关**（本质 = SMT 按 unit-latency 排程 + emitter per-SMC stagger 补偿物理 chain 延迟，对任意 smc_num 成立）。SMT 层回归 `test_adr021_shiftup_rtovr_edge_is_unit_lat_no_fold` 断言"边权与 smc_id_en 无关"，逻辑覆盖 8/32 两配置。**`PARAM_SMC_NUM` 保持 32（spec 上界），不改**（user 决策：编译器须兼容 8 和 32）。
 
 ### 风险 / 待回归
 - **其他 chain 算子**：删 fold 影响所有 `SHIFTUP/SHIFTDN + smc_id_en>0` 的算子。hco 复核扫 `verification_v2/ops/` 确认 fma 是当前唯一**活** chain 算子。⚠ `matmul_parallel_n.yaml` 也含 broadcast/SHIFTUP/smc_id_en，但其 header 明写当前无可运行 operator（`ManualGemmParallelN` + SHIFTUP 注入未实现，到不了 scheduling）→ 不受本 fix 影响。**但它是"fold 删除后第一个须验的新 chain 算子"** —— 将来若接上 `ManualGemmParallelN`，必须重跑本审查。
