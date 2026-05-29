@@ -1239,3 +1239,101 @@ packer.emit_from_instructions(
 - `src/driver/assembler.py:71-95` · INIT/HDR `l_init` / `loops_val` 物理含义参照
 - `sim/smc_simulator/control/iq_unit.py:81-148` · SMI 协议 sim 端 PC 推进，验证 INIT loops 字段是 stagger 注入点
 - `tests/unit/test_smt_adversarial.py:332-446` · TDD 骨架已锁 API contract（Q1=A.1 不需 errata）
+
+---
+
+## v6 · v6-4 落地实测发现 + 0/32 深层 root cause（2026-05-28 同日下一 session · 本版本 partial fix）
+
+### Context
+
+v6-4 真代码（commit `7187654`）落锤后跑 `fma_parallel_n --mode e2e` 验证。HCO 二审 §Q3 D.1' 路径 `SMC_smc_id_en 基准 INIT loops 减法` 在 fma_parallel_n 实测触发 CE #2 边界（`ur-r0` IQ INIT loops=0 < d_smc=31 → RuntimeError），切到 `SMC_0 基准加法` 等价变体（HCO §"修正 D.1' prescription" 段提到的双基准等价选项之一）。物理上让 SMC_31 比 SMC_0 晚 31 cycle 启动 BODY，chain 串接 1-cycle 时延对齐。
+
+### Sim cycle 数据 cross-validate HCO 物理推断（红旗 #1 完全 closed）
+
+**v6-4 D.1' SMC_0 基准变体 hex INIT loops**：
+
+| SMC | INIT loops (hex) | smc_shift = max_dsmc - delta_per_smc[k] |
+|---|---|---|
+| 0  | 0x22=34 (baseline 不动) | 31 - 31 = 0 |
+| 15 | 0x31=49 (+15) | 31 - 16 = 15 |
+| 31 | 0x41=65 (+31) | 31 - 0 = 31 |
+
+**sim 实测 cycle 数据**（`fma_parallel_n_sim.log` AUDIT-DATA）：
+
+| SMC | First FPMUL fire cycle | Delta vs SMC_0 |
+|---|---|---|
+| 0  | Cyc 36 | 0 |
+| 31 | Cyc 67 | +31 ✓ |
+
+**裁定**：chain 串接物理时延（v5.1 §链式传播范围 / HCO sim source 推理）**完全 verified**。D.1' SMC_0 基准变体让 SMC_k 在 cluster cycle (baseline + k × cs_lat) 启动 BODY，chain SMC_k → SMC_{k+1} cru_o 推送的 1-cycle 时延物理满足。
+
+### 但 fma_parallel_n 32-SMC e2e 仍 `0/32 SMCs match`
+
+**v6-4 不是 regression**：stash 实验确认 baseline（无 v6-4 patch）同样 `0/32 match`。v4 §bug #3 cycle-level root cause 假设"v4 baseline SMC_0 bit-perfect"在实测中**不成立**——SMC_0 baseline 也 fail。
+
+**深层 root cause（v6 ADR + HCO 二审 prescription 未 cover 的层）**：
+
+SMT abs_t 在 SMC_0 视角过保守。fma_parallel_n SMT 排程实测（`compiler_schedule.json`）：
+
+| op | abs_t | iq |
+|---|---|---|
+| `a_read_3` | 0 | ur-r0 |
+| `shiftup_a_read_3` | 1 | shiftup |
+| `rt_a_read_3_FPMUL_S0_1` | **33** | rtovr-3 (fold worst-case = 1 + 32) |
+| `inl_2` | 34 | fpmul |
+| `b_read_4` | 32 | ur-r1 (partitioned, no chain) |
+| `c_read_1` | 37 | ur-r2 |
+
+**SMC_0 视角问题**：
+- SMC_0 SHIFTUP @ cluster cycle 2（abs_t=1 + cluster baseline 1） → dr_d = iter 0 a
+- 但 II=1 每 cycle SHIFTUP 处理新 iter，cycle 33 时 SHIFTUP.dr_d 已被 iter 32 a 覆盖（31 cycle 间已经 evaluate 31 次 → tick 31 次）
+- SMC_0 RTOVR-3 @ cluster cycle 33（abs_t=33）取 SHIFTUP.dr_d **= iter 32 a 而非 iter 0 a**
+- → SMC_0 FPMUL S0 收到 iter 32 a + iter 0 b/c → 计算结果错位 31 iter
+
+D.1' SMC_0 基准变体只修了"沿途 SMC chain 启动时机"（SMC_31 晚 31 cycle 启动），**没修 SMC_0 自身 BODY 内部 abs_t fold 过保守问题**。SMC_0 RTOVR-3 仍按 abs_t=33 fire（baseline 不动），仍取 iter 32 a。
+
+### 修复方向（HCO 三审 brief 候选）
+
+**选项 V** · 给 SMC_0 BODY abs_t 减 31（"SMC_smc_id_en 基准减法" 真方向）
+- 等价 v6 ADR §Decision 原 prescription（HCO §Q3 推荐）
+- 触发 ur-r0 INIT loops=0 RuntimeError
+- 需配套：assembler 端预增 `l_init += max_dsmc` margin，让所有 IQ INIT loops 至少 = max_dsmc，emitter 端可减
+- 范围扩到 `src/driver/assembler.py`（v6 二审 §Q1 = A.1 emitter 内部 violate）
+
+**选项 W** · emitter 端模拟 assembler l_init margin（不动 assembler）
+- emitter 在 D.1' 公式之上叠加 `INIT loops += max_dsmc`（统一推后 cluster 启动）+ SMC_k -= delta_per_smc[k]
+- net for SMC_0: +max_dsmc - delta_per_smc[0] = 31 - 31 = 0 (不动)
+- net for SMC_31: +max_dsmc - 0 = 31
+- **这正是当前 v6-4 实施** —— 但 SMC_0 abs_t fold 问题未修
+- 等价表明：单调 INIT loops 调整无法同时修"SMC_0 abs_t fold"+"SMC_k chain 启动时序"两个独立维度
+
+**选项 X** · BODY 行 stagger（非 INIT 层 stagger）
+- 不调 INIT loops，给 SMC_0 BODY 行 abs_t 相对位置减 31（emitter 给 SMC_k BODY 行重排）
+- 改 assembler `abs_t_val = l_init + 1 + k` 公式 per-SMC
+- 范围更广，但物理上直接修 fold worst-case 问题
+
+**选项 Y** · SMT 层重审 abs_t fold 范围（回 OQ #1 选 B 路径）
+- v6 ADR §HCO 一审已 reject B；但实测显示 A 路径单层调 INIT loops 不足
+- 需重新评估"per-SMC t_var 一律"是否真不可行（v6-3 spike 显示 ≈ 0% wall-clock 代价但局限 deterministic）
+
+### v6-4 partial fix 范围 + v8 next
+
+**v6-4 partial fix（commit `7187654`）已锁住**：
+- `_compute_per_smc_stagger` API + 算法（forward topo + backward BFS） ✓
+- D.1' SMC_0 基准变体 emitter 实施 ✓
+- chain 串接 1-cycle 时延物理 verified（sim cycle 数据） ✓
+- TDD 5/5 测试 pass + pytest 70/70 不破 ✓
+
+**未交付**：
+- fma_parallel_n 32-SMC bit-perfect（与 v4 baseline 同 0/32）
+- SMC_0 自身 abs_t fold over-conservative root cause
+
+**HCO 三审 brief（next session）**：评估选项 V/W/X/Y 优劣 + 决定 v6-4 partial fix 是否升 Accepted（chain 串接已修 = partial closure）或 v6 整体延 v7/v8。
+
+### v6-4 实测 References
+
+- commit `7187654` · v6-4 真代码 4 文件
+- `build/verification_v2/fma_parallel_n/fma_parallel_n_sim.log` · sim cycle 实测数据
+- `build/verification_v2/fma_parallel_n/compiler_schedule.json` · SMT abs_t 实测
+- v4 §"4 层独立 bug" · bug #3 SHIFTUP chain RAW（v6-4 chain 串接已修） + bug #4 Auditor（独立轨道）
+- v6 §HCO 二审 §counter-evidence #2 INIT loops margin sanity check（实测命中触发 D.1' 基准切换）
