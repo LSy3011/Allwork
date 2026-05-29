@@ -112,6 +112,20 @@ SHIFTDN:
 
 **z3 处理**：smc_id_en 是 SMT Int 变量（OQ-1 任意 SMC 可发起 + emitter 决定具体 SMC），axiom 用 `z3.Implies` + Int 算术合法。复杂度 O(SMC_NUM × chain ops) 在可接受范围。
 
+> **Errata（ADR-020 v6 · 2026-05-28 同日下一 session）**
+>
+> 上述原始 per-SMC RAW 公式（L99-111）数学上**仍正确**，但 Stage 2 实际实施时被 fold 为单 t_var worst-case（`dependency_axioms.py:56-60` `lat_p += smc_id_en × chain_stage_latency`）。该 fold 在 fma_parallel_n 32-SMC 验证下暴露 SMC_1..31 全错位 bug（详见 [ADR-020](ADR-020-shiftup-iq-body-loop-multi-smc.md) v4 bug #3）。
+>
+> **修法（ADR-020 v6 hco 选 A 路径 + 补丁 P1/P2）**：
+> - SMT 求解器**保留 fold 单 t_var**（safe over-approximation；不动求解器复杂度）
+> - `dependency_axioms.py:53-60` 注释扩写明示 `lat_p` 表示 SMC_{smc_id_en} worst-case 到达边界（补丁 P1，commit `80bb88d`）
+> - **per-SMC stagger 下推到 emitter lowering**（`src/driver/emitter.py:_compute_per_smc_stagger`），按 SMC_k 减 `delta_k = (smc_id_en - k) × chain_stage_latency` 修正实际 fire cycle，等价于本节原始 D3.b 公式
+> - emitter post-stagger 后复跑 ResourceAxioms 做 per-SMC sanity check（补丁 P2，防 hex 层资源冲突 SMT 不知）
+>
+> **抽象层职责切分**：本节 D3.b 公式是 axiom 层 logical 描述；ADR-020 v6 把 SPMD per-SMC 具现下推到 D5.b/D5.c lowering 范式（emitter 在 lowering 阶段做 broadcast 复制 + per-SMC abs_t 差异化），符合 "SMT 守逻辑层 / emitter 守 SMC 物理层" 先例。原公式作为 logical spec 仍有效，本节不动。
+>
+> 详见 [ADR-020 v6 §HCO OQ#1 复核 + §Decision 补丁 P1/P2](ADR-020-shiftup-iq-body-loop-multi-smc.md#v6--hco-oq1-复核emitter-后处理-vs-smt-重算选型--counter-evidence-spike2026-05-28-同日下一-session--本版本-proposed)。
+
 Stage 2 实施前需 [ADR-019](ADR-019-shift-cross-smc-yaml-sim-alignment.md) 完整 Accepted。
 
 #### D3.c · ~~`add_broadcast_route_mutex_axiom`~~（**hco 三审 C2 删除**）
