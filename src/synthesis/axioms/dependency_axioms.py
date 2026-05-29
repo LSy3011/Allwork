@@ -50,9 +50,17 @@ class DependencyAxioms(AxiomBase):
                 if not producer:
                     continue
                 lat_p = spec.delays.get(producer.op_type.upper(), 1)
-                # ADR-018 v7 D3.b (task #18 sub-7): SHIFTUP/SHIFTDN 跨 SMC chain RAW.
-                # SPMD 模型 consumer 单 t_var 必须满足最差 SMC_{smc_id_en} 数据到达，
-                # 故 chain_stage_latency × smc_id_en 计入 producer 有效 lat。
+                # ADR-018 v7 D3.b + ADR-020 v6 P1 (语义订正):
+                #   下面 fold 的 lat_p = SMC_{smc_id_en} 数据到达 RTOVR 的 worst-case
+                #   latency 边界（含 chain 累加），**不是 SHIFTUP 自身的 unit lat**
+                #   （SHIFTUP unit lat = 1，见 hw_config/pipeline_delays.yaml）。
+                #   SMT 求解器按此 worst-case 算单 t_var，是 safe over-approximation。
+                #   emitter post-stagger (src/driver/emitter.py) 按 SMC_k 减
+                #   delta_k = (smc_id_en - k) × chain_stage_latency 修正实际 fire cycle:
+                #     SMC_0           fire @ fold_abs_t - smc_id_en × chain_stage_latency
+                #     SMC_{smc_id_en} fire @ fold_abs_t（与 fold 一致）
+                #   compiler_schedule.json 中 SHIFTUP→RTOVR 边权数值勿误判为 SHIFTUP unit lat。
+                #   详见 ADR-020 v6 §HCO OQ#1 复核 + ADR-018 D3.b errata。
                 if producer.op_type.upper() in ('SHIFTUP', 'SHIFTDN'):
                     smc_id_en = producer.metadata.get('smc_id_en', 0)
                     if isinstance(smc_id_en, int) and smc_id_en > 0:
