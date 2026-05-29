@@ -97,6 +97,7 @@ HCO 续审（agentId `a45dedc230c151316`）发现：compute/访存模块命名�
 - 部分覆盖 **ADR-018/019** 的 per-SMC 独立流实现机制（随 simulator 模型 A/B 演进）。
 
 ## References
+- [DEBT-023-inventory.md](DEBT-023-inventory.md) —— 本 ADR 4 项债务（B/A/BCAST-TIMING/COMPUTE-ADDR）的聚合跟踪清单 + 待 user 提供的 RTL 表料单
 - [ADR-022](ADR-022-single-smi-global-instruction-stream-model.md)（被实现的硬件模型 + 8 步待办）
 - [ADR-004](ADR-004-doc-first-principle.md) 文档先行
 - HCO 设计复核：agentId `a93906710d712e849`（APPROVE-with-notes，本 session）
