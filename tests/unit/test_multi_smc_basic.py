@@ -115,100 +115,54 @@ class TestEmitterMultiSMC(unittest.TestCase):
             self.assertNotIn("smc_num", cfg)
             self.assertTrue(os.path.isdir(os.path.join(tmp, "smc_0")))
 
-    def test_multi_smc_n4_creates_4_dirs_and_layout(self):
-        """N=4 创建 smc_{0..3}/ 目录 + sim_config 含 per_smc_iq_init / smc_num。"""
+    def test_multi_smc_single_global_stream_layout(self):
+        """
+        ADR-023 D1：N=4 走单 SMI 全局指令流——一套 iq_*.hex 写在 root（非 per-SMC），
+        UR 数据仍 per-SMC（smc_k/ur_data/）。sim_config = 单 iq_init + per_smc_ur_init，
+        不再有 per_smc_iq_init。
+        """
         instr = self._make_fpmul_instr()
         with tempfile.TemporaryDirectory() as tmp:
-            # ADR-020 v6: 单元测试无 DFG, 显式 lir_stream=[] 跳过 stagger fail-fast
-            self.packer.emit_from_instructions([instr], tmp, smc_num=4, lir_stream=[])
+            self.packer.emit_from_instructions([instr], tmp, smc_num=4)
+            # 一套全局 iq_*.hex 在 root
+            self.assertTrue(os.path.exists(os.path.join(tmp, "iq_fpmul.hex")),
+                "单全局指令流 iq_fpmul.hex 应在 root")
+            # 不再有 per-SMC iq hex
             for k in range(4):
-                self.assertTrue(os.path.isdir(os.path.join(tmp, f"smc_{k}")),
-                    f"smc_{k}/ 应被创建")
+                self.assertFalse(os.path.exists(os.path.join(tmp, f"smc_{k}", "iq_fpmul.hex")),
+                    f"ADR-023 单流后 smc_{k}/iq_fpmul.hex 不应存在")
+                self.assertTrue(os.path.isdir(os.path.join(tmp, f"smc_{k}", "ur_data")),
+                    f"smc_{k}/ur_data/ 应被创建（UR 仍 per-SMC）")
             with open(os.path.join(tmp, "sim_config.json")) as f:
                 cfg = json.load(f)
             self.assertEqual(cfg["smc_num"], 4)
-            self.assertEqual(len(cfg["per_smc_iq_init"]), 4)
+            self.assertIn("iq_init", cfg)
+            self.assertEqual(cfg["iq_init"]["fpmul"], "iq_fpmul.hex")
+            self.assertEqual(len(cfg["per_smc_ur_init"]), 4)
+            self.assertNotIn("per_smc_iq_init", cfg)
             self.assertEqual(cfg["smc_id_list"], [0, 1, 2, 3])
 
-    def test_smc_id_injection_differentiates_hex(self):
-        """每 SMC 的 hex 因 SMC_ID 字段不同而不同。"""
-        instr = self._make_fpmul_instr()
-        with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=4, lir_stream=[])
-            hexes = []
-            for k in range(4):
-                with open(os.path.join(tmp, f"smc_{k}", "iq_fpmul.hex")) as f:
-                    hexes.append(f.read().strip())
-            # 4 个 SMC 的 hex 必须互不相同（SMC_ID 字段值分别 0,1,2,3）
-            self.assertEqual(len(set(hexes)), 4,
-                f"4 SMC 的 FPMUL hex 应互不相同 (SMC_ID 注入)，实际: {hexes}")
-
-    def test_broadcast_shiftup_distribution(self):
+    def test_multi_smc_no_per_smc_smc_id_injection(self):
         """
-        ADR-018 v7 D5.c: broadcast SHIFTUP smc_id_en=3，N=8 时仅 SMC_0..3 emit；
-        SMC_4..7 跳过此 instr。沿途 SMC_k>0 data 字段填 0。
-        """
-        instr = PhysicalInstruction(
-            iq_name='shiftup',
-            header=SMIHeader(),
-            payload={'data': 0xdeadbeef, 'broadcast': 1, 'smc_id_en': 3, 'MODE': 0, 'AMOUNT': 0, 'SRC_PREC': 1, 'UPDATE_ST': 1, 'VALID': 1},
-            abs_t=0,
-            op_type='SHIFTUP',
-            stage='BODY'
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=8, lir_stream=[])
-            # SMC_0..3 应有 hex；SMC_4..7 hex 为空
-            for k in range(4):
-                hex_path = os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")
-                self.assertTrue(os.path.exists(hex_path))
-                with open(hex_path) as f:
-                    content = f.read().strip()
-                self.assertNotEqual(content, "", f"SMC_{k} 应 emit SHIFTUP")
-            for k in range(4, 8):
-                hex_path = os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")
-                with open(hex_path) as f:
-                    content = f.read().strip()
-                self.assertEqual(content, "", f"SMC_{k} 应跳过 emit (smc_id > smc_id_en)")
-
-    def test_broadcast_smc0_data_distinct_from_followers(self):
-        """
-        ADR-018 v7 D5.c + ADR-019 errata task #19: SHIFTUP broadcast 沿途 SMC_k>0 data 字段填 0；
-        SMC_0 含 真实 data，故 SMC_0 hex ≠ SMC_k>0 hex (data 字段差异)。
-        沿途 SMC_k>0 (k=1,2,3) hex 应一致（都是 data=0 + 同 smc_id_en/broadcast）。
-        """
-        instr = PhysicalInstruction(
-            iq_name='shiftup',
-            header=SMIHeader(),
-            payload={'data': 0xcafe, 'broadcast': 1, 'smc_id_en': 3, 'VALID': 1},
-            abs_t=0,
-            op_type='SHIFTUP',
-            stage='BODY'
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=4, lir_stream=[])
-            hexes = []
-            for k in range(4):
-                with open(os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")) as f:
-                    hexes.append(f.read().strip())
-            # 沿途 SMC_1/2/3 (data=0) 完全一致
-            self.assertEqual(hexes[1], hexes[2], "SMC_1/2 沿途 data=0 → hex 一致")
-            self.assertEqual(hexes[2], hexes[3], "SMC_2/3 沿途 data=0 → hex 一致")
-            # SMC_0 (data=0xcafe) 与 SMC_1 (data=0) 必不同
-            self.assertNotEqual(hexes[0], hexes[1],
-                "SMC_0 含 data=0xcafe vs SMC_1 data=0 必不同")
-
-    def test_smc_id_5bit_fail_fast_at_overflow(self):
-        """
-        SMC_ID 5-bit (max 31)；smc_num=33 时 emit 到 SMC_32 应 fail-fast 防 silent truncate。
-        注：modules.yaml LOGIC SMC_ID=4 bit 但 master file 优先 = 5 bit；实际所有 SMC_ID
-        字段（FPMUL/FPADD/UR_READ/UR_WRITE/LOGIC）加载后均为 5 bit。hw_config 内部不一致
-        见 hco 三审 B2 + 本测试 verify 真实 loaded 行为。
+        ADR-023 D1：单流下指令不再按 SMC 注入不同 SMC_ID（删 _inject_smc_id）；
+        compute 指令 SMC_ID code_field 走 default 0，全局只有一份 hex（无 per-SMC 差异化）。
+        smc_num=33（旧版本会因 SMC_ID 5-bit overflow fail-fast）现在不再 fail-fast——
+        单流不注入 per-SMC k，无 silent truncate 风险（HCO 选项 ii）。
         """
         instr = self._make_fpmul_instr()
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, r"ADR-018 D5\.a.*5 bit"):
-                self.packer.emit_from_instructions([instr], tmp, smc_num=33, lir_stream=[])
+            # 旧版 smc_num=33 会 raise ValueError(SMC_ID 5-bit overflow)；单流下不再 raise
+            self.packer.emit_from_instructions([instr], tmp, smc_num=33)
+            # 全局一份 iq_fpmul.hex，内容与 smc_num 无关（不含 per-SMC SMC_ID 注入）
+            self.assertTrue(os.path.exists(os.path.join(tmp, "iq_fpmul.hex")))
+            with open(os.path.join(tmp, "iq_fpmul.hex")) as f:
+                hex_33 = f.read().strip()
+        with tempfile.TemporaryDirectory() as tmp2:
+            self.packer.emit_from_instructions([self._make_fpmul_instr()], tmp2, smc_num=4)
+            with open(os.path.join(tmp2, "iq_fpmul.hex")) as f:
+                hex_4 = f.read().strip()
+        self.assertEqual(hex_33, hex_4,
+            "单流全局指令流与 smc_num 无关（不注入 per-SMC SMC_ID），N=4/N=33 hex 应一致")
 
 
 class TestFrontendParallelDimNInjection(unittest.TestCase):
@@ -518,7 +472,7 @@ class TestPhysicalRunnerMultiSmcDispatch(unittest.TestCase):
             cfg = {
                 "smc_num": 4,
                 "smc_id_list": [0, 1, 2, 3],
-                "per_smc_iq_init": [{}] * 4,
+                "iq_init": {},                 # ADR-023 单全局指令流 schema
                 "per_smc_ur_init": [{}] * 4,
                 "tensors": [],
                 "max_cycles": 1,

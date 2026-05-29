@@ -55,9 +55,10 @@ class DependencyAxioms(AxiomBase):
                 #   `lat_p += smc_id_en` 的 chain worst-case fold（标注 "safe
                 #   over-approximation"），实测证明是 bug —— 它把 sim 的物理 chain 传播延迟
                 #   错误塞进 SMT 逻辑调度，令所有 SMC 的 RTOVR 取错 iteration（fma 32-SMC 0/32）。
-                #   chain 跨 SMC 的物理传播延迟由 emitter per-SMC INIT shift
-                #   (src/driver/emitter.py _compute_per_smc_stagger) 在 lowering 层补偿，
+                #   chain 跨 SMC 的物理传播延迟曾由 emitter per-SMC INIT stagger 在 lowering 层补偿，
                 #   不该在 SMT 层建模。删 fold 后 fma_parallel_n 32/32 bit-perfect。
+                #   ⚠ ADR-023 已删该 stagger 机制（单 SMI 全局指令流 + sim 模型 A 同拍 broadcast
+                #   fan-out 取代逐级 chain 延迟）；本 fold-deletion 结论不变，fma 现 8/8（PARAM_SMC_NUM=8）。
                 #   ⚠ counter-verifier (ucode_solver.py validate_physical_schedule 维度6 RAW
                 #   + 维度7 RTOVR) 已同步删除对应 fold，否则 axiom/verifier 不一致 →
                 #   Synthesis failed。详见 ADR-021。

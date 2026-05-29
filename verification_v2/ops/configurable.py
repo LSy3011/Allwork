@@ -104,7 +104,8 @@ class ConfigurableOperator(BaseOperator):
         )
 
         # ADR-018 v7 Stage 1 X · parallel_dim=N：把 broadcast 输入的 UR_READ 后插 SHIFTUP MIROp。
-        # 数据源固定 SMC_0（OQ-1），smc_id_en=PARAM_SMC_NUM-1 广播到全部 SMC。
+        # ADR-023 D2(B)：SMC_0 bank0 单源（ur-r0 读出 a[i]），smc_id_en=PARAM_SMC_NUM-1 广播；
+        # sim 由 cluster 同拍 fan-out 到全部使能 SMC（旧 OQ-1「固定 SMC_0 + 逐级 chain」语义已取代）。
         if self.parallel_dim == "N":
             ops = self._inject_shiftup_broadcast(ops, spec)
 

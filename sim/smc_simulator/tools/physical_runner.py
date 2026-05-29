@@ -244,20 +244,20 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
 
     cluster = SystemCluster(num_kernels=smc_num)
 
-    per_smc_iq = config.get("per_smc_iq_init", [])
+    # ADR-023 D3：单 SMI 全局指令流——所有 SMC 共享同一套 iq_init（lockstep 复制，模型 A）；
+    # UR 数据仍 per-SMC（per_smc_ur_init）。旧 per_smc_iq_init（每 SMC 各一份）schema 已废。
+    iq_init = config.get("iq_init", {})
     per_smc_ur = config.get("per_smc_ur_init", [])
-    assert len(per_smc_iq) == smc_num, (
-        f"per_smc_iq_init len={len(per_smc_iq)} ≠ smc_num={smc_num}"
-    )
+    assert iq_init, "ADR-023: sim_config 缺单一全局 iq_init（emitter 单流 schema 未生效？）"
     assert len(per_smc_ur) == smc_num, (
         f"per_smc_ur_init len={len(per_smc_ur)} ≠ smc_num={smc_num}"
     )
 
+    iq_map = {n: str(case_path / h) for n, h in iq_init.items()}
     for k in range(smc_num):
         kernel = cluster.kernels[k]
         kernel.enable_trace()
-        iq_map = {n: str(case_path / h) for n, h in per_smc_iq[k].items()}
-        kernel.load_program(iq_map, {})
+        kernel.load_program(dict(iq_map), {})  # 每 SMC 各自 load 同一套全局指令流（lockstep）
         poison_memory(kernel, per_smc_ur[k], case_path)
 
     trace_file = case_path / "sim_trace.log"

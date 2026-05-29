@@ -127,6 +127,8 @@ user 确认 **VCS testbench 是单一 SMI 指令存储**。对 `PARAM_SMC_NUM=8`
 - **多处 docstring/注释仍写死 31/32**（`hw_resource.py:118/125/131`、`pipeline_runner.py:180`、`configurable.py:24/108`、`shift_dn_unit.py:17/20/27`）：随实施批量订正。
 
 ## 待办（实施阶段，非本 ADR）
+
+> **实施进展（2026-05-29，[ADR-023](ADR-023-single-smi-emitter-sim-impl-model-a.md)，hco APPROVE-with-notes ×3 + evaluator ACCEPT-with-caveats）**：#1 emitter 单流重构 **DONE**；#2 simulator **模型 A 中转 DONE**（lockstep 复制 + SHIFTUP broadcast 同拍 fan-out，**非真 CRU fabric**，记债 DEBT-023-B）；#3 SHIFTDN fallback 31→派生 **部分**（完整解码 defer）；#5/#6 **部分**。**fma_parallel_n 现 8/8 bit-perfect @ PARAM_SMC_NUM=8（e2e exit=0）**。⚠ evaluator 提醒：8/8 是终值 parity，**不验跨-SMC 时序**，对单 SMI 模型忠实性增信近零；#4 SMT 重推 + #8 VCS 实测仍是升 Accepted 的必经门。新增债务：DEBT-023-A（逐字 immediate 展开）、DEBT-023-BCAST-TIMING（广播流式注入时序需 RTL）、DEBT-023-COMPUTE-ADDR（compute 指令 SMC_ID 寻址语义需 RTL compute 微指令表）。
 1. **emitter 重构**：单全局指令流 emit（SMC_ID/smc_id_en 编码 + SHIFTUP/SHIFTDN 跨-SMC 搬运），UR 数据保持 per-SMC。复用现有 `_inject_smc_id`/`_should_skip_chain_instr`/`_zero_broadcast_data_for_followers` 字段逻辑，去掉「N 份 hex + per-SMC stagger」封装。
 2. **simulator 重建**（成本 > #1）：单 SMI + shift-fabric（CRU 指令逐级传播 + SMC_ID 匹配执行）。**作废 `shift_up_unit.py:57` 的 OQ-1「广播数据源固定 SMC_0 本地 data」模型**——按新 RTL，`DR_SHIFTUP_D` 的 data 来自**指令 data 字段**（SMI 注入），非任何 SMC 本地寄存器。
 3. **SHIFTDN smc_id_en 改指令字段解码**（独立项）：新 RTL 表 547 已列 smc_id_en，删除 `shift_dn_unit.py:17/20/60` + `shiftdn.yaml:27/43` + `aiacc_v2.4_master.yaml:798` 的「spec gap + fallback 31」前提。

@@ -77,6 +77,11 @@ class SystemCluster:
             k.logger = logging.getLogger(f"Kernel-{i}")
             self.kernels[i] = k
 
+        # ADR-023 D6：SHIFTDN smc_id_en fallback 按实际 cluster 规模派生（替代硬编码 31，避免 8-SMC 越界）
+        for k in self.kernels.values():
+            if 'shiftdn' in k.units:
+                k.units['shiftdn'].smc_id_en_fallback = num_kernels - 1
+
         self.bus = BusArbiter()
         self.cycle_count = 0
         self.logger = logging.getLogger("SystemCluster")
@@ -96,6 +101,31 @@ class SystemCluster:
             dn_o = self.kernels[k + 1].units['shiftdn'].get_chain_output()
             self.kernels[k].chain_inputs['shiftdn'] = dn_o
 
+    def _broadcast_shiftup_fanout(self):
+        """
+        ADR-023 D2(B)：SHIFTUP broadcast 同拍单源 fan-out。
+        kernel.step() 已 evaluate+tick，SMC_0 的 shiftup.dr_d = 本拍 ur-r0 读出的广播 a[i]（单源）。
+        broadcast 时把该值同拍覆盖到所有使能 SMC（0 < k <= smc_id_en）的 dr_d / cru_o，
+        **abolish `_propagate_chain_inputs` 的逐级 1-cycle 相对延迟**（Model A 时序不忠实中转：
+        删 stagger 后必须让 a[i] 无相对延迟到达所有使能 SMC，否则 lockstep FPMUL 读到错位 stale a）。
+        k > smc_id_en 不动（保持 smc_id_en 门控；对应 D4 gating 单测）。
+        """
+        head = self.kernels.get(0)
+        if head is None:
+            return
+        head_su = head.units['shiftup']
+        if not getattr(head_su, 'bcast_active', False):
+            return
+        smc_id_en = head_su.bcast_smc_id_en
+        if not isinstance(smc_id_en, int):
+            return
+        bcast_val = head_su.dr_d            # SMC_0 单源广播值（a[i]）
+        for k, kernel in self.kernels.items():
+            if 0 < k <= smc_id_en:
+                su = kernel.units['shiftup']
+                su.dr_d = bcast_val
+                su.cru_o = bcast_val
+
     def step(self):
         # 1. ADR-019 D5: 跨 SMC chain 注入（上游 chain output → 本 kernel chain_inputs）
         self._propagate_chain_inputs()
@@ -106,6 +136,9 @@ class SystemCluster:
                 kernel.step()
             except Exception as e:
                 self.logger.error(f"Kernel {k_id} error: {e}")
+
+        # 2.5 ADR-023 D2(B): SHIFTUP broadcast 同拍单源 fan-out（kernel.step 后，dr_d 已 tick）
+        self._broadcast_shiftup_fanout()
 
         # 3. Step Bus
         completed_transfers = self.bus.tick()

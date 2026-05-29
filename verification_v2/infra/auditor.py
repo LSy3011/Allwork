@@ -18,9 +18,13 @@ class Auditor:
         if self.show_review:
             print(f"\n[AUDIT-REVIEW] Physical Header Summary")
         
-        hex_files = glob.glob(str(self.smc_dir / "*.hex"))
+        # ADR-023：multi-SMC 单全局指令流 iq_*.hex 写在 output_dir 根级；
+        # 单 SMC（_emit_single_smc）仍写 smc_0/。两种 layout 都兼容。
+        hex_files = glob.glob(str(self.output_dir / "iq_*.hex"))
         if not hex_files:
-            print(f"[ERROR] No hex files found in {self.smc_dir}")
+            hex_files = glob.glob(str(self.smc_dir / "*.hex"))
+        if not hex_files:
+            print(f"[ERROR] No hex files found in {self.output_dir} or {self.smc_dir}")
             return False
             
         all_passed = True

@@ -14,10 +14,12 @@ class ShiftDnUnit(Component):
     SHIFTDN 单元（ADR-019 errata task #19，严格按新硬件 spec 表 545-547）。
     - microinstruction = vld(1) + data(128) = 129 bit
     - 寄存器名 CRD_SHIFTDN_O/I（下行，区别于 SHIFTUP 的 CRU）
-    - **spec gap**：功能公式用 smc_id_en 但 spec 表均未列；本 sim fallback PARAM_SMC_NUM-1 (=31)
+    - **spec gap**：功能公式用 smc_id_en 但 spec 表均未列；本 sim fallback PARAM_SMC_NUM-1
+      （ADR-023 D6：SystemCluster 按实际 num_kernels-1 注入 self.smc_id_en_fallback，替代硬编码 31；
+      避免 8-SMC 下 31 越界死常量。完整修正 = 从指令字段解码 smc_id_en，defer 到 ADR-022 待办 #3）
     - N=1 退化兼容：cru_shiftdn_i / crd_shiftdn_i 缺省 0；dvr_shiftdn_s 仍从本 SMC RtoVR 出口取
     """
-    SMC_ID_EN_FALLBACK = 31  # PARAM_SMC_NUM - 1; spec gap workaround
+    SMC_ID_EN_FALLBACK = 31  # 类默认 (PARAM_SMC_NUM-1, 32-era)；cluster 多 SMC 路径会按实际规模覆盖
 
     def __init__(self, name: str, latency: int = 1):
         super().__init__(name)
@@ -30,6 +32,8 @@ class ShiftDnUnit(Component):
         self.cru_o = 0       # CRD_SHIFTDN_O（输出寄存器；属性名保留 cru_o 兼容历史调用）
         self.regs_s0 = 0     # 保留旧 latch 行为（兼容 behavioral_semantics: pre_load_on_valid_or_nonzero）
         self._next_cru_o = 0
+        # ADR-023 D6：实例级 fallback，SystemCluster 按 num_kernels-1 覆盖（派生自真实 SMC 规模）
+        self.smc_id_en_fallback = self.SMC_ID_EN_FALLBACK
 
     def reset(self):
         self.cru_o = 0
@@ -56,8 +60,8 @@ class ShiftDnUnit(Component):
             return
 
         # spec gap：SHIFTDN microinstruction 未列 smc_id_en；fallback 到 PARAM_SMC_NUM-1
-        # 若硬件 spec 后续澄清 smc_id_en 真实来源，改此 fallback。
-        smc_id_en = self.SMC_ID_EN_FALLBACK
+        # （ADR-023 D6：实例级 fallback 由 cluster 按真实 num_kernels-1 注入；完整修正 = 解码指令字段）
+        smc_id_en = self.smc_id_en_fallback
 
         # 功能公式（spec 完整描述）
         if smc_id == smc_id_en:
