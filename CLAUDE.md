@@ -40,6 +40,7 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 
 ## Known unknowns
 
+- 🔴 **multi-SMC 硬件模型被推翻（[ADR-022](docs/adr/ADR-022-single-smi-global-instruction-stream-model.md)，2026-05-29，hco APPROVE-with-notes）** —— user 给 RTL spec 表 542–548 纠正：硬件是**单 SMI 全局指令流 + SMC_ID/smc_id_en 寻址**，SHIFTUP/SHIFTDN 是跨-SMC 数据搬运。当前 emitter（per-SMC `smc_k/iq_*.hex` + INIT stagger）+ Python simulator（`SystemCluster` N 个独立取指 kernel）**从根上偏离 RTL**；ADR-018/019/020/021 的 per-SMC 实现机制全被 supersede。**ADR-021 的 32/32 bit-perfect 是 sim-vs-golden 自洽，不保证与 VCS/RTL 一致**。`PARAM_SMC_NUM` 改 8（真实流片）。状态 **Proposed，代码未改**——emitter 重构 / simulator 重建（成本>emitter）/ SMT 重推 / SHIFTDN smc_id_en 解码 / VCS 实测背书，8 步待办见 ADR-022。**引用 ADR-018→021 任何 multi-SMC 结论前先读 ADR-022。**
 - ~~⚠ smt-unit 2 fail + 1 error~~ — **2026-05-15 resolved**（ADR-006 + ADR-009，12 测试全 pass）
 - ⚠ **HSTS 是否真死** —— `compactor.py` 注释提到 "Automated IQ Loop Stitching"，可能是 HSTS 的轻量后继；需读 compactor.py 确认
 - ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
