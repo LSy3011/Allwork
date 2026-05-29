@@ -44,9 +44,10 @@ NPU 算子编译器：SymPy 公式 → MIR → Z3 SMT 调度 → LIR → hex 固
 - ⚠ **HSTS 是否真死** —— `compactor.py` 注释提到 "Automated IQ Loop Stitching"，可能是 HSTS 的轻量后继；需读 compactor.py 确认
 - ~~⚠ 旧 ADR still_holds 未审计~~ — **已审计**（2026-05-15，见 docs/adr/ADR-005）：1 个 yes (ADR-006) / 2 个 partial (001, 005) / 2 个 no (002, 003)
 - ~~⚠ Bank 冲突 axiom 与 spec 不一致~~ — **2026-05-15 resolved**（ADR-009 修 axiom，axiom/Verifier/ADR-008 三层一致）
-- ~~⚠ axiom 墓地~~ — **2026-05-15 resolved**（ADR-013 删 16 项 + special_axioms.py 文件；axiom 模块现 22→7 真 active，全部生效；smt-unit 13/13 + horner/matmul/cos4 e2e PASS）
+- ~~⚠ axiom 墓地~~ — **2026-05-15 resolved**（ADR-013 删 16 项 + special_axioms.py 文件；axiom 模块现 22→7 真 active，全部生效；smt-unit 13/13 + horner/matmul/cos4 e2e PASS）。**2026-05-29 订正（[ADR-021](docs/adr/ADR-021-fold-is-bug-delete-shiftup-rtovr-worstcase-fold.md)）**：实为 **7 active + 1 dead export** —— `add_iq_latch_protect_axiom` 零真实调用点（ADR-013 墓地漏网者），仍在 `src/synthesis/axioms/__init__.py` 别名/wrapper/`__all__` + `physical_axioms.py:69-110` 留死 def；**非递归（与其他 active wrapper 同模式），仅 dead**，待独立小 PR 清理
 - ⚠ **`add_side_effect_phase_axiom` 不是 no-op**（ADR-010 errata）—— ADR-011 实施 A/B 实测：k_phase 变量等价于 quotient-remainder 分解，**实际影响 z3 搜索**（log II=7 UNSAT 时间 ±137%，II=8 SAT 时间 ±85%，净总打平）。core `Implies(same_iq, phase==phase)` 注释掉但 bound 约束仍生效。ADR-010 标 "no-op" 是错的，ADR-011 Consequences 段已订正
 - ~~⚠ matmul flaky FAIL~~ — **2026-05-15 resolved**（`matmul_op.py:prepare_input` 改用 `np.random.default_rng(0)` 固定 seed，3 次重跑稳定 PASS）
+- ~~⚠ fma_parallel_n 32-SMC 0/32 + bug #4 auditor 假阳性~~ — **2026-05-29 resolved（[ADR-021](docs/adr/ADR-021-fold-is-bug-delete-shiftup-rtovr-worstcase-fold.md) fold-is-bug）**：root cause = SHIFTUP→RTOVR worst-case fold（`lat_p += smc_id_en`，3 处：dependency_axioms + ucode_solver verifier×2）把物理 chain 延迟错塞进 SMT 逻辑调度。删 3 处 fold（必须同步否则 Synthesis failed）+ emitter v6-4 per-SMC INIT shift → fma **32/32 bit-perfect**。bug #4 auditor 两半假阳性（bank 不按 SMC_ID 隔离 + rigid audit `_evaluate_expected_values` 非拓扑序求值）已修，e2e `exit=0` 全审计 PASS。ADR-020 全部 Y'/B/X 修复机制 **superseded**（fold 是 bug，非"问题在别处"）
 
 ## Historical docs (V1/Gemini era)
 `docs/{hco,adm,se,tfd,pvo,ig}/` 是 7-角色 Gemini 时代 docs。原 7 角色 → 现仅 HCO 升级为 sub-agent，其余被 SOP 覆盖（详见 docs/glossary.md 末段）。
