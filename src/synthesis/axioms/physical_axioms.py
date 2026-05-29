@@ -64,47 +64,5 @@ class PhysicalAxioms(AxiomBase):
         if "UR_READ" in u: return "UR_READ"
         if "UR_WRITE" in u: return "UR_WRITE"
         return u
-
-    @staticmethod
-    def add_iq_latch_protect_axiom(solver, ops, t_vars, II, spec, **kwargs):
-        """
-        IQ 锁存器保护：在搬运完成前，同 IQ 不能被新读操作覆盖（绝对时间）。
-        """
-        u_vars = kwargs.get("u_vars")
-        if u_vars is None: return
-
-        read_ops = [o for o in ops if o.op_type.upper() == "UR_READ"]
-        for i in range(len(read_ops)):
-            for j in range(i + 1, len(read_ops)):
-                op_A, op_B = read_ops[i], read_ops[j]
-
-                # ADR-018 v7 D2: 跨 SMC 的 UR_READ 独立 IQ，不应互斥保护
-                if op_A.metadata.get('smc_id', 0) != op_B.metadata.get('smc_id', 0):
-                    continue
-
-                same_iq = u_vars[op_A.trace_id] == u_vars[op_B.trace_id]
-
-                def get_protection_window_conds(op_x, op_target_t):
-                    """
-                    返回一组布尔谓词：确保 op_target_t 晚于 op_x 的所有消费者。
-                    """
-                    consumers = [
-                        o for o in ops
-                        if op_x.trace_id in o.metadata.get("depends_on", [])
-                    ]
-                    if not consumers:
-                        return [op_target_t > t_vars[op_x.trace_id]]
-                    
-                    # 只要 op_target_t 大于每一个消费者的发射时间，就说明 A 已被搬走
-                    return [op_target_t > t_vars[cons.trace_id] for cons in consumers]
-
-                # B 在 A 所有消费者之后发射 OR A 在 B 所有消费者之后发射
-                cond_B_after_A_all = z3.And(get_protection_window_conds(op_A, t_vars[op_B.trace_id]))
-                cond_A_after_B_all = z3.And(get_protection_window_conds(op_B, t_vars[op_A.trace_id]))
-
-                label = f"iq_l_prot_{op_A.trace_id}_{op_B.trace_id}"
-                PhysicalAxioms._add_constraint(
-                    solver,
-                    z3.Implies(same_iq, z3.Or(cond_B_after_A_all, cond_A_after_B_all)),
-                    label
-                )
+    # ADR-021 (2026-05-29): 删除 dead axiom add_iq_latch_protect_axiom
+    # (零真实调用点，ADR-013 axiom 墓地漏网者；v8 Y'-spike gate 曾误建立在它之上)。

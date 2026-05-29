@@ -11,12 +11,13 @@ add_bank_conflict_axiom = ResourceAxioms.add_bank_conflict_axiom
 add_spill_reload_mutex_axiom = ResourceAxioms.add_spill_reload_mutex_axiom
 
 add_side_effect_phase_axiom = PhysicalAxioms.add_side_effect_phase_axiom
-add_iq_latch_protect_axiom = PhysicalAxioms.add_iq_latch_protect_axiom
+# ADR-021: add_iq_latch_protect_axiom 已删除（dead axiom，零调用）
 
 
 class SynthesisAxioms:
     """
-    兼容旧版的 SynthesisAxioms 类。ADR-013 后只保留 7 active axiom wrapper。
+    兼容旧版的 SynthesisAxioms 类。保留 active axiom wrapper（ADR-021 删 dead 的
+    add_iq_latch_protect_axiom，它原被误计入 ADR-013 "7 active"，实为零调用 dead export）。
     若历史代码引用已删的 axiom（如 add_anti_overwrite_axiom），会触发 AttributeError ——
     这是预期行为（参见 ADR-010 axiom 考古表 + ADR-013 §Consequences）。
     """
@@ -49,10 +50,6 @@ class SynthesisAxioms:
     def add_side_effect_phase_axiom(*args, **kwargs):
         return add_side_effect_phase_axiom(*args, **kwargs)
 
-    @staticmethod
-    def add_iq_latch_protect_axiom(*args, **kwargs):
-        return add_iq_latch_protect_axiom(*args, **kwargs)
-
 
 __all__ = [
     "DependencyAxioms",
@@ -65,5 +62,4 @@ __all__ = [
     "add_bank_conflict_axiom",
     "add_spill_reload_mutex_axiom",
     "add_side_effect_phase_axiom",
-    "add_iq_latch_protect_axiom",
 ]
