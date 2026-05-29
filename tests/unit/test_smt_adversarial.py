@@ -329,5 +329,121 @@ class TestMultiSMCAxioms(unittest.TestCase):
             msg="2 SHIFTUP 沿途 SMC_0..3 都占同 chain IQ slot → UNSAT (D3.e)")
 
 
+class TestEmitterPerSMCStagger(unittest.TestCase):
+    """
+    ADR-020 v6 per-SMC stagger 算法测试骨架（TDD red 阶段）.
+
+    本套件锁住 v6-4 `_compute_per_smc_stagger` + v6-5 `_verify_post_stagger_resources`
+    的 API contract。v6-4/5 实现未落锤前全部 skip（不破 pytest baseline）;
+    落锤后 `@unittest.skipUnless` 自动启用。
+
+    算法契约（ADR-020 v6 §Decision + v5.1 §实施算法 L760-772）:
+      Pass 1 forward topo:
+        delta(consumer, k) = max(delta(prod, k) for prod in deps(consumer))
+        if consumer 跨 SHIFTUP chain:
+          delta(consumer, k) = max(delta(consumer, k), (smc_id_en - k) * chain_stage_latency)
+      Pass 2 backward BFS:
+        partitioned UR_READ (无 producer) 若是 staggered consumer 依赖，反传 stagger
+
+    P2 verifier (v6-5) 契约: post-stagger 后复跑 ResourceAxioms 做 per-SMC sanity check;
+    hex 层资源冲突应 raise / return False (HCO 风险 #2 反例).
+    """
+
+    SKIP_V6_4 = "v6-4 _compute_per_smc_stagger 未落锤; 实现后自动启用"
+    SKIP_V6_5 = "v6-5 _verify_post_stagger_resources 未落锤; 实现后自动启用"
+
+    @staticmethod
+    def _has_stagger():
+        from driver.emitter import LIRPacker
+        return hasattr(LIRPacker, '_compute_per_smc_stagger')
+
+    @staticmethod
+    def _has_verifier():
+        from driver.emitter import LIRPacker
+        return hasattr(LIRPacker, '_verify_post_stagger_resources')
+
+    @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
+    def test_stagger_zero_for_non_shiftup_ops(self):
+        """
+        非 SHIFTUP/SHIFTDN 链算子: delta_k = 0 for all (trace_id, SMC_k).
+        v6 P1 invariant: 非 chain 算子 stagger 算法应输出与 v5.1 baseline 字节级一致.
+        horner / activation / matmul 等回归 free pass 依赖此性质 (HCO 理由 #5).
+        """
+        # Contract: 构造无 SHIFTUP 的 DFG (2 FPADD + dep), 任意 smc_num
+        # Expected: delta_map[(trace_id, smc_k)] == 0 for all keys
+        self.fail("v6-4 实施时填充: 构造 mock instructions + mir_ops, "
+                  "调 _compute_per_smc_stagger(instructions, mir_ops, smc_num=4), "
+                  "断言 all(delta == 0)")
+
+    @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
+    def test_stagger_two_smc_broadcast_basic(self):
+        """
+        2-SMC SHIFTUP broadcast smc_id_en=1: v5.1 公式 delta_k = (smc_id_en - k) × chain_stage_latency
+          → delta(rtovr_consumer, SMC_0) = 1
+          → delta(rtovr_consumer, SMC_1) = 0
+        最小 stagger 用例; ADR-020 v6 fma_parallel_n 主验证路径的 2-SMC 缩影.
+        """
+        # Contract: DFG = UR_READ → SHIFTUP (smc_id_en=1) → RTOVR (rtovr_dep on SHIFTUP)
+        # Expected:
+        #   delta[("rtovr_consumer", 0)] == 1
+        #   delta[("rtovr_consumer", 1)] == 0
+        self.fail("v6-4 实施时填充: 构造 2-SMC SHIFTUP broadcast DFG, "
+                  "断言 delta_map 与 v5.1 公式严格匹配")
+
+    @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
+    def test_stagger_chain_propagation_a_path(self):
+        """
+        SHIFTUP chain stagger 沿 a 通路 forward 传播 (v5.1 §链式 stagger 传播范围):
+        UR_READ → SHIFTUP → RTOVR → FPMUL → FPADD → RTOVR → UR_WRITE
+        全部 stagger 应继承 SHIFTUP→RTOVR 的 delta_k. fma_parallel_n a 通路缩影.
+        """
+        # Contract: 6-op a 通路 DFG, smc_id_en=1
+        # Expected: 沿 a 通路所有 op 在 SMC_0 都有 delta=1, SMC_1 都 delta=0
+        self.fail("v6-4 实施时填充: 构造 6-op a 通路 DFG, "
+                  "断言 delta 沿 topo forward propagate 一致")
+
+    @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
+    def test_stagger_backward_to_partitioned_bc(self):
+        """
+        Pass 2 backward BFS: b/c 通路 partitioned UR_READ 无 producer, 但若是
+        a 通路 stagger consumer 的依赖, 必须**反向传播 stagger** (HCO 风险 #4).
+        v5.1 §链式传播范围 L750: b_read SMC_0 必须配套 abs_t 提前 31 cycle,
+        否则 FPMUL 在 stagger 后 fire 时 b 操作数缺失.
+        """
+        # Contract: DFG = (UR_READ_a → SHIFTUP smc_id_en=1 → RTOVR) + (UR_READ_b partitioned)
+        #          → FPMUL (deps: RTOVR + UR_READ_b)
+        # Expected: delta[("UR_READ_b", 0)] == 1 (反向传播)
+        #           delta[("UR_READ_b", 1)] == 0
+        self.fail("v6-4 实施时填充: 构造 a + b partitioned DFG, "
+                  "断言 UR_READ_b 也被 backward BFS 反传 stagger")
+
+    @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
+    def test_stagger_emitter_output_byte_equivalence_at_delta_zero(self):
+        """
+        HCO 理由 #5 free pass 属性: stagger 算法在 delta_k = 0 时
+        emitter 输出与 v5.1 baseline 字节级一致.
+        非 SHIFTUP-broadcast 算子 (horner/activation/matmul) 回归 free pass 依赖此性质.
+        """
+        # Contract: 跑 horner --mode hw-parity 一次, 比较新 emitter (含 stagger) 与
+        # baseline emitter 输出 hex 字节级 diff
+        # Expected: 全 SMC 全 hex 字节级一致
+        self.fail("v6-4 实施时填充: horner hw-parity 端到端比对; "
+                  "diff == 0 in all SMC hex files")
+
+    @unittest.skipUnless(_has_verifier.__func__(), SKIP_V6_5)
+    def test_p2_verifier_detects_post_stagger_bank_conflict(self):
+        """
+        ADR-020 v6 §HCO 风险 #2 反例: 构造 2 SHIFTUP-broadcast 后下游各跟 1 UR_WRITE,
+        落同 Bank, II=8. SMT 按 fold 算 modulo 通过 (SMC_31 视角 r=0/r=4 不冲突),
+        但 emitter post-stagger 后跨 SMC 同 Bank r 不一致 → hex 层 bank 冲突.
+        P2 verifier 必须**检测出此冲突并 raise / return False**.
+        """
+        # Contract: 构造 II=8 + 2 SHIFTUP-broadcast + 2 UR_WRITE 同 Bank DFG
+        # 跑 emit_from_instructions(smc_num=32) → 内部应调 _verify_post_stagger_resources
+        # Expected: verifier raises (RuntimeError / AssertionError) 或返回 False
+        self.fail("v6-5 实施时填充: 构造 v6 风险 #2 反例 DFG, "
+                  "断言 emitter 在 post-stagger verify 阶段抛错")
+
+
 if __name__ == "__main__":
     unittest.main()
