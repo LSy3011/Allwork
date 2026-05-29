@@ -1337,3 +1337,113 @@ D.1' SMC_0 基准变体只修了"沿途 SMC chain 启动时机"（SMC_31 晚 31 
 - `build/verification_v2/fma_parallel_n/compiler_schedule.json` · SMT abs_t 实测
 - v4 §"4 层独立 bug" · bug #3 SHIFTUP chain RAW（v6-4 chain 串接已修） + bug #4 Auditor（独立轨道）
 - v6 §HCO 二审 §counter-evidence #2 INIT loops margin sanity check（实测命中触发 D.1' 基准切换）
+
+---
+
+## v6 · HCO 三审 v6-4 next path + v6 final partial closure（2026-05-28 同日下一 session）
+
+### Context
+
+v6-4 commit `7187654` 实施完成后，主对话按 v4 META 反省调 HCO 三审 4 候选选项（V/W/X/Y）裁定 v6 收尾路径。HCO 三审独立判读后给出**第五方案 Y'**（V/W/X/Y 之外），并将 v6-4 partial fix 升 **Partial Accepted**。
+
+### HCO 三审 4+1 裁定摘要
+
+| 选项 | 裁定 | 核心理由 |
+|---|---|---|
+| **V** · SMC_smc_id_en 减法 + assembler margin | **Reject** | max_dsmc 不能 cluster 全局常量（horner 等无端被拖慢，破 zero-diff）；assembler:88-89 loops_val 算错 → SMT II 契约违约；范围扩到 assembler 越界 |
+| **W** · emitter 模拟 margin = 当前 v6-4 实施 | **Partial Accept** | chain 启动时机物理 verified，但 SMC_0 abs_t fold 不可修（单调 INIT loops 调整无法同时修两个独立维度） |
+| **X** · BODY 行 stagger（改 assembler abs_t_val 公式） | **Reject** | 数学等价 Y' 但抽象层错位；emitter 升级为 scheduler 破 ADR-018 D5.b lowering 契约；hex 字节顺序变 → zero-diff 属性破 |
+| **Y 原形** · 全模型 per-SMC t_var | **Reject** | 违一审 §Q1 #1（抽象层切分）+ #2（已 per-SMC axiom 不重复造轮子） |
+| **Y'** · SHIFTUP→RTOVR 单边 deterministic per-SMC | **Adopt for v8** | v6-3 spike 实测 Δ ≈ 0% wall-clock；不破其他 axiom；emitter 后处理可下线 |
+
+### Root cause 物理判读（HCO 三审重定位）
+
+`abs_t=33` 这个数对**任何 SMC 视角下的 sim 行为都不是 truth**：
+- **SMC_0 视角**：cycle 33 时 `SHIFTUP.dr_d` 已被 iter 32 a 覆盖（II=1 每 cycle 更新）→ 取错值
+- **SMC_31 视角**：chain head data 在 cycle 32 才到，cycle 33 dr_d 才是 iter 0 a → 才对
+- **fold 公式只在 SMC_31 视角 truth；SMC_0..30 全错**
+
+`emitter:172 stream.sort(key=lambda x: x.abs_t)` 直接用 abs_t 作 hex 排序 key → **abs_t 的物理 truth 性是 emitter 的输入契约**。emitter 后处理（v6-4 D.1' 任何变体）无法事后修复 abs_t 数值本身错位。
+
+### v6-4 partial fix 升 Partial Accepted
+
+| 维度 | 状态 |
+|---|---|
+| chain 串接 1-cycle 时延物理 verified（sim Cyc 36/67） | ✓ Closed |
+| ADR-020 v4 §bug #3 cycle-level root cause | ✓ Completely closed |
+| `_compute_per_smc_stagger` API + 算法 | ✓ Locked (v8 保留作 debug 输出) |
+| TDD 5/5 + pytest 70/70 | ✓ Locked |
+| fma_parallel_n 32-SMC bit-perfect | ✗ 未交付（与 v4 baseline 同 0/32） |
+| SMC_0 自身 abs_t fold over-conservative root cause | ✗ 需 v8 Y' 路径 |
+
+**v6 段在末尾加 errata（不开新 ADR）**：本三审判读是 v6 prescription 范围内的实测订正，未推翻 ADR-020 主 decision（"SHIFTUP→RTOVR 数据流跨 SMC 需补 stagger"仍正确）。v8 实施前必经新 ADR-021。
+
+### v8 路径 prescription（HCO 三审推荐 Y'）
+
+```
+v8 = SHIFTUP→RTOVR 单边 deterministic per-SMC t_var:
+
+1. src/synthesis/axioms/dependency_axioms.py:53-60
+   SHIFTUP→RTOVR 边改 per-SMC: K=smc_id_en+1 个 deterministic t_smc_k
+   = t_prod + 1 + k × chain_stage_latency
+   (与 v6-3 spike commit c5ed87d patch 同 patch, 已实测 0% wall-clock cost)
+
+2. src/synthesis/axioms/physical_axioms.py:69-110
+   add_iq_latch_protect_axiom latch_vars pool 容纳 per-SMC t_var
+   (HCO 三审 §counter-evidence: 最不确定点, 需 Y'-spike 验证 SAT + II 不变)
+
+3. src/driver/emitter.py:_emit_multi_smc
+   读 per-SMC abs_t 后 stagger 减法可下线
+   (_compute_per_smc_stagger 保留作 debug output, physical_instructions.json
+    三列 effective_smc_k_abs_t 仍有用)
+
+4. P1 注释二次订正
+   dependency_axioms.py:53-71 fold 公式注释改为 per-SMC truth 语义
+   (v6-2 P1 注释 worst-case 边界语义在 v8 后失效)
+
+5. 必经新 ADR-021 (B类 axiom 变更 + 反 OQ#1 一审决策 reverse)
+   必经 hco 复核
+```
+
+**v8 前置 Y'-spike**（HCO 三审 §counter-evidence 验证手段）：
+1. 临时 patch `dependency_axioms.py:53-60` 创建 32 个 deterministic per-SMC t_smc_k
+2. 同时 `physical_axioms.py:69-110` latch_vars pool 适配 per-SMC
+3. 跑 `fma_parallel_n --mode smt-unit` 3 次，确认 SAT + II 不变 + latch_protect 不 UNSAT
+4. 跑 e2e 验证 SMC_0 RTOVR-3 拿到 iter 0 a 而非 iter 32 a → bit-perfect
+
+**Counter-evidence 触发回退条件**：若 Y'-spike 触发 latch_protect UNSAT 或 II 飙升 → Y' 不可行，回头走 X（接受 lowering 升级 scheduler 代价）。
+
+### v6 final 必经回归 case（v8 落地标准）
+
+1. **fma_parallel_n 32-SMC bit-perfect**（v8 主验收点）
+2. **horner / activation / matmul 非 chain 算子字节级 diff = 0**（zero-diff 属性回归；非 chain 算子 lir_stream 无 SHIFTUP → Pass 1 跳过 → 等价 baseline）
+3. **smt-unit 13/13**（axiom 改后 II 不漂）
+4. **TDD `test_stagger_emitter_output_byte_equivalence_at_delta_zero` 仍 pass**（v8 下线 stagger 后，delta=0 属性测试可改为 lir_stream 无 SHIFTUP 时 emitter 输出与 baseline 字节一致）
+5. **CE #1 fold-misleading-32 audit 路径**：v8 后 fold 公式 P1 注释需重新订正（lat_p 物理含义已从"worst-case 边界"重新定义为"per-SMC truth 数学"）
+
+### v6 实施总结（commit 历史）
+
+| commit | 内容 | 状态 |
+|---|---|---|
+| `c5ed87d` | v6 ADR draft (一审决策证据 + counter-evidence spike) | Locked |
+| `80bb88d` | v6-2 P1 注释扩写 (dependency_axioms.py:53-60) | Locked |
+| `b6eaf1c` | v6-8 ADR-018 D3.b errata | Locked |
+| `735547a` | v6-7 TDD 骨架 (test_smt_adversarial.py 6 测试) | Locked |
+| `39d364e` | v6 HCO 二审 + 红旗 #1 closed + D.1' verify | Locked |
+| `7187654` | v6-4 真代码 partial fix (emitter + pipeline_runner + TDD 5/5 pass) | **Partial Accepted** |
+| `e85c8e3` | v6-4 实测发现 + 0/32 root cause + 三审 brief | Locked |
+| (本 commit) | v6 HCO 三审 + Y' adopt + partial closure 总结 | Locked |
+
+**v6 状态升 Partial Accepted**（frontmatter still_holds: partial 不变，但 v6 段标完成 partial closure）；**v8 = Y' adoption 启动节点**。
+
+### v6 三审 References
+
+- 本 session HCO 三审报告（agentId `aeb10890d76e390da`，markdown 输出已嵌入本段）
+- `src/synthesis/axioms/dependency_axioms.py:53-60` · v8 Y' 单边 per-SMC 化目标点
+- `src/synthesis/axioms/physical_axioms.py:69-110` · v8 latch_vars pool 适配点（HCO 三审 §counter-evidence 最不确定判读）
+- `src/driver/emitter.py:241-363` · v6-4 `_compute_per_smc_stagger`（v8 保留作 debug output）
+- `src/driver/emitter.py:161-195` · v6-4 `_emit_multi_smc` 应用点（v8 下线 stagger 减法）
+- commit `c5ed87d` · v6-3 spike 已实测 Δ ≈ 0% wall-clock（Y' 0% cost 物理证据）
+- `build/verification_v2/fma_parallel_n/compiler_schedule.json` · root cause 实测 abs_t=33（fold worst-case）
+- `sim/smc_simulator/units/shift_up_unit.py:39-78` · `dr_d` 1-cycle latch（II=1 下每 cycle 被覆盖；fold 公式无 SMC_0 视角 truth 物理证据）
+- `sim/smc_simulator/system/cluster.py:84-101` · `_propagate_chain_inputs` 每 cycle 推 1 cycle（chain 1-cycle 时延物理证据）
