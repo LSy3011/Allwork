@@ -979,3 +979,263 @@ A 路径下 SMT compiler_schedule.json 显示统一 abs_t，sim trace 显示 per
 - `src/synthesis/axioms/physical_axioms.py:81-83` · iq_latch_protect cross-SMC skip（理由 #3 / spike 局限 #3）
 - `docs/adr/ADR-018-multi-smc-scheduling-design.md:139-153` · D5.b/D5.c lowering 先例（理由 #1）
 - v5 §D11 修法范围 · v6 落地必动/不动清单（v5.1 不扩范围）
+
+---
+
+## v6 · HCO 二审 v6-4 implementation outline + 红旗 #1 物理验证（2026-05-28 同日下一 session）
+
+### Context
+
+v6 §Decision + §Implementation 清单 row #1-2 已 HCO 一审审定 prescriptive text；v6-2 P1 注释（commit `80bb88d`）+ v6-7 TDD 骨架（commit `735547a`）+ v6-8 ADR-018 D3.b errata（commit `b6eaf1c`）已 mechanical 落锤。**v6-4 `_compute_per_smc_stagger` 真代码落地前**，按 v4 META 反省（"涉及 axiom/sim/hw_spec 选型应预先调 hco 而非先 self-推荐"），主对话先 prep 4 个 open design Q 的 implementation outline，调 HCO 二审独立裁定。
+
+### HCO 二审 4 个 Q 裁定摘要
+
+| Q | 主对话 outline | HCO 裁定 | 关键差异 |
+|---|---|---|---|
+| Q1 stagger 算法注入层级 | A.1 emitter 内部（ADR §Implementation row #2 锁定） | ✓ 通过 | + 强制 `lir_stream` keyword-only + `smc_num>=2` 缺 lir_stream **fail-fast raise**（禁止 silent fallback 到 delta=0，遵循 ADR-018 D5.a "SMC_ID 4-bit fail-fast" 同模式） |
+| Q2 PhysicalInstruction schema | 不扩 | ✓ 通过 | v6-6 debug 字段写在 emitter 本地 `instr_to_dump_dict(instr, smc_id)`，**不污染 `PhysicalInstruction.to_dict()`**（后者 SMC 无关，多处调用） |
+| Q3 abs_t 偏移具现到 hex | B.1/B.2/B.3 候选未决 | ⚠ **B.1/B.2/B.3 全否** → **D.1' INIT 行 loops 字段减法** | 见下 §Q3 物理分析 |
+| Q4 P2 verifier 耦合 | C.1 共享 delta_map | ✓ 通过 | ResourceAxioms 接口**不能字面复用**（z3.Int 与 plain int 不能混算），P2 verifier 写 **plain Python 版本** + v6-5 前置小重构（提 `_get_resource_type` + bank_id 派生到 `src/synthesis/axioms/_resource_helpers.py` 独立模块，axiom 类和 verifier 共用） |
+
+### Q3 物理分析（HCO 推断 + 主对话 sim source 推理证据交叉验证）
+
+**B.1（SMI header.dly）致命缺陷**：
+- `iq_unit.py:82` DLY 仅 3-bit (max 7 cycle)，fma_parallel_n smc_id_en=31 需装 31 cycle —— **位宽物理不够**
+- DLY 是单次 IQ 延后取指，**只能延后不能加速**——方向反
+
+**B.2（NOP padding 重排）致命缺陷**：
+- 方向反（主对话 outline "给 SMC_k 头部插 `(smc_id_en - k)` 个 NOP" 实际方向应为 "给 SMC_k 头部插 `k × chain_stage_latency` 个 NOP"）
+- 即使方向修正，NOP 行破坏 INIT/HDR/BODY 的 `l_init` 全局对齐（`assembler.py:71`）
+
+**B.3（stream 物理重排重算 l_init）致命缺陷**：
+- 同 IQ bucket 内不同 op delta 可能不同（a 通路 RTOVR vs b/c partitioned UR_READ），不能简单减常数
+- 跨 IQ stream 全局同步靠 `l_init = (skip_iterations × II) + 1` 维护，重算会丢失同步
+
+**D.1' 落锤 prescription（HCO 推荐）**：
+```
+SMC_k INIT 行 loops 字段 = instr.header.loops - d_smc
+where d_smc = delta_per_smc[smc_k] = (smc_id_en - smc_k) × chain_stage_latency
+```
+
+物理含义：以 SMC_{smc_id_en} 为基准（INIT loops 不动；hex 字节级与 v5.1 baseline 一致），SMC_k (k < smc_id_en) INIT loops 减 `d_smc`，**整 IQ stream 提前 d_smc cycle 启动 BODY**。SMC_0 d_smc 最大，SMC_{smc_id_en} d_smc=0。
+
+**SMI 协议兼容性**：
+- `iq_unit.py:81` LOOPS 10-bit (max 1023)，d_smc ≤ 31 远小于上限，**新 loops 不溢出**
+- 跨 IQ 同步：同 SMC 内所有 IQ 减同一 d_smc，**SMC 内同步不破**；跨 SMC 不同 IQ stream 在不同 cycle 启动是物理需求
+
+### 红旗 #1 物理验证（sim source 推理证据 · D5.c "沿途 SMC 同 cycle 发射" 是 SMT 抽象错觉）
+
+HCO 推断 D5.c 物理违反 chain 1-cycle 串接需求，但无 RTL spec 直接支撑。主对话用户选择 **sim source 推理路径**验证（轻量，5–10 min）。
+
+**Decisive 物理证据**（`sim/smc_simulator/system/cluster.py:84-101` + `sim/smc_simulator/units/shift_up_unit.py:39-78`）：
+
+```
+SystemCluster.step() 每 cycle 三阶段:
+  1. _propagate_chain_inputs():
+       SMC_{k+1}.chain_inputs['shiftup'] ← SMC_k.units['shiftup'].cru_o
+       (读的是 cycle T-1 末 tick 后的 cru_o 值)
+  2. for each kernel: kernel.step()
+       SHIFTUP.evaluate(): _next_cru_o = chain_in (来源 cycle T-1)
+       SHIFTUP.tick(): cru_o ← _next_cru_o (cycle T 末才生效)
+  3. cycle_count += 1
+```
+
+**反证：SMC_1 SHIFTUP @ cycle T 与 SMC_0 同 cycle 的语义崩塌**
+```
+cycle T 开头: SMC_1.chain_inputs['shiftup'] = SMC_0.cru_o(at T-1 末) ← STALE
+cycle T eval(SMC_1): chain_in = stale value (上次循环残留 / 0)
+cycle T tick(SMC_0): cru_o ← local_data (valid) ← 但已晚，SMC_1 已读错
+```
+
+**正解：SMC_1 SHIFTUP @ cycle T+1 才能拿正确数据**
+```
+cycle T tick(SMC_0): cru_o ← local_data (valid)
+cycle T+1 开头: SMC_1.chain_inputs['shiftup'] = SMC_0.cru_o(T 末) = local_data ✓
+cycle T+1 eval(SMC_1): chain_in = local_data ✓
+```
+
+**与 v4 §bug #3 fma_parallel_n SMC_1..31 全错位完美对应**：当前 emitter 给所有 SMC 同 hex，sim 严格执行，所有 SMC cycle T 同步 issue SHIFTUP；SMC_0 取 local_data 正确，SMC_1..31 取 stale chain_in → 数据错。**v4 bug #3 cycle-level root cause 由此再次 cross-validated**。
+
+**裁定**：
+- D5.c "沿途 SMC 同 cycle 发射 SHIFTUP" **是 SMT 抽象错觉 confirmed**
+- 物理上 SMC_k SHIFTUP **必须晚 SMC_0 共 k cycle fire**（chain 1-cycle 串接时延需求）
+- **HCO D.1' INIT loops 减法方向 verified**（SMC_0 d_smc=31 → 早 31 cycle 启动 → SMC_31 与 SMC_0 之间 SHIFTUP 物理串接 1-cycle 时延对齐）
+- 红旗 #1 **closed**
+
+### 关联 errata（v6 后续，不阻塞 v6-4）
+
+**ADR-018 D3.e `add_chain_iq_propagation_axiom`** (`resource_axioms.py:343-387`) 假设"沿途 SMC 同 cycle 占同 chain IQ slot"——此假设与 D.1' 物理冲突（D.1' 让 SMC_k 比 SMC_0 晚 k cycle issue SHIFTUP）。
+
+**v6-4 落地后必须配套订正 D3.e**：
+- 选项 (a) 删 axiom（chain IQ slot 占用本就是 D5.c 抽象错觉的副产物，物理上 SMC_k 在不同 cycle 占 slot 不冲突）
+- 选项 (b) 改 axiom 假设 per-SMC stagger 后的 effective_abs_t 算 modulo
+
+**HCO 二审报告 §counter-evidence #3 提议**：v6-4 落地 + 32-SMC 回归通过后再做 D3.e errata 判读，避免范围扩散到 v6-4。本 ADR 仅 flag 该 errata 候选项。
+
+### Q4 P2 verifier 严格 caveat
+
+ResourceAxioms 接口 `add_resource_constraint(solver, ops, t_vars, II, spec)` 要求 `t_vars: Dict[trace_id, z3.ArithRef]`；C.1 共享 delta_map 路径下 verifier 用 `Dict[trace_id, int]` 喂入会破 z3 类型契约。
+
+**v6-5 落锤 spec**：
+- `_verify_post_stagger_resources(instructions, lir_stream, delta_per_op, smc_num, II)` 写 **plain Python 版**：循环 SMC × instr，按 effective_abs_t = abs_t - delta_per_op[(tid, smc_k)] 算 modulo，对每 (bank_id, mod_slot) bucket 检查冲突
+- bank_id / mod_slot 派生逻辑**字节级一致** with `resource_axioms.py:155-188 get_op_bank_and_addr` + `_get_resource_type`（避免 silent drift）
+- **v6-5 前置小重构**（在 v6-5 task 内处理）：提 `_get_resource_type` + bank_id helper 到 `src/synthesis/axioms/_resource_helpers.py`，axiom 类 + emitter verifier 共用解析
+
+### v6-4 实施 spec（HCO 落锤版，主对话照此写真代码）
+
+#### 1. `_compute_per_smc_stagger` 函数签名
+
+```python
+@staticmethod
+def _compute_per_smc_stagger(
+    lir_stream: List["LIROp"],
+    smc_num: int,
+    chain_stage_latency: int = 1,  # ADR-018 D3.b
+) -> Tuple[Dict[Tuple[str, int], int], Dict[int, int]]:
+    """
+    Returns:
+      delta_per_op[(trace_id, smc_k)] : 该 op 在 SMC_k 上相对 SMC_{smc_id_en} 提前的 cycle 数（≥ 0）
+      delta_per_smc[smc_k]            : max over all op delta，该 SMC 整 IQ stream INIT loops 应减的 cycle 数
+    """
+```
+
+算法：
+```
+Pass 1 forward topo（沿 depends_on + rtovr_deps）:
+  对每条 SHIFTUP/SHIFTDN producer p:
+    smc_id_en = p.metadata['smc_id_en']
+    if smc_id_en <= 0: skip
+    for k in range(min(smc_num, smc_id_en + 1)):
+      d = (smc_id_en - k) × chain_stage_latency
+      for c in consumer-of-p (rtovr_deps + depends_on 反查):
+        delta_per_op[(c.trace_id, k)] = max(..., d)
+  然后沿拓扑正向传播 max（consumer 继承 producer 的 delta）
+
+Pass 2 backward BFS:
+  worklist = {tid for (tid, k) where delta > 0}
+  while worklist:
+    cons_id = pop
+    for prod_id in cons.depends_on:
+      for k in range(smc_num):
+        if delta[(cons_id, k)] > delta[(prod_id, k)]:
+          delta[(prod_id, k)] = delta[(cons_id, k)]
+          worklist.add(prod_id)
+
+delta_per_smc[k] = max(delta_per_op[(t, k)] for t in lir_stream)
+```
+
+#### 2. `emit_from_instructions` 入口签名（Q1 fail-fast）
+
+```python
+def emit_from_instructions(
+    self,
+    instructions: List[PhysicalInstruction],
+    case_root: str,
+    program=None,
+    smc_num: int = None,
+    *,                                          # keyword-only 分隔
+    lir_stream: Optional[List["LIROp"]] = None, # NEW: DFG 拓扑入口
+):
+    if smc_num is None or smc_num == 1:
+        return self._emit_single_smc(instructions, case_root, program)
+    if lir_stream is None:
+        raise ValueError(
+            "[ADR-020 v6] _emit_multi_smc requires lir_stream for per-SMC stagger; "
+            "pipeline_runner.py must pass lir_stream= keyword."
+        )
+    delta_per_op, delta_per_smc = self._compute_per_smc_stagger(
+        lir_stream, smc_num, chain_stage_latency=1
+    )
+    return self._emit_multi_smc(
+        instructions, case_root, program, smc_num, delta_per_op, delta_per_smc
+    )
+```
+
+#### 3. `_emit_multi_smc` 注入 d_smc（Q3 D.1'）
+
+```python
+def _emit_multi_smc(
+    self, instructions, case_root, program, smc_num,
+    delta_per_op=None, delta_per_smc=None,
+):
+    ...
+    for smc_id in range(smc_num):
+        d_smc = (delta_per_smc or {}).get(smc_id, 0)
+        ...
+        for iq_name, stream in iq_buckets.items():
+            ...
+            for instr in stream:
+                if self._should_skip_chain_instr(instr, smc_id):
+                    continue
+                header_eff = instr.header
+                if instr.stage == "INIT" and d_smc > 0:
+                    header_eff = copy.copy(instr.header)
+                    new_loops = instr.header.loops - d_smc
+                    if new_loops < 0:
+                        raise RuntimeError(
+                            f"[ADR-020 v6] SMC_{smc_id} stagger d_smc={d_smc} "
+                            f"超过 INIT loops={instr.header.loops}; "
+                            f"fold worst-case latency 过小不足以容纳 stagger."
+                        )
+                    header_eff.loops = new_loops
+                payload_per_smc = self._inject_smc_id(...)
+                payload_per_smc = self._zero_broadcast_data_for_followers(...)
+                val = BitPacker.pack_capsule(..., **header_eff.to_dict())
+                hex_lines.append(...)
+```
+
+#### 4. `pipeline_runner.py:110-112` 调用点修改
+
+```python
+packer.emit_from_instructions(
+    physical_instrs, output_dir,
+    program=emit_program,
+    smc_num=smc_num_eff,
+    lir_stream=ops if is_multi_smc else None,  # NEW
+)
+```
+
+### Zero-diff 属性自检（HCO 风险 #5 / TDD test_stagger_emitter_output_byte_equivalence_at_delta_zero 物理保证）
+
+**当 lir_stream 无 SHIFTUP/SHIFTDN 算子**（horner / activation / matmul 等非 chain 算子）→ Pass 1 跳过所有 producer → delta_per_op 全 0 → delta_per_smc 全 0 → 全 SMC d_smc = 0 → INIT loops 不动 → hex 与 v5.1 baseline **字节级一致**。
+
+**当 smc_id == smc_id_en（最慢 SMC）**→ d_smc = 0 → header_eff = instr.header → hex 字节级一致。fma_parallel_n 32-SMC 下 SMC_31 hex = v5.1 baseline，SMC_0..30 是 stagger 修正版。
+
+### v6-4 落代码后必跑（HCO §counter-evidence）
+
+1. **CE #2 INIT loops margin sanity check**：fma_parallel_n 32-SMC 跑通后 inspect compiler_schedule.json，确认所有 IQ l_init ≥ 31（SMC_0 d_smc = 31）。若 raise RuntimeError 则触 ADR-020 v6 §"INIT margin 不足"边界，需独立判读
+2. **TDD 6 个 `TestEmitterPerSMCStagger` 测试全 pass**（含 backward BFS + delta=0 字节一致 + P2 反例）
+3. **horner/activation/matmul hex hw-parity diff == 0 字节级**（free pass 属性，HCO 理由 #5）
+4. **fma_parallel_n 32-SMC hw-parity 通过**（v6 主验证点，bit-perfect SMC_0..31）
+
+### 文件影响清单（v6-4 真代码 commit）
+
+| 文件 | 改动 |
+|---|---|
+| `src/driver/emitter.py` | +`_compute_per_smc_stagger` 静态方法 + emit_from_instructions 入口扩 `lir_stream` keyword-only + `_emit_multi_smc` 内 d_smc 注入 |
+| `verification_v2/infra/pipeline_runner.py:110-112` | 调用点加 `lir_stream=ops if is_multi_smc else None` |
+
+### v6 Updated Implementation 清单（替换 §"v6 Implementation 清单"）
+
+| # | 文件 | 改动 | 状态 |
+|---|---|---|---|
+| 1 | `dependency_axioms.py:53-60` | 补丁 P1 注释扩写 | ✓ commit `80bb88d` |
+| 2 | `src/driver/emitter.py` | `_compute_per_smc_stagger` + 入口 fail-fast + d_smc 注入 | v6-4 next |
+| 3 | `src/driver/emitter.py` | 补丁 P2 `_verify_post_stagger_resources`（plain Python 版） | v6-5 next |
+| 3a | `src/synthesis/axioms/_resource_helpers.py` 新增 | v6-5 前置小重构：提 `_get_resource_type` + bank helper | v6-5 前置 |
+| 4 | `src/driver/emitter.py` 输出 | physical_instructions.json 加 `original_smt_abs_t / delta_k / effective_smc_k_abs_t` 三列（写在 emitter 本地 `instr_to_dump_dict(instr, smc_id)`，不污染 PhysicalInstruction.to_dict）| v6-6 next |
+| 5 | `tests/unit/test_smt_adversarial.py` | TDD 骨架 6 测试 | ✓ commit `735547a` |
+| 6 | `docs/adr/ADR-018-multi-smc-scheduling-design.md:93-127` | D3.b errata | ✓ commit `b6eaf1c` |
+| 7 | 全量回归 | fma_parallel_n 32-SMC + horner + activation + matmul + SHIFTUP 全算子 + pytest 65→≥65 + II 回归 + CE #2 INIT margin | v6-9 |
+| 8 | ADR-020 v6 § Implementation 补行号 + 状态升 Accepted（hco 三审） | v6-10 | |
+| **errata** | ADR-018 D3.e `add_chain_iq_propagation_axiom` 订正候选 | v6 落地后判读（不阻塞 v6-4） | TBD |
+
+### v6 二审 References
+
+- 本 session HCO 二审报告（agentId `a4c938d4e6139f49a`，markdown 输出已嵌入本段）
+- `sim/smc_simulator/system/cluster.py:84-101` · `_propagate_chain_inputs` 每 cycle 串接 1-cycle 时延（红旗 #1 物理证据）
+- `sim/smc_simulator/units/shift_up_unit.py:39-78` · ShiftUpUnit `evaluate → tick` 协议（红旗 #1 物理证据）
+- `src/driver/emitter.py:211-256` · D5.c `_should_skip_chain_instr` + `_zero_broadcast_data_for_followers`（per-SMC lowering 现先例，与 D.1' 同模板）
+- `src/driver/assembler.py:71-95` · INIT/HDR `l_init` / `loops_val` 物理含义参照
+- `sim/smc_simulator/control/iq_unit.py:81-148` · SMI 协议 sim 端 PC 推进，验证 INIT loops 字段是 stagger 注入点
+- `tests/unit/test_smt_adversarial.py:332-446` · TDD 骨架已锁 API contract（Q1=A.1 不需 errata）
