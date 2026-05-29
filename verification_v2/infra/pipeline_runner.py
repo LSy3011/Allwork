@@ -107,8 +107,10 @@ class PipelineRunner:
                   f"→ multi-SMC emit smc_num={smc_num_eff}")
         # 多 SMC 模式：传 programs list；emitter._emit_multi_smc 据此 per-SMC inject_data
         emit_program = programs if is_multi_smc else program
+        # ADR-020 v6: 多 SMC 路径必传 lir_stream (DFG 拓扑) 用于 per-SMC stagger
         packer.emit_from_instructions(
-            physical_instrs, output_dir, program=emit_program, smc_num=smc_num_eff
+            physical_instrs, output_dir, program=emit_program, smc_num=smc_num_eff,
+            lir_stream=ops if is_multi_smc else None,
         )
         self._patch_max_cycles(output_dir, safe_max_cycles)
         

@@ -119,7 +119,8 @@ class TestEmitterMultiSMC(unittest.TestCase):
         """N=4 创建 smc_{0..3}/ 目录 + sim_config 含 per_smc_iq_init / smc_num。"""
         instr = self._make_fpmul_instr()
         with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=4)
+            # ADR-020 v6: 单元测试无 DFG, 显式 lir_stream=[] 跳过 stagger fail-fast
+            self.packer.emit_from_instructions([instr], tmp, smc_num=4, lir_stream=[])
             for k in range(4):
                 self.assertTrue(os.path.isdir(os.path.join(tmp, f"smc_{k}")),
                     f"smc_{k}/ 应被创建")
@@ -133,7 +134,7 @@ class TestEmitterMultiSMC(unittest.TestCase):
         """每 SMC 的 hex 因 SMC_ID 字段不同而不同。"""
         instr = self._make_fpmul_instr()
         with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=4)
+            self.packer.emit_from_instructions([instr], tmp, smc_num=4, lir_stream=[])
             hexes = []
             for k in range(4):
                 with open(os.path.join(tmp, f"smc_{k}", "iq_fpmul.hex")) as f:
@@ -156,7 +157,7 @@ class TestEmitterMultiSMC(unittest.TestCase):
             stage='BODY'
         )
         with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=8)
+            self.packer.emit_from_instructions([instr], tmp, smc_num=8, lir_stream=[])
             # SMC_0..3 应有 hex；SMC_4..7 hex 为空
             for k in range(4):
                 hex_path = os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")
@@ -185,7 +186,7 @@ class TestEmitterMultiSMC(unittest.TestCase):
             stage='BODY'
         )
         with tempfile.TemporaryDirectory() as tmp:
-            self.packer.emit_from_instructions([instr], tmp, smc_num=4)
+            self.packer.emit_from_instructions([instr], tmp, smc_num=4, lir_stream=[])
             hexes = []
             for k in range(4):
                 with open(os.path.join(tmp, f"smc_{k}", "iq_shiftup.hex")) as f:
@@ -207,7 +208,7 @@ class TestEmitterMultiSMC(unittest.TestCase):
         instr = self._make_fpmul_instr()
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, r"ADR-018 D5\.a.*5 bit"):
-                self.packer.emit_from_instructions([instr], tmp, smc_num=33)
+                self.packer.emit_from_instructions([instr], tmp, smc_num=33, lir_stream=[])
 
 
 class TestFrontendParallelDimNInjection(unittest.TestCase):

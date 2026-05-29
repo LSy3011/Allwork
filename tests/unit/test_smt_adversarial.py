@@ -5,10 +5,11 @@ sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 
 from ir.mir.mir_op import MIROp
 from ir.mir.builder import MIROpBuilder
-from driver.hw_resource import ResourceType as RT
+from driver.hw_resource import ResourceType as RT, PortSlot as PS
 from api.hw_spec import HardwareSpec
 # ADR-016: 反证测试迁移到 ucode_solver 主路径
 from synthesis.ucode_solver import UCodeSynthesizer, SolverStatus
+from driver.emitter import LIRPacker
 
 class TestSMTAdversarial(unittest.TestCase):
     def setUp(self):
@@ -369,11 +370,17 @@ class TestEmitterPerSMCStagger(unittest.TestCase):
         v6 P1 invariant: 非 chain 算子 stagger 算法应输出与 v5.1 baseline 字节级一致.
         horner / activation / matmul 等回归 free pass 依赖此性质 (HCO 理由 #5).
         """
-        # Contract: 构造无 SHIFTUP 的 DFG (2 FPADD + dep), 任意 smc_num
-        # Expected: delta_map[(trace_id, smc_k)] == 0 for all keys
-        self.fail("v6-4 实施时填充: 构造 mock instructions + mir_ops, "
-                  "调 _compute_per_smc_stagger(instructions, mir_ops, smc_num=4), "
-                  "断言 all(delta == 0)")
+        b = MIROpBuilder()
+        a = b.make_op("FPADD", "a", RT.FPADD, [], "A")
+        b.make_op("FPADD", "b_op", RT.FPADD, [a], "B")
+        ops = b.get_dfg()
+
+        delta_per_op, delta_per_smc = LIRPacker._compute_per_smc_stagger(ops, smc_num=4)
+
+        for (tid, k), d in delta_per_op.items():
+            self.assertEqual(d, 0, f"non-SHIFTUP delta@({tid},SMC_{k}) 应=0, 实测={d}")
+        for k, d in delta_per_smc.items():
+            self.assertEqual(d, 0, f"non-SHIFTUP delta_per_smc[SMC_{k}] 应=0, 实测={d}")
 
     @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
     def test_stagger_two_smc_broadcast_basic(self):
@@ -383,12 +390,23 @@ class TestEmitterPerSMCStagger(unittest.TestCase):
           → delta(rtovr_consumer, SMC_1) = 0
         最小 stagger 用例; ADR-020 v6 fma_parallel_n 主验证路径的 2-SMC 缩影.
         """
-        # Contract: DFG = UR_READ → SHIFTUP (smc_id_en=1) → RTOVR (rtovr_dep on SHIFTUP)
-        # Expected:
-        #   delta[("rtovr_consumer", 0)] == 1
-        #   delta[("rtovr_consumer", 1)] == 0
-        self.fail("v6-4 实施时填充: 构造 2-SMC SHIFTUP broadcast DFG, "
-                  "断言 delta_map 与 v5.1 公式严格匹配")
+        b = MIROpBuilder()
+        ur = b.make_op("UR_READ", "ur_a", RT.UR_READ, [], "URA")
+        b.make_op("SHIFTUP", "shiftup_a", RT.SHIFTUP, [ur], "SUA",
+                  broadcast=1, smc_id_en=1)
+        b.make_op("RTOVR", "rt_a", PS.SHIFTUP_D, [], "RTA")
+        ops = b.get_dfg()
+        next(o for o in ops if o.trace_id == "rt_a").metadata["rtovr_deps"] = {"shiftup_a": {}}
+
+        delta_per_op, delta_per_smc = LIRPacker._compute_per_smc_stagger(
+            ops, smc_num=2, chain_stage_latency=1
+        )
+
+        # SMC_0: delta = (smc_id_en - 0) × 1 = 1; SMC_1: delta = 0
+        self.assertEqual(delta_per_op[("rt_a", 0)], 1, "rtovr SMC_0 delta 应=1")
+        self.assertEqual(delta_per_op[("rt_a", 1)], 0, "rtovr SMC_1 delta 应=0")
+        self.assertEqual(delta_per_smc[0], 1, "delta_per_smc[0] = 1")
+        self.assertEqual(delta_per_smc[1], 0, "delta_per_smc[1] = 0")
 
     @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
     def test_stagger_chain_propagation_a_path(self):
@@ -397,10 +415,29 @@ class TestEmitterPerSMCStagger(unittest.TestCase):
         UR_READ → SHIFTUP → RTOVR → FPMUL → FPADD → RTOVR → UR_WRITE
         全部 stagger 应继承 SHIFTUP→RTOVR 的 delta_k. fma_parallel_n a 通路缩影.
         """
-        # Contract: 6-op a 通路 DFG, smc_id_en=1
-        # Expected: 沿 a 通路所有 op 在 SMC_0 都有 delta=1, SMC_1 都 delta=0
-        self.fail("v6-4 实施时填充: 构造 6-op a 通路 DFG, "
-                  "断言 delta 沿 topo forward propagate 一致")
+        b = MIROpBuilder()
+        ur_a = b.make_op("UR_READ", "ur_a", RT.UR_READ, [], "URA")
+        b.make_op("SHIFTUP", "shiftup_a", RT.SHIFTUP, [ur_a], "SUA",
+                  broadcast=1, smc_id_en=1)
+        b.make_op("RTOVR", "rt_a", PS.SHIFTUP_D, [], "RT")
+        b.make_op("FPMUL", "mul", RT.FPMUL, ["rt_a"], "M")
+        b.make_op("FPADD", "add", RT.FPADD, ["mul"], "A")
+        b.make_op("RTOVR", "rt_add", PS.UR_W0_S, [], "RT2")
+        b.make_op("UR_WRITE", "ur_w", RT.UR_WRITE, ["rt_add"], "URW")
+        ops = b.get_dfg()
+        next(o for o in ops if o.trace_id == "rt_a").metadata["rtovr_deps"] = {"shiftup_a": {}}
+        next(o for o in ops if o.trace_id == "rt_add").metadata["rtovr_deps"] = {"add": {}}
+
+        delta_per_op, _ = LIRPacker._compute_per_smc_stagger(
+            ops, smc_num=2, chain_stage_latency=1
+        )
+
+        a_path = ["rt_a", "mul", "add", "rt_add", "ur_w"]
+        for tid in a_path:
+            self.assertEqual(delta_per_op[(tid, 0)], 1,
+                f"a-path {tid} SMC_0 delta 应=1 (forward propagation)")
+            self.assertEqual(delta_per_op[(tid, 1)], 0,
+                f"a-path {tid} SMC_1 delta 应=0")
 
     @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
     def test_stagger_backward_to_partitioned_bc(self):
@@ -410,12 +447,28 @@ class TestEmitterPerSMCStagger(unittest.TestCase):
         v5.1 §链式传播范围 L750: b_read SMC_0 必须配套 abs_t 提前 31 cycle,
         否则 FPMUL 在 stagger 后 fire 时 b 操作数缺失.
         """
-        # Contract: DFG = (UR_READ_a → SHIFTUP smc_id_en=1 → RTOVR) + (UR_READ_b partitioned)
-        #          → FPMUL (deps: RTOVR + UR_READ_b)
-        # Expected: delta[("UR_READ_b", 0)] == 1 (反向传播)
-        #           delta[("UR_READ_b", 1)] == 0
-        self.fail("v6-4 实施时填充: 构造 a + b partitioned DFG, "
-                  "断言 UR_READ_b 也被 backward BFS 反传 stagger")
+        b = MIROpBuilder()
+        ur_a = b.make_op("UR_READ", "ur_a", RT.UR_READ, [], "URA")
+        b.make_op("SHIFTUP", "shiftup_a", RT.SHIFTUP, [ur_a], "SUA",
+                  broadcast=1, smc_id_en=1)
+        b.make_op("RTOVR", "rt_a", PS.SHIFTUP_D, [], "RTA")
+        b.make_op("UR_READ", "ur_b", RT.UR_READ, [], "URB")
+        b.make_op("FPMUL", "mul", RT.FPMUL, ["rt_a", "ur_b"], "M")
+        ops = b.get_dfg()
+        next(o for o in ops if o.trace_id == "rt_a").metadata["rtovr_deps"] = {"shiftup_a": {}}
+
+        delta_per_op, _ = LIRPacker._compute_per_smc_stagger(
+            ops, smc_num=2, chain_stage_latency=1
+        )
+
+        # FPMUL 因 a 通路 stagger → delta_per_op[(mul, 0)] = 1
+        self.assertEqual(delta_per_op[("mul", 0)], 1,
+            "FPMUL SMC_0 delta 应=1 (a 通路 forward propagation)")
+        # ur_b 必须被 backward BFS 反传 stagger (否则 FPMUL fire 时 ur_b 数据缺失)
+        self.assertEqual(delta_per_op[("ur_b", 0)], 1,
+            "ur_b SMC_0 delta 应=1 (backward BFS 反传, HCO 风险 #4)")
+        self.assertEqual(delta_per_op[("ur_b", 1)], 0,
+            "ur_b SMC_1 delta 应=0")
 
     @unittest.skipUnless(_has_stagger.__func__(), SKIP_V6_4)
     def test_stagger_emitter_output_byte_equivalence_at_delta_zero(self):
@@ -424,11 +477,20 @@ class TestEmitterPerSMCStagger(unittest.TestCase):
         emitter 输出与 v5.1 baseline 字节级一致.
         非 SHIFTUP-broadcast 算子 (horner/activation/matmul) 回归 free pass 依赖此性质.
         """
-        # Contract: 跑 horner --mode hw-parity 一次, 比较新 emitter (含 stagger) 与
-        # baseline emitter 输出 hex 字节级 diff
-        # Expected: 全 SMC 全 hex 字节级一致
-        self.fail("v6-4 实施时填充: horner hw-parity 端到端比对; "
-                  "diff == 0 in all SMC hex files")
+        b = MIROpBuilder()
+        a = b.make_op("FPADD", "a", RT.FPADD, [], "A")
+        c1 = b.make_op("FPADD", "c1", RT.FPADD, [a], "C1")
+        b.make_op("FPADD", "c2", RT.FPADD, [c1], "C2")
+        ops = b.get_dfg()
+
+        _, delta_per_smc = LIRPacker._compute_per_smc_stagger(ops, smc_num=4)
+
+        # delta_per_smc 全 0 → INIT loops 不动 → emitter 输出 baseline 字节级一致 (proxy 自检);
+        # 端到端字节级 diff 由 v6-9 全量回归 horner/activation/matmul cover.
+        for k, d in delta_per_smc.items():
+            self.assertEqual(d, 0,
+                f"非 chain DFG delta_per_smc[SMC_{k}] 应=0, 实测={d}; "
+                f"否则非 chain 算子 INIT loops 会被错改导致 baseline 字节漂动")
 
     @unittest.skipUnless(_has_verifier.__func__(), SKIP_V6_5)
     def test_p2_verifier_detects_post_stagger_bank_conflict(self):
