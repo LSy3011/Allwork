@@ -529,25 +529,31 @@ class Auditor:
             
         cycle_reads = {}
         import re
-        pattern = re.compile(r"Cyc:(\d+)\s+Unit:UR-READ\s+Tag:READ\s+Port:(\d+)\s+Bank:(\d+)\s+Addr:(\d+)")
-        
+        # ADR-021 (bug #4): 按 (cycle, SMC_ID) 隔离。每个 SMC 有私有物理 Bank，
+        # 跨 SMC 的同拍 read 不是物理冲突。原 regex 不捕获 SMC_ID，把 32 个 SMC 同拍
+        # read 按 cycle 合并 → broadcast 张量（各 SMC 处于不同 iter，addr 不同）永远被
+        # 误判为 collision（fma 32-SMC 报 279 假阳性，淹没 truth audit）。日志行已含 SMC_ID
+        # (sim/smc_simulator/memory/ur_bank.py:68)，仅需捕获并纳入 key。
+        pattern = re.compile(r"SMC_ID:(\d+)\s+Cyc:(\d+)\s+Unit:UR-READ\s+Tag:READ\s+Port:(\d+)\s+Bank:(\d+)\s+Addr:(\d+)")
+
         with open(log_path, "r") as f:
             for line in f:
                 match = pattern.search(line)
                 if match:
-                    cyc = int(match.group(1))
-                    port = int(match.group(2))
-                    bank = int(match.group(3))
-                    addr = int(match.group(4))
-                    cycle_reads.setdefault(cyc, []).append((port, bank, addr))
-                    
+                    smc_id = int(match.group(1))
+                    cyc = int(match.group(2))
+                    port = int(match.group(3))
+                    bank = int(match.group(4))
+                    addr = int(match.group(5))
+                    cycle_reads.setdefault((cyc, smc_id), []).append((port, bank, addr))
+
         all_ok = True
         collisions_count = 0
-        for cyc, reads in sorted(cycle_reads.items()):
+        for (cyc, smc_id), reads in sorted(cycle_reads.items()):
             bank_to_addr = {}
             for port, bank, addr in reads:
                 bank_to_addr.setdefault(bank, []).append((port, addr))
-                
+
             for bank, addr_list in bank_to_addr.items():
                 if len(addr_list) > read_ports_limit:
                     # 相同 Bank 读超过限制时，检查是否是相同的地址（支持广播）。
@@ -557,7 +563,7 @@ class Auditor:
                         all_ok = False
                         collisions_count += 1
                         if collisions_count <= 5:
-                            print(f"    [FAIL] Physical Bank Read Collision at Cycle {cyc} on Bank {bank}:")
+                            print(f"    [FAIL] Physical Bank Read Collision at SMC {smc_id} Cycle {cyc} on Bank {bank}:")
                             for port, addr in addr_list:
                                 print(f"      - Port {port} accessed Addr {addr}")
                                 

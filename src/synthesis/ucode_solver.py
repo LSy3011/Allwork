@@ -230,12 +230,10 @@ class UCodeSynthesizer:
 
             # 6. RAW + Latch overwrite（compute-to-compute 路径）
             lat = self.hw_spec.delays.get(res_type, 1)
-            # ADR-018 v7 D3.b (task #18 sub-7): SHIFTUP/SHIFTDN chain extra latency
-            # 与 dependency_axioms 同步——本验证器也按链长扩展 lat。
-            if res_type in ('SHIFTUP', 'SHIFTDN'):
-                smc_id_en = op.metadata.get('smc_id_en', 0)
-                if isinstance(smc_id_en, int) and smc_id_en > 0:
-                    lat += smc_id_en  # chain_stage_latency = 1
+            # ADR-021 (fold-is-bug): 删除 SHIFTUP/SHIFTDN chain worst-case fold。
+            # 与 dependency_axioms 同步——边权 = unit lat，chain 物理延迟由 emitter
+            # per-SMC INIT shift 补偿，不在此处建模。(原 ADR-018 D3.b `lat += smc_id_en`
+            # 是 bug，详见 ADR-021。verifier 与 axiom 必须一致，否则 Synthesis failed。)
             consumers = [o for o in ops if op.trace_id in o.metadata.get("depends_on", [])]
             for cons in consumers:
                 t_c = schedule.get(cons.trace_id)
@@ -265,12 +263,9 @@ class UCodeSynthesizer:
                 if not prod:
                     continue
                 lat_p = self.hw_spec.delays.get(prod.op_type.upper(), 1)
-                # ADR-018 v7 D3.b (task #18 sub-7): SHIFTUP/SHIFTDN chain extra latency
-                # for cross-SMC data propagation (与 dependency_axioms 同步)。
-                if prod.op_type.upper() in ('SHIFTUP', 'SHIFTDN'):
-                    smc_id_en = prod.metadata.get('smc_id_en', 0)
-                    if isinstance(smc_id_en, int) and smc_id_en > 0:
-                        lat_p += smc_id_en  # chain_stage_latency = 1
+                # ADR-021 (fold-is-bug): 删除 SHIFTUP/SHIFTDN chain worst-case fold
+                # (原 ADR-018 D3.b `lat_p += smc_id_en`)。边权 = unit lat，chain 物理延迟
+                # 由 emitter per-SMC INIT shift 补偿。与 dependency_axioms / 维度6 同步。
                 t_prod = schedule.get(prod_id)
                 if t_prod is None: continue
                 t_consumer = schedule.get(op.trace_id)

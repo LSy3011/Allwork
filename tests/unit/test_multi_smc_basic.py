@@ -591,39 +591,46 @@ class TestSub7PerSmcDataAndGolden(unittest.TestCase):
             b_smc_k = programs[k].memory_allocator.banks[1][0]
             np.testing.assert_allclose(b_smc_k, data["b"][k][:4], rtol=1e-5)
 
-    def test_d3b_chain_raw_axiom_extends_shiftup_latency(self):
-        """ADR-018 v7 D3.b: SHIFTUP 下游 consumer t_var 必 >= t_shiftup + 1 + smc_id_en."""
+    def test_adr021_shiftup_rtovr_edge_is_unit_lat_no_fold(self):
+        """ADR-021 (fold-is-bug): SHIFTUP→RTOVR 边权 = unit lat，与 smc_id_en 无关。
+
+        原 ADR-018 D3.b 对此边做 `lat_p += smc_id_en` 的 chain worst-case fold
+        （原测试断言 FPMUL t >= t_shiftup + smc_id_en + 2），实测证明是 bug：它把
+        sim 物理 chain 传播延迟错误塞进 SMT 逻辑调度，令所有 SMC 的 RTOVR 取错
+        iteration（fma 32-SMC 0/32）。删 fold 后 FPMUL t = t_shiftup + 2
+        （shiftup unit lat 1 + RTOVR sample-to-consumer 1），chain 物理延迟由
+        emitter per-SMC INIT shift 补偿 → fma 32/32 bit-perfect。
+        """
         from synthesis.ucode_solver import UCodeSynthesizer
         op = self._load()
         ops = op.get_dfg(self.spec)
         syn = UCodeSynthesizer(self.spec)
         res = syn.solve_with_units(ops, MII=1, MAX_II=16)
-        self.assertIsNotNone(res, "D3.b 加 chain extra lat 后仍应 SAT")
+        self.assertIsNotNone(res, "删 fold 后仍应 SAT")
 
         sched = res["schedule"]
         sup = next(o for o in ops if o.op_type == "SHIFTUP")
         smc_id_en = sup.metadata["smc_id_en"]  # = PARAM_SMC_NUM - 1
-        # consumer FPMUL 的 t 应 >= t_shiftup + 1 (shiftup lat) + smc_id_en (chain) + 1 (RTOVR sample to consumer)
-        # = t_shiftup + smc_id_en + 2
         fpmul = next(o for o in ops if o.op_type == "FPMUL")
-        expected_min = sched[sup.trace_id] + smc_id_en + 2
-        self.assertGreaterEqual(sched[fpmul.trace_id], expected_min,
-            f"D3.b 应延 FPMUL: t_fpmul={sched[fpmul.trace_id]} >= "
-            f"t_shiftup({sched[sup.trace_id]}) + smc_id_en({smc_id_en}) + 2 = {expected_min}")
+        # ADR-021: 边权 = unit lat → FPMUL t = t_shiftup + 2，不含 smc_id_en chain fold
+        expected = sched[sup.trace_id] + 2
+        self.assertEqual(sched[fpmul.trace_id], expected,
+            f"ADR-021 删 fold: t_fpmul={sched[fpmul.trace_id]} 应 = "
+            f"t_shiftup({sched[sup.trace_id]}) + 2 (unit lat) = {expected}，与 smc_id_en 无关")
+        # 反向守护: 确认 fold 未被重新引入（FPMUL 不应被延到含 smc_id_en）
+        self.assertLess(sched[fpmul.trace_id], sched[sup.trace_id] + smc_id_en + 2,
+            f"ADR-021: FPMUL 不应含 chain worst-case fold(smc_id_en={smc_id_en})，防 fold 回归")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Known limitation (sub-7 documented gap):
+# RESOLVED (ADR-021, 2026-05-29): fma_parallel_n 32/32 SMC bit-perfect。
 #
-# 当前 fma_parallel_n e2e 仅 SMC_0 bit-perfect。SMC_k>0 fail 因 sim 的
-# SHIFTUP body 单次发射 + cluster.propagate_chain_inputs 1-cycle delay 模型：
-#   - SHIFTUP IQ body 每 SMC 只 fire 1 次 (loops 应使其 fire 44 次但实测 1 次)
-#   - chain 需 32 cycle 完整 propagate，但 body 只 fire 1 次，chain 只跨 1 stage
-#   - 结果: SMC_1..31.SHIFTUP.dr_d 永远 = 0
-#
-# 这是 sim 端 chain propagation 模型与 SPMD 同步发射 (OQ-8 i) 不匹配的产物。
-# 修复需 ADR-020：sim 内 within-cycle 顺序传播 OR IQ body loop 修复。
-# Stage 1 框架完整：SMT D3.d/e/b + 多 SMC dispatch + per-SMC data 均落地。
+# 上方 sub-7 曾记 "仅 SMC_0 bit-perfect / SMC_k>0 fail"。真 root cause 不是
+# sim chain propagation 模型，而是 SMT 层的 SHIFTUP→RTOVR worst-case fold
+# (`lat_p += smc_id_en`, 原 ADR-018 D3.b)——它把物理 chain 延迟错误塞进逻辑调度，
+# 令所有 SMC 的 RTOVR 取错 iteration。删 fold (axiom 1 处 + counter-verifier 2 处)
+# + 保留 emitter per-SMC INIT shift (v6-4) → 32/32 bit-perfect。详见 ADR-021。
+# (剩余 bank-conflict audit 假阳性 = auditor.py 不按 SMC_ID 隔离，已同 PR 修，bug #4。)
 # ─────────────────────────────────────────────────────────────────────
 
 

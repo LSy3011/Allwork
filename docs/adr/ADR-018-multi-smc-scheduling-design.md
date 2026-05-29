@@ -92,6 +92,8 @@ class ResourceConstraints(BaseModel):
 
 #### D3.b · `add_cross_smc_chain_raw_axiom`（**Stage 2 必做**）
 
+> ⚠ **Errata（[ADR-021](ADR-021-fold-is-bug-delete-shiftup-rtovr-worstcase-fold.md)，2026-05-29）**：D3.b 的 chain extra latency 在 SMT 层的 **fold 实现**（`dependency_axioms.py` 对 SHIFTUP/SHIFTDN producer 做 `lat_p += smc_id_en`，把 SHIFTUP→RTOVR 边权扩成 worst-case 32）经实测证明是 **bug**，已被 ADR-021 删除（含 counter-verifier 两处副本）。它把 sim 的**物理 chain 传播延迟**错误塞进 **SMT 逻辑调度**，令所有 SMC 的 RTOVR 取错 iteration（fma 32-SMC 0/32）。chain 跨 SMC 的物理传播延迟应由 **emitter per-SMC INIT shift**（lowering 层）补偿，不在 SMT 边权建模。删 fold 后 fma_parallel_n 32/32 bit-perfect。下方 D3.b 的 per-SMC 公式（意图）方向无误，错的是 fold-成-单-t_var 的实现。
+
 SHIFTUP / SHIFTDN chain 跨 SMC RAW dep。`chain_stage_latency=1`。
 
 **公式（hco 三审 C1 加 guard）**：

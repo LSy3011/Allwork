@@ -2,13 +2,16 @@
 adr_id: ADR-020
 title: SHIFTUP 多 SMC bit-perfect 收尾（v5：hco 复核选 B 方向 → emitter per-SMC stagger + ADR-018 D3.b worst-case fold 订正）
 decided: 2026-05-28
-last_verified: 2026-05-28
-still_holds: partial
+last_verified: 2026-05-29
+still_holds: superseded
+superseded_by: ADR-021
 ---
 
 # ADR-020 · SHIFTUP 多 SMC bit-perfect 收尾
 
-> **状态：Accepted (v4, partial-fix)** —— bug #1/#2 已修并 commit；bug #3 cycle-level root cause 已锁定（本 session）但代码未修；bug #4 仍未触碰
+> **状态：Superseded by [ADR-021](ADR-021-fold-is-bug-delete-shiftup-rtovr-worstcase-fold.md)（2026-05-29）** —— 本 ADR 历次（v1→v6 + 三轮 HCO）的**修复机制**（方向 B / OQ#1 路径 A / v6-4 D.1' / v6 三审 Y' / V/W/X/Y/Y'）全部建立在"SHIFTUP→RTOVR worst-case fold 是 safe over-approximation、问题在别处"的**错误前提**上。ADR-021 实测证明 **fold 本身是 bug**：删 3 处 fold（axiom + verifier×2）+ 保留 emitter v6-4 per-SMC INIT shift → fma_parallel_n 32/32 bit-perfect。本 ADR 主诊断（"SHIFTUP→RTOVR 跨 SMC 数据流需补偿"）方向正确、保留参考价值，但**修复机制全部作废**，以 ADR-021 为准。
+>
+> **原状态（已 superseded）：Accepted (v4, partial-fix)** —— bug #1/#2 已修并 commit；bug #3 cycle-level root cause 已锁定但代码未修；bug #4 仍未触碰
 >
 > **演进**：
 > - v1（同日早）：决策"改 iq_unit.py body loop，让 SHIFTUP 每 SMC fire ≥32 次/SMC（修法 A）"

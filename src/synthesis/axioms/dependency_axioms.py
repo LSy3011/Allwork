@@ -50,22 +50,17 @@ class DependencyAxioms(AxiomBase):
                 if not producer:
                     continue
                 lat_p = spec.delays.get(producer.op_type.upper(), 1)
-                # ADR-018 v7 D3.b + ADR-020 v6 P1 (语义订正):
-                #   下面 fold 的 lat_p = SMC_{smc_id_en} 数据到达 RTOVR 的 worst-case
-                #   latency 边界（含 chain 累加），**不是 SHIFTUP 自身的 unit lat**
-                #   （SHIFTUP unit lat = 1，见 hw_config/pipeline_delays.yaml）。
-                #   SMT 求解器按此 worst-case 算单 t_var，是 safe over-approximation。
-                #   emitter post-stagger (src/driver/emitter.py) 按 SMC_k 减
-                #   delta_k = (smc_id_en - k) × chain_stage_latency 修正实际 fire cycle:
-                #     SMC_0           fire @ fold_abs_t - smc_id_en × chain_stage_latency
-                #     SMC_{smc_id_en} fire @ fold_abs_t（与 fold 一致）
-                #   compiler_schedule.json 中 SHIFTUP→RTOVR 边权数值勿误判为 SHIFTUP unit lat。
-                #   详见 ADR-020 v6 §HCO OQ#1 复核 + ADR-018 D3.b errata。
-                if producer.op_type.upper() in ('SHIFTUP', 'SHIFTDN'):
-                    smc_id_en = producer.metadata.get('smc_id_en', 0)
-                    if isinstance(smc_id_en, int) and smc_id_en > 0:
-                        chain_stage_latency = 1  # ADR-018 D3.b
-                        lat_p += smc_id_en * chain_stage_latency
+                # ADR-021 (fold-is-bug): SHIFTUP→RTOVR 边权 = SHIFTUP unit lat (=1)，与
+                #   smc_id_en 无关。ADR-018 D3.b 曾对 SHIFTUP/SHIFTDN producer 做
+                #   `lat_p += smc_id_en` 的 chain worst-case fold（标注 "safe
+                #   over-approximation"），实测证明是 bug —— 它把 sim 的物理 chain 传播延迟
+                #   错误塞进 SMT 逻辑调度，令所有 SMC 的 RTOVR 取错 iteration（fma 32-SMC 0/32）。
+                #   chain 跨 SMC 的物理传播延迟由 emitter per-SMC INIT shift
+                #   (src/driver/emitter.py _compute_per_smc_stagger) 在 lowering 层补偿，
+                #   不该在 SMT 层建模。删 fold 后 fma_parallel_n 32/32 bit-perfect。
+                #   ⚠ counter-verifier (ucode_solver.py validate_physical_schedule 维度6 RAW
+                #   + 维度7 RTOVR) 已同步删除对应 fold，否则 axiom/verifier 不一致 →
+                #   Synthesis failed。详见 ADR-021。
                 # 🛸 [V6.0 LATCH OPTIMIZATION - HYBRID MODEL] 异步锁存与严格对齐混合建模
                 # 创设虚拟锁存时间变量 t_latch
                 t_latch = z3.Int(f"t_latch_{op.trace_id}_{prod_id}")
