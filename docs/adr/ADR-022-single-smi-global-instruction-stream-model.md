@@ -11,7 +11,7 @@ supersedes_decision_in: [ADR-018, ADR-019, ADR-020, ADR-021]
 
 > **状态：Proposed → hco APPROVE-with-notes（仅文档落定，代码未改）** —— 本 ADR 由 user 直接给出 RTL spec（表 542–548 SHIFTUP/SHIFTDN 接口 + 微指令 + 功能式）纠正了贯穿 ADR-018→021 的 multi-SMC 心智模型。**代码（emitter + simulator）尚未重构**；本 ADR 先锁正确模型 + 影响面，分阶段实施。hco 全新 context 独立复核（agentId `a240be2f`）：RTL 解读准确、emitter/simulator 偏离指认属实站得住，模型判定可凭 RTL 推导 Accept；补充 3 项已并入（SHIFTDN smc_id_en spec-gap 已被新 RTL 推翻、simulator OQ-1 数据源作废、Accepted 证据门槛）。
 >
-> **升 Accepted 门槛**：模型判定（单 SMI 全局流）凭 RTL 推导充分，可先 Accept；但「现有实现产出*错误*固件」这一更强主张待 **8-SMC 固件 vs VCS 实测**背书（VCS 分歧目前是推导预测，非实测）。
+> **升 Accepted 门槛**：模型判定（单 SMI 全局流）凭 RTL 推导充分，可先 Accept。「现有实现产出*错误*固件」**已由 VCS TB 取指契约结构性实证**（2026-05-29，见 §VCS 实测确认）—— user 确认 VCS testbench 是**单一 SMI 指令存储**，而当前 emitter 产出 8 份带 per-SMC stagger 的独立流，**结构上无法装入单一 SMI 存储**。数值级分歧（用修正后单流固件实跑 VCS 比对）待 emitter 重构后补。
 >
 > **一句话**：硬件是**一个 SMI（单一指令源）+ 一份全局指令流**，指令顺 `CRU` 移位寄存器逐级流过 SMC 阵列，每个 SMC 靠自身 `SMC_ID`（配合指令 `smc_id_en` 使能范围）匹配执行；SHIFTUP/SHIFTDN 是**跨-SMC 数据搬运**原语（上行写 / 下行收）。当前 emitter 给每 SMC 各发一份 `smc_k/iq_*.hex`（8 份独立指令流 + per-SMC INIT stagger）+ Python 仿真器同构建模，**从根上偏离 RTL**。
 
@@ -72,6 +72,19 @@ if CRD_SHIFTDN_I[0]==1:                      # 下行回收 SMC_{src}→SMC_0
 | `y`（切分） | 各 SMC 本地算 `a*b+c`，结果留本地 bank；SMC_0 若需汇总才用 SHIFTDN gather（本测例 testbench 逐 SMC 读 bank，不需要） |
 
 对照当前 emitter 产物：每个 `smc_k/` 都有完整 `iq_shiftup/fpadd/fpmul/rtovr/ur*.hex` = 「N 份独立指令流」的错误形态。正确应是**一份全局指令流**，其中 `a` 的分发是**单条** SHIFTUP broadcast，而非每 SMC 各发一条。
+
+## VCS 实测确认（2026-05-29，结构级）
+
+user 确认 **VCS testbench 是单一 SMI 指令存储**。对 `PARAM_SMC_NUM=8` 重新编译 `fma_parallel_n` 后检查产出固件（`build/verification_v2/fma_parallel_n/`）：
+
+| 证据 | 观测 | 含义 |
+|---|---|---|
+| **8 份 per-SMC 指令流** | `smc_{0..7}/iq_*.hex` 各 12 单元一套 | 单一 SMI 存储只能装一份 → **结构不兼容** |
+| **per-SMC INIT stagger** | `iq_shiftup.hex` 第 1 行 `0x800*(k+1)`：smc_0=0x800 … smc_7=0x4000，线性递增 | 每 SMC 流不同，进一步坐实「非单一全局流」 |
+| **广播 `a` 仅在 SMC_0** | `smc_0/ur_data/bank0.hex` 有真数据，smc_1..7 bank0 全 0（`_zero_broadcast_data_for_followers`） | sim 模型「广播源固定 SMC_0 本地 data」(OQ-1) 与 RTL「data 来自指令字段」冲突 |
+| **`b`/`c` 切分正确** | `bank1`/`bank2` 跨 SMC 各不相同 | per-SMC 数据布局本身对，错的是指令流封装 |
+
+**结论**：当前 emitter 固件**无法装入单一 SMI 存储**——model mismatch 在固件结构层即被证实，无需跑数值比对。这把本 ADR 「现有实现产出错误固件」主张从推导预测升级为**结构性实证**。数值级分歧（修正后单流固件实跑 VCS）待 emitter 重构后补。
 
 ## Decision
 
