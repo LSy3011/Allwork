@@ -190,12 +190,38 @@ class Auditor:
                 dep = deps[0] if deps else None
                 return _evaluate_vector_lanes(dep, current_iter_idx) if dep else np.zeros(vector_lanes, dtype=np.float32)
 
-        for op in ops:
+        # ADR-021 (bug #4 rigid audit): 主循环用 env.get(dep, 0.0) 迭代求值，依赖遍历
+        # 顺序。ops 非拓扑序时，RTOVR/下游节点在其 dep 尚未入 env 时取到 0.0 → expected
+        # 假值（rt_a Exp=0 / rt_inl_2=0 连累 y/out_obj 错）→ truth audit 假阳性。
+        # 按 depends_on 拓扑排序（Kahn's）确保 producer 先于 consumer 求值。
+        from collections import deque as _deque
+        _indeg = {op.trace_id: 0 for op in ops}
+        _children = {op.trace_id: [] for op in ops}
+        for _op in ops:
+            for _d in _op.metadata.get("depends_on", []):
+                if _d in _indeg:
+                    _indeg[_op.trace_id] += 1
+                    _children[_d].append(_op.trace_id)
+        _q = _deque([t for t, d in _indeg.items() if d == 0])
+        _topo_ids = []
+        while _q:
+            _t = _q.popleft()
+            _topo_ids.append(_t)
+            for _c in _children[_t]:
+                _indeg[_c] -= 1
+                if _indeg[_c] == 0:
+                    _q.append(_c)
+        if len(_topo_ids) < len(ops):  # 有环/残留（理论不应发生）→ fallback 补齐
+            _seen = set(_topo_ids)
+            _topo_ids += [op.trace_id for op in ops if op.trace_id not in _seen]
+        _sorted_ops = [op_map[t] for t in _topo_ids]
+
+        for op in _sorted_ops:
             trace_id = op.trace_id
             op_type = op.op_type.upper()
             role = op.metadata.get("role")
             deps = op.metadata.get("depends_on", [])
-            
+
             element_idx = iter_idx * vector_lanes
             
             if op_type == "UR_READ":

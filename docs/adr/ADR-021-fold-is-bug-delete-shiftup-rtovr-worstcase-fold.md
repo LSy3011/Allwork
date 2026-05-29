@@ -52,7 +52,11 @@ spike = 注释 3 处 fold（`dependency_axioms.py:68` + `ucode_solver.py:238` + 
 
 ### 一个独立的假阳性（不影响数值，handoff bug #4 同源）
 
-去 fold 后 truth audit 仍报 `FAILED`，但**纯粹因为** `audit_bank_conflicts` 返回 False（`auditor.py:512-513` `all_matched = all_matched and bank_ok`）。该 bank 审计的 regex（`auditor.py:532`）**不捕获 `SMC_ID`**，把 32 个 SMC 的 broadcast read 按 cycle 合并 → `a`（broadcast，全 Bank 0）各 SMC 因 stagger 处于不同 iter（不同 addr）→ 永远误判 collision。**clean baseline 也报 279 collisions**，与 fold/本 fix 无关。数值层 `all_matched` 本身为 True（32/32）。
+去 fold 后 truth audit 仍报 `FAILED`，但**与数值无关**，是 handoff bug #4 的 auditor 两半假阳性（数值层 `PASSED y` 32/32 已由 golden 比对独立确证）：
+- **(a) bank 假阳性**：`audit_bank_conflicts` 的 regex（`auditor.py`）**不捕获 `SMC_ID`**，把 32 个 SMC 的 broadcast read 按 cycle 合并 → `a`（broadcast，全 Bank 0）各 SMC 因 stagger 处于不同 iter（不同 addr）→ 永远误判 collision。**clean baseline 也报 279 collisions**。
+- **(b) rigid audit 假阳性**：`_evaluate_expected_values` 主循环迭代求值用 `env.get(dep, 0.0)`，依赖 `for op in ops` 遍历顺序。ops 非拓扑序时，RTOVR/下游节点在其 dep 尚未入 env 时取到 0.0 → expected 假值（`rt_a Exp=0`；`rt_inl_2=0` 连累 `y_0_a1=c+0`、`out_obj` 错值）→ 4 个 RTOVR/output 节点假阳性 FAIL。
+
+两半均为纯 auditor 端 bug，与数值/硬件无关。**本 PR 两半都修**（见 Decision 4），修后 fma_parallel_n e2e `exit=0` / `ALL PHYSICAL CHECKS PASSED`。
 
 ## Decision
 
@@ -63,7 +67,10 @@ spike = 注释 3 处 fold（`dependency_axioms.py:68` + `ucode_solver.py:238` + 
    三处必须**同步删除**，否则 counter-verifier 与 solver 不一致 → `Synthesis failed`。
 2. **保留 emitter v6-4 per-SMC INIT shift**（`_compute_per_smc_stagger` + `_emit_multi_smc`，commit `7187654`）—— 它是物理 chain 延迟补偿，是正确对齐机制的另一半。
 3. **更新 `test_d3b_chain_raw_axiom_extends_shiftup_latency`**：它断言 fold 行为，需改为断言"删 fold 后 SHIFTUP→RTOVR 边权 = unit lat"（或删除该测试并新增 fma 32/32 bit-perfect 集成回归）。
-4. **修 `auditor.py:532` bank 冲突审计按 `SMC_ID` 隔离**（handoff bug #4）：regex 捕获 `SMC_ID`，`cycle_reads` key 改为 `(cyc, smc_id)`，让 broadcast read 不再跨 SMC 误判。这是让 truth audit 反映真实数值正确性的必要修复（独立于 fold，但同一验收路径必须一起修）。
+4. **修 handoff bug #4 auditor 两半假阳性**（让 truth audit 反映真实数值 + e2e 退出码绿；独立于 fold，但同一验收路径必须一起修）：
+   - **(a) bank 冲突按 `SMC_ID` 隔离**：`auditor.py` bank regex 捕获 `SMC_ID`，`cycle_reads` key 改为 `(cyc, smc_id)`，broadcast read 不再跨 SMC 误判（279 假阳性 → 0）。
+   - **(b) rigid audit expected 拓扑序求值**：`_evaluate_expected_values` 主循环前按 `depends_on` 拓扑排序（Kahn's），确保 producer 先于 consumer 求值，消除 RTOVR/下游节点 `env.get(dep,0.0)` 取到未算 0.0 的假值。
+   两半修后 fma_parallel_n e2e `exit=0`、`ALL PHYSICAL CHECKS PASSED`（回归 horner/tanh7/silu_taylor/matmul 全 exit=0，拓扑序对正确 case 无害）。
 5. **订正 `dependency_axioms.py:53-63` P1 注释**：v6-2 P1 把 fold 描述为 "safe over-approximation"，现订正为 "fold 是 bug，已删除；SHIFTUP→RTOVR 边权 = unit lat；chain 物理延迟由 emitter per-SMC INIT shift 补偿"。
 6. **（独立清理项，留独立小 PR — 不在本 PR）死 axiom `add_iq_latch_protect_axiom`**：该 axiom 零真实调用点（ADR-013 墓地漏网者），却仍在 `axioms/__init__.py` 的别名(:14)/wrapper(:52-54)/`__all__`(:68) + `physical_axioms.py:69-110` 留死 def。v8 Y'-spike 的 gate 曾误建立在它之上。
    - **纠正 hco 复核的一处误判**：hco 称 `__init__.py:53-54` 是 `def f(*a,**k): return f(*a,**k)` 无限递归 wrapper。实测不成立 —— 函数体内的 `add_iq_latch_protect_axiom` 解析到**模块级别名** `:14`（指向真 def），与 `:29-30 add_latency_axiom` 等 6 个 active wrapper **同一模式**；`add_latency_axiom` 用同模式且 active 工作正常 → 证明该模式不递归。它只是 **dead（零调用）**，不是 bug。
