@@ -3,12 +3,17 @@ adr_id: ADR-024
 title: 8-SMC K 维 matmul —— 跨-SMC SHIFTDN gather-reduce（model A 终值 parity）
 decided: 2026-06-01
 last_verified: 2026-06-01
-still_holds: proposed
+still_holds: superseded
 implements: ADR-022
 supersedes_decision_in: [ADR-018]
+superseded_by: ADR-025
 ---
 
-# ADR-024 · 8-SMC K-parallel matmul（SHIFTDN gather-reduce，model A 中转）
+> # 🪦 WITHDRAWN（2026-06-01，未实施即作废）
+> **前提被 RTL 表 78/79（向量·矩阵乘法存储格式 + 加法树 GEMM 微指令流）证伪。** user 提供的权威 spec 表明：本硬件的 matmul **不靠跨-SMC SHIFTDN sum-reduce**，而是 **广播激活向量（SHIFTUP）+ 每 SMC 与本地权重列点积（reduce 在 SMC 内部用 FP32ADDTREE5TO1 + UR 累加）+ 每 SMC partitioned 输出**——即 **N 维 output-stationary**。SHIFTDN 仅用于串联 matmul 的结果收集/拼接（纯搬运，非求和），这也解释了为何契约里 SHIFTDN 无加法、无 `SHIFTDN_D` 回读（它本就不做 reduce）。
+> **本 ADR 的 K 维 SHIFTDN gather-reduce 模型整体作废，由 [ADR-025](ADR-025-matmul-parallel-n-broadcast-addtree.md) 取代。** 以下内容保留作历史记录 + SHIFTDN datapath 调研存档（DEBT-024-* 一并作废，因 reduce 不走 SHIFTDN）。
+
+# ADR-024 · 8-SMC K-parallel matmul（SHIFTDN gather-reduce，model A 中转）〔WITHDRAWN〕
 
 > **状态：Proposed（doc-first，代码未改）** —— 落地 user 拍板的「8 个 SMC、K 维并行的 matmul」。本 ADR 是 ADR-018 v7 Stage 2（`parallel_dim="K"` + SHIFTDN chain reduce）的首个真实落地，该 Stage 在 ADR-018 时代仅留 stub（`configurable.py:23-26` 声明 `parallel_dim="K"`/`chain_reduce_depth` 但无任何实现），并被 ADR-022/023 单 SMI 重构 orphan。
 >
