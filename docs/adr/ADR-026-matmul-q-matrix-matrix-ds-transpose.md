@@ -80,6 +80,18 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 - `test_ds_transpose_numeric`（HCO B4 硬门）：DS transpose 按 t_dim0/dim1 真做 PyTorch 转置；配对偶用例 `test_ds_activation_must_actually_transpose`（非对称矩阵，no-op/view 实现必 fail）。
 - `test_matmul_q_single_broadcast_across_M_rows`（HCO B2）：M>1 行，断言全程 `_broadcast_shiftup_fanout` active 广播源恒为 1（M 行间串行复用，非并行多源）。
 
+## 实施进展（2026-06-01）
+
+> **Stage-1 DONE**（evaluator ACCEPT-with-caveats，agentId `a32159188c72f6092`）：`ManualMatmulQOperator`（`matmul_op.py`）落地 **M=4 行 × cols_per_smc=1 × K=4 单 tile**，`matmul_q --mode e2e` **8/8 bit-perfect + Truth Audit SUCCESS**（exit=0）；pytest 71 pass/6 skip，fma/matmul_parallel_n/matmul 无回归；4 可证伪单测。
+>
+> **实施关键发现（补充本 ADR 设计）**：
+> 1. **M ≤ addtree pipeline 深度(latency=4)**：addtree 是 cumulative 且**无 reset**（`fp32addtree5to1.yaml` 仅 VALID+smc_id_en）。II=1 下 row 0..3 靠 pipeline 隔离 old_i=0 独立；**M>4 时 row i 累加 row(i-4)**（evaluator 复现污染）。M>4 的正解 = **8 行映射 8 个 addtree 通道(S0..S7)** 或 **UR 部分和**，记 **Stage-2**。
+> 2. **输出 1/词稀疏布局**：1-col addtree 输出在 D0 lane0，每行写一个 128-bit 词（lanes 1-3=0）。golden shape `(smc_num, 4*M)` 忠实反映（verifier 按 4/词解包）。**密集 4/词打包 = Stage-2**（cols_per_smc=4 用 4 通道天然填满一词）。记 **DEBT-026-PACK**。
+> 3. **权重 b 平铺 M 份**（`prepare_input` 返回 (smc_num, M*K)）：让 b-read 逐行读到同列 **且 auditor 用同一 `input_data["b"]` 建模一致**，避免 Truth Audit 假阳性（auditor 用未平铺 b 会在 ITER≥1 期望 0）。
+> 4. **DS transpose 未实施**（激活按行对齐预排，单 tile 下 transpose 无意义）—— Stage-1b/Stage-2 才需，`ShuffleUnit` + modules.yaml DS 条目尚未加（hco DS 触发未 fire，符合范围）。
+>
+> **D6 门的 Stage 归属（evaluator caveat 订正）**：D6 列的 `multi_col_independent_accum`（B1，cols_per_smc=4）+ `ds_transpose_numeric` 对（B4，DS）属 **Stage-2 门**，Stage-1（1 列、无 DS）不覆盖。Stage-1 实测门 = multi_row_dot / per_smc_distinct / single_broadcast_source / m_within_pipeline_depth（`tests/unit/test_matmul_q.py`）。
+
 ## Consequences
 
 ### 正面

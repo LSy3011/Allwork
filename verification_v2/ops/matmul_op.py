@@ -177,6 +177,114 @@ class ManualMatmulParallelNOperator(BaseOperator):
         return ops
 
 
+class ManualMatmulQOperator(BaseOperator):
+    """ADR-026 Stage-1：Matmul_Q（matrix×matrix）缩放实例。
+    广播激活行 X[i,:]（左，单源）× 每 SMC 本地权重列 W[:,s] 点积 → Q[i,s]=Σ_k X[i,k]·W[k,s]。
+    Stage-1：K=4（单 tile/行）、cols_per_smc=1、多左行 M（每 SMC 产 M 个输出）。
+    DS transpose 作 Stage-1b（本轮激活按行对齐预排，不经 DS）。
+    每行独立输出（K=4 单 tile 无跨行累加）。"""
+
+    parallel_dim = "N"
+    K = 4          # 单 tile 收缩维（4-lane）
+    # M ≤ addtree pipeline 深度(latency=4)：II=1 下 row 0..M-1 各 fire 在 4 拍内，
+    # old_i 尚未写回 → 每行 old=0 独立。M>4 时 row i 会累加 row(i-4)（dr_d0 距离-4 反馈）。
+    # M>4 的正解 = 8 行映射 8 个 addtree 通道(S0..S7)或 UR 部分和，记 Stage-2（ADR-026）。
+    M = 4          # 左行数 = 每 SMC 输出数（Stage-1 ≤ pipeline 深度）
+
+    def __init__(self, **kwargs):
+        pass
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp32",
+                  "stride": 1, "smc_layout": "broadcast"},      # 激活：逐行进一个 4-lane 词
+            "b": {"bank": 1, "offset": 0, "role": "input", "precision": "fp32",
+                  "stride": 1, "smc_layout": "partitioned"},    # 权重列：注入时平铺 M 份，逐行读同值
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp32",
+                  "smc_layout": "partitioned"},
+        }
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        # 激活 X[M,K] 广播：flat (M*K,)，第 i 行 = a[i*K:(i+1)*K]
+        a = rng.uniform(1.0, 5.0, self.M * self.K).astype(np.float32)
+        # 权重 W[:,s]：每 SMC 一列（K 个），平铺 M 份 → (smc_num, M*K)。
+        # 平铺让 b-read 逐行(stride1/inner_inc1)读到同一列，且 auditor 用同一 input_data["b"]
+        # 建模 → sim/auditor/golden 三者一致（避免 auditor 假阳性）。
+        b_col = rng.uniform(1.0, 5.0, (smc_num, self.K)).astype(np.float32)
+        b = np.concatenate([np.tile(b_col[s], self.M).reshape(1, -1) for s in range(smc_num)],
+                           axis=0).astype(np.float32)        # (smc_num, M*K)
+        return {"a": a, "b": b}
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"]
+        b = input_data["b"]
+        smc_num = b.shape[0]
+        X = a.reshape(self.M, self.K)                       # [M, K]
+        # b 已平铺 (smc_num, M*K)，每 SMC 权重列 = 前 K 个
+        bcol = b[:, :self.K]                                # (smc_num, K)
+        b = bcol
+        # Q[s, i] = dot(X[i,:], W[:,s])，每 SMC s 输出 M 个（转置间插：per-SMC 一列结果）。
+        # Stage-1 输出布局：每行结果写一个 128-bit 词的 lane0（addtree D0 lane0），lanes 1-3=0。
+        # → bank 实际内容 = [Q_i, 0, 0, 0] × M 个词。verifier _read_sim_output 按 4/词解包，
+        # 故 golden shape (smc_num, 4*M)：Q[s,i] 落 4*i，其余 0（忠实反映稀疏布局）。
+        # 密集 4/词打包 = Stage-2（cols_per_smc=4，4 列填满一词），见 ADR-026 DEBT-026-PACK。
+        golden = np.zeros((smc_num, 4 * self.M), dtype=np.float32)
+        for s in range(smc_num):
+            for i in range(self.M):
+                golden[s, 4 * i] = float(np.dot(X[i], b[s]))
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]
+        b = input_data["b"]
+        a_addr = self.get_bank_addr("a", spec)
+        b_addr = self.get_bank_addr("b", spec)
+        programs[0].inject_vector(a_addr, a, stride=1)       # 广播激活仅注入 SMC_0（M 行 flat）
+        for k, prog in enumerate(programs):
+            prog.inject_vector(b_addr, b[k], stride=1)        # 权重列（K 个）；b-read inner_inc=0 逐行复用
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        # 逐行点积：a 行 tile(broadcast, stride4 逐行进) × b 列(stride0 复用) → FPMUL → addtree 4-lane reduce → Q[i,s]
+        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                       meta_name="a", logical_addr=0 * 256 + 0, stride=1, role="input", iq_id=30)
+        br = b.make_op("UR_READ", "b_read", RT.UR_READ, [],
+                       meta_name="b", logical_addr=1 * 256 + 0, stride=1, role="input", iq_id=31)
+        rt_a = b.make_op("RTOVR", "rt_a_FPMUL_S0", PS.FPMUL_S0, [ar])
+        rt_b = b.make_op("RTOVR", "rt_b_FPMUL_S1", PS.FPMUL_S1, [br])
+        mul = b.make_op("FPMUL", "inl_mul", RT.FPMUL, [rt_a, rt_b], iq_id=3)
+        rt_sum = b.make_op("RTOVR", "rt_mul_FP32ADDTREE5TO1_S0", PS.FP32ADDTREE5TO1_S0, [mul])
+        # 每行独立输出：无 loop_carried 自环（不跨行累加）；K=4 单 tile 一拍 reduce 完。
+        y_sum = b.make_op("FP32ADDTREE5TO1", "y_0", RT.FP32ADDTREE5TO1, [rt_sum],
+                          cumulative=False, reduction_per_channel=4, iq_id=26)
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+        # 每行写自己的输出地址（stride=1 逐行进）
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # M 行 → inner_loops = M-1；激活/输出逐行推进(inner_inc=1)
+        for op in ops:
+            op.metadata.update({"shape": [self.M], "inner_loops": self.M - 1, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+        ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
+        return ops
+
+
 class ManualMatmulOperator(BaseOperator):
     """
     手动编排的 Matmul DFG。

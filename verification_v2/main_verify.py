@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -28,6 +28,8 @@ OPERATOR_MAP = {
     "matmul": ManualMatmulOperator,
     # ADR-025：N 维广播 matmul 走手搭 operator（覆盖 matmul_parallel_n.yaml 的 UNSAT configurable 路径）
     "matmul_parallel_n": ManualMatmulParallelNOperator,
+    # ADR-026 Stage-1：Matmul_Q (matrix×matrix) 缩放实例
+    "matmul_q": ManualMatmulQOperator,
 }
 
 CATEGORIES = {
