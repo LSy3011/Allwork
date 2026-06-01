@@ -92,6 +92,25 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 >
 > **D6 门的 Stage 归属（evaluator caveat 订正）**：D6 列的 `multi_col_independent_accum`（B1，cols_per_smc=4）+ `ds_transpose_numeric` 对（B4，DS）属 **Stage-2 门**，Stage-1（1 列、无 DS）不覆盖。Stage-1 实测门 = multi_row_dot / per_smc_distinct / single_broadcast_source / m_within_pipeline_depth（`tests/unit/test_matmul_q.py`）。
 
+## DS 可排除性结论 + 后续 Stage backlog（2026-06-01）
+
+### DS 是否阻塞 matmul？——**否，可排除**（Stage-1 实证）
+- **matmul 计算本身不依赖 DS**。Stage-1 `matmul_q` 8/8 跑通**全程无 DS**：`inject_data_per_smc` 把激活按**行对齐**直接注入 SMC_0，无任何 transpose 步骤。
+- **DS 的唯一作用**是「激活以 非转置间插 存储、读回列对齐 → 在硬件 UR→UR 转置成行对齐再广播」（表 711 激活矩阵排序微指令）。在**验证/sim 流里我们控制注入布局**，可总是预排成行对齐 → **DS 可完全跳过**。
+- **取舍（model-A 性质）**：跳过 DS = 在 data-prep 层「假做」transpose（预排行对齐），产**正确终值**，但**不建模** 非转置间插 的硬件 transpose（数据搬运 + DS 时序）。真实固件若激活确为 非转置间插，需 DS 做在线转置——这是**忠实度里程碑**，非「能否跑通」问题。
+- **推论**：**Stage-2（4 列 / 大 K / M>4）可全程 DS-free 推进**，靠 data-prep 预排激活。DS 实施推迟到「忠实建模 非转置间插 在线转置 + 串联 matmul 布局」的独立里程碑，且 gated on DEBT-026-DS-FIELDS（RTL 逐字段位宽）+ hco。
+
+### 后续 Stage backlog
+| Stage | 内容 | 依赖 | 是否需 DS |
+|---|---|---|---|
+| **Stage-2a** | cols_per_smc=4（真 Matmul_Q 4 列/SMC）→ 4 通道 addtree 密集 4/词打包（解 DEBT-026-PACK） | 复用现有 | 否（预排激活） |
+| **Stage-2b** | M>4 多行 → 8 行映射 8 addtree 通道(S0..S7) 或 UR 部分和（解 M≤4 pipeline 限制） | hco（通道映射建模） | 否 |
+| **Stage-2c** | 大 K 多-tile（K=4096）→ 部分和写回 UR + 跨 tile 累加（解 DEBT-025-MULTITILE） | — | 否 |
+| **Stage-3 (DS)** | `ShuffleUnit` + modules.yaml DS 条目 + 非转置间插 在线转置 + 上下行握手 | **DEBT-026-DS-FIELDS（user RTL 表 587/588 逐字段位宽）+ hco** | 是（本体） |
+| **Accepted** | 8-SMC 固件 vs VCS 实测背书 | user RTL/VCS | — |
+
+> **优先级建议**：Stage-2a/b/c 全部 DS-free，可在现有基建上推进真实 Matmul_Q 规模；DS（Stage-3）作为忠实度里程碑最后做，避免被 RTL 字段缺口（DEBT-026-DS-FIELDS）阻塞主线。
+
 ## Consequences
 
 ### 正面
