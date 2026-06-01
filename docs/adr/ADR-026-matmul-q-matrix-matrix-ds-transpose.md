@@ -100,6 +100,13 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 - **取舍（model-A 性质）**：跳过 DS = 在 data-prep 层「假做」transpose（预排行对齐），产**正确终值**，但**不建模** 非转置间插 的硬件 transpose（数据搬运 + DS 时序）。真实固件若激活确为 非转置间插，需 DS 做在线转置——这是**忠实度里程碑**，非「能否跑通」问题。
 - **推论**：**Stage-2（4 列 / 大 K / M>4）可全程 DS-free 推进**，靠 data-prep 预排激活。DS 实施推迟到「忠实建模 非转置间插 在线转置 + 串联 matmul 布局」的独立里程碑，且 gated on DEBT-026-DS-FIELDS（RTL 逐字段位宽）+ hco。
 
+### Stage-2a 实施发现（2026-06-01，UNSAT，需 local-buffer 修法）
+尝试 cols_per_smc=4（4 通道密集打包）撞 **结构性 UNSAT**（实测 II=4..15 全 UNSAT，去广播注入仍 UNSAT）：
+- **根因**：单个广播 a-read 喂 4 个串行 FPMUL（1 个 FPMUL 单元）的 FPMUL_S0 路由 = matmul_op 注释点名的「单物理乘法器串行发射 + RTOVR 强对齐选通冲突」。`ManualMatmulOperator` 靠 **4 个独立 a-read（不同 iq_id 破对称）** 解 SAT。
+- **张力**：4-col 要 4 个独立 a-read（SAT 需要）vs 广播只能单源（B2 / multi-broadcast sim 限制）。二者直接冲突。
+- **修法（local-buffer 间接，待实施）**：广播 a 一次 → SHIFTUP → **写本地 bank（如 bank7）缓冲** → 各 SMC 从本地 bank **4 次独立读（不同 iq_id）** → 4 FPMULs。本地读非广播 → 不违 B2，且 4 独立 read 破对称 → SAT。代价：加一次 broadcast→local 写 + 写端口资源竞争（buffer 写 + 4 temp 写 + output 写 vs 4 个 UR_W 端口）需调度。
+- **现状**：`ManualMatmulQ2Operator`（matmul_op.py）+ `matmul_q2` 注册为 **WIP（UNSAT，未 commit）**；local-buffer 修法是 Stage-2a 的明确下一步。
+
 ### 后续 Stage backlog
 | Stage | 内容 | 依赖 | 是否需 DS |
 |---|---|---|---|
