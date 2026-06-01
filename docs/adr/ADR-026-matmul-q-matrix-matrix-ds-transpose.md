@@ -100,17 +100,37 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 - **取舍（model-A 性质）**：跳过 DS = 在 data-prep 层「假做」transpose（预排行对齐），产**正确终值**，但**不建模** 非转置间插 的硬件 transpose（数据搬运 + DS 时序）。真实固件若激活确为 非转置间插，需 DS 做在线转置——这是**忠实度里程碑**，非「能否跑通」问题。
 - **推论**：**Stage-2（4 列 / 大 K / M>4）可全程 DS-free 推进**，靠 data-prep 预排激活。DS 实施推迟到「忠实建模 非转置间插 在线转置 + 串联 matmul 布局」的独立里程碑，且 gated on DEBT-026-DS-FIELDS（RTL 逐字段位宽）+ hco。
 
-### Stage-2a 实施发现（2026-06-01，UNSAT，需 local-buffer 修法）
+### Stage-2a 实施发现（2026-06-01，初判，部分被下方 2026-06-01-b 订正）
 尝试 cols_per_smc=4（4 通道密集打包）撞 **结构性 UNSAT**（实测 II=4..15 全 UNSAT，去广播注入仍 UNSAT）：
 - **根因**：单个广播 a-read 喂 4 个串行 FPMUL（1 个 FPMUL 单元）的 FPMUL_S0 路由 = matmul_op 注释点名的「单物理乘法器串行发射 + RTOVR 强对齐选通冲突」。`ManualMatmulOperator` 靠 **4 个独立 a-read（不同 iq_id 破对称）** 解 SAT。
 - **张力**：4-col 要 4 个独立 a-read（SAT 需要）vs 广播只能单源（B2 / multi-broadcast sim 限制）。二者直接冲突。
-- **修法（local-buffer 间接，待实施）**：广播 a 一次 → SHIFTUP → **写本地 bank（如 bank7）缓冲** → 各 SMC 从本地 bank **4 次独立读（不同 iq_id）** → 4 FPMULs。本地读非广播 → 不违 B2，且 4 独立 read 破对称 → SAT。代价：加一次 broadcast→local 写 + 写端口资源竞争（buffer 写 + 4 temp 写 + output 写 vs 4 个 UR_W 端口）需调度。
-- **现状**：`ManualMatmulQ2Operator`（matmul_op.py）+ `matmul_q2` 注册为 **WIP（UNSAT，未 commit）**；local-buffer 修法是 Stage-2a 的明确下一步。
+- **修法（local-buffer 间接，初判）**：广播 a 一次 → SHIFTUP → 写本地 bank → 各 SMC 4 次独立读 → 4 FPMULs。**↓ 下方 2026-06-01-b 证伪：local-buffer 全 UNSAT。**
+
+### Stage-2a 落地（2026-06-01-b：local-buffer 证伪 → model-A 预分发交付；广播通路 → ADR-027）
+
+**结论：DEBT-026-PACK（dense 4/词打包）已落地 + 8/8 bit-perfect（exit=0）**；广播-到-4列 的忠实通路被 hco BLOCK（根节点 Q2.1），隔离到 **[ADR-027](ADR-027-sim-multi-broadcast-shiftup.md)**。
+
+- **local-buffer 修法证伪（SMT 全 UNSAT）**：实测 4 种 DFG 变体均 UNSAT —— ① 单 buffer 写 + 4 读同 cell；② 4 写 distinct 地址 + 4 读（4 RTOVR 消费单 SHIFTUP_D 撞强对齐）；③ 单写 + 4 读 distinct 读端口；④ 单写 distinct 地址。两道墙：4 RTOVR 读同一 SHIFTUP_D 源撞强对齐选通 / 4 读同一 intermediate cell UNSAT。**local-buffer 计划作废，勿再试。**
+- **indep 修法（4 独立 SHIFTUP op）SMT-SAT@II=6 但 sim 多广播缺口**：`sim/.../kernel.py:516` SHIFTUP 数据硬连读端口 0（`get_read_data(0)`）+ 单 shiftup 单元/单 dr_d → 4 个广播消费者跨拍取值时偶列对/奇列 0（实测 sim[0]=32.92✓/sim[1]=0✗/sim[2]=24.45✓）。即 `configurable.py:140-143` 点名的 multi-broadcast sim 缺口。
+- **hco 复核 BLOCK（agentId addc26afe31101fd8）根节点 Q2.1**：`hw_config/specs/units/fpmul.yaml PREC_32 count=4` → FPMUL 是 SIMD 4-lane；单 SMC「4 列」**很可能是 1 个 FPMUL 跨拍调用**而非 4 物理乘法器。当前 4-FPMUL-op DFG 是绕 SMT 强对齐的**脚手架，数据通路忠实度未证**。在此基座上叠 sim sticky-fix 会产出「8/8 但忠实度增信近零」（同 ADR-023 陷阱）。**需 user RTL 表 78/79 单 SMC lane 组织裁定（DEBT-026-BCAST-MULTI）。**
+- **交付决策（user 采纳 hco 建议）**：本轮走 **BROADCAST=False（model-A 预分发激活）** 隔离广播通路争议 —— 激活在 data-prep 复制注入每 SMC bank0 的 COLS 个词，绕开整个广播-到-4列 通路，单独闭合 dense 打包。`ManualMatmulQ2Operator`（matmul_op.py）+ `matmul_q2` 注册：`--op matmul_q2 --mode e2e` **8 SMC bit-perfect + exit=0**（rigid-audit 假阳性已修：权重按 per-列 meta_name `b{c}` 建模，避 auditor 把 4 列当 col0）。诊断开关 `BROADCAST=True` 保留 buffer/indep 分支供 ADR-027 复现。
+- **机制 = 单 addtree 4 通道 S0..S3**（见下方 B1-errata，hco 重裁推翻原 B1）。
+- **忠实度边界（model-A）**：BROADCAST=False **不建模 SHIFTUP 广播指令**（比 Stage-1/ADR-025 退化），是「能否跑通 dense 打包」与「广播通路忠实」的解耦取舍。广播通路忠实留 ADR-027，gated on RTL 表 78/79。
+- **新债务**：
+  - **DEBT-026-BCAST-MULTI（hco）**：单 SMC「广播激活 × 本地多列」的乘法-累加 lane 组织（1 FPMUL SIMD 4-lane / 4 乘法器 / 时分）+ DR_SHIFTUP_D 保持语义，须 user RTL 表 78/79 + 711 闭合。是 ADR-027 的 gating。
+  - **DEBT-026-ADDTREE-8CH-RTL（hco）**：addtree 8 通道 old_i per-lane 独立性仅 sim + spec yaml 背书，无 RTL `.v`/C 模型可对照（本仓全盘无源）。升 Accepted 需 user RTL（addtree 输出寄存器 lane 布局 + old_i 取数路径）或 VCS。
+
+### B1-errata（2026-06-01，hco 重裁，**推翻原 B1**，agentId addc26afe31101fd8）
+
+> **新裁定**：cols_per_smc 列 = **单个 FP32ADDTREE5TO1 op 的多通道 S0..S{C-1}**（`reduction_per_channel=4`），**非** C 个独立 addtree op。依据：(a) `sim/smc_simulator/units/fp32_add_tree_unit.py:112-145` 与 spec `hw_config/specs/units/fp32addtree5to1.yaml:43-48 ACC_CHANNEL count=8` 均确立 **8 个 per-lane 独立累加器通道**（`add_result[i]=Si[0..3]+old_i`，old_i=输出寄存器 lane i，通道间物理隔离）；(b) `ManualMatmulOperator`（`matmul`）以同机制 e2e bit-perfect（hco 亲跑 exit=0，4 通道产 4 distinct 值不串扰）；(c) `test_matmul_q2.py::test_8channel_no_crosstalk` 直驱 sim addtree 8 通道 distinct 输入断言 0 串扰。
+> **原 B1 因果倒置**：「单输出寄存器、4 列共用 old_i 互相覆盖」错 —— 真正会互相覆盖的是「4 个独立 addtree op 在**单物理** addtree 单元不同拍各写**整个** D0/D1（128bit）」（后 op 覆盖前 op lane）；单 op 4 通道一拍并行算全 lane 反而不覆盖。
+> **遗留约束**：①M=1（Stage-2a 聚焦 4-col 打包）；M>4 多行映射 8 通道仍是 Stage-2b（addtree pipeline 深度=4，见 Stage-1 发现 #1）。②cumulative 按 tile 数定（单 tile K=4 → False；多 tile → True，Stage-2c）。
+> **忠实度 caveat**：8 通道独立性仅 sim+spec 背书（DEBT-026-ADDTREE-8CH-RTL），升 Accepted 需 VCS/RTL。
 
 ### 后续 Stage backlog
 | Stage | 内容 | 依赖 | 是否需 DS |
 |---|---|---|---|
-| **Stage-2a** | cols_per_smc=4（真 Matmul_Q 4 列/SMC）→ 4 通道 addtree 密集 4/词打包（解 DEBT-026-PACK） | 复用现有 | 否（预排激活） |
+| ~~**Stage-2a**~~ ✅ | cols_per_smc=4 → 单 addtree 4 通道密集 4/词打包（**DEBT-026-PACK 已落地，8/8 exit=0**，model-A 预分发激活）。广播-到-4列 忠实通路 → ADR-027（DEBT-026-BCAST-MULTI，gated on RTL 表 78/79） | 复用现有 | 否（预排激活） |
 | **Stage-2b** | M>4 多行 → 8 行映射 8 addtree 通道(S0..S7) 或 UR 部分和（解 M≤4 pipeline 限制） | hco（通道映射建模） | 否 |
 | **Stage-2c** | 大 K 多-tile（K=4096）→ 部分和写回 UR + 跨 tile 累加（解 DEBT-025-MULTITILE） | — | 否 |
 | **Stage-3 (DS)** | `ShuffleUnit` + modules.yaml DS 条目 + 非转置间插 在线转置 + 上下行握手 | **DEBT-026-DS-FIELDS（user RTL 表 587/588 逐字段位宽）+ hco** | 是（本体） |
@@ -134,11 +154,12 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 
 ## Open questions（HCO 已裁定，留档）
 1. **（已定，B4）** 激活 DS transpose **必须真搬**（非 relabel）；relabel 只适用转置间插张量（Matmul_Q 中不走 DS）。`ShuffleUnit` 真实现转置数值。
-2. **（已定，B1）** cols_per_smc 列 = **多条独立点积链**（各独立 addtree op + 自环 loop_carried + iq_id + 输出 bank），**非**单 addtree 多通道（单输出寄存器无多 old_i，会串扰静默算错）。真多通道需 RTL 背书，无背书不选。
+2. ~~**（已定，B1）** cols_per_smc 列 = 多条独立点积链，非单 addtree 多通道。~~ **【2026-06-01 推翻，见上方 B1-errata】** 实为：单 addtree 多通道 S0..S{C-1}（8 通道 per-lane 独立累加器）。原 B1 因果倒置。
 3. **（已定，B3）** DS **不进 SMT 调度**，纯 sim 数据变换；modules.yaml DS 只作 `simulation_only` 文档条目，不配 IQ/sel（避免死 module）。
 
 ## References
-- RTL 表 710（matrix×matrix 存储格式）/ 表 711（Matmul_Q 等 LLAMA2 举例）/ 表 585–588（DS 模块接口+微指令）（user 2026-06-01 提供）
+- [ADR-027](ADR-027-sim-multi-broadcast-shiftup.md)（sim 多广播 / 广播激活喂多列通路忠实，隔离自本 ADR Stage-2a，BLOCKED on RTL 表 78/79）
+- RTL 表 710（matrix×matrix 存储格式）/ 表 711（Matmul_Q 等 LLAMA2 举例）/ 表 585–588（DS 模块接口+微指令）（user 2026-06-01 提供）/ 表 78/79（单 SMC 乘法-累加 lane 组织，DEBT-026-BCAST-MULTI 待 user 提供）
 - [ADR-025](ADR-025-matmul-parallel-n-broadcast-addtree.md)（vector×matrix 原语，本 ADR 复用 + 推广）
 - [ADR-023](ADR-023-single-smi-emitter-sim-impl-model-a.md)（SHIFTUP 广播 model A）/ [ADR-022](ADR-022-single-smi-global-instruction-stream-model.md)（单 SMI 模型）
 - [ADR-004](ADR-004-doc-first-principle.md) 文档先行

@@ -285,6 +285,203 @@ class ManualMatmulQOperator(BaseOperator):
         return ops
 
 
+class ManualMatmulQ2Operator(BaseOperator):
+    """ADR-026 Stage-2a：Matmul_Q cols_per_smc=4（密集 4/词打包，解 DEBT-026-PACK）。
+
+    **交付机制（BROADCAST=False，model-A 预分发激活）**：激活 a 在 data-prep 层复制
+    注入每 SMC bank0 的 COLS 个词 → 各 SMC 4 个本地 a-read（distinct cell，破 FPMUL_S0
+    强对齐对称）× 4 权重列 → 4 FPMUL → 4 temp-bank 往返重定时 → **单 addtree 4 通道
+    S0..S3** → D0 dense [Q0,Q1,Q2,Q3] 一词 → bank5。`--op matmul_q2 --mode e2e` 8 SMC
+    全 bit-perfect。
+
+    **单 addtree 4 通道（hco 2026-06-01 重裁，推翻原 B1）**：addtree 有 8 个 per-lane
+    独立累加器通道（`fp32_add_tree_unit.py:112-145` `add_result[i]=Si[0..3]+old_i`，
+    old_i=输出寄存器 lane i；spec `fp32addtree5to1.yaml:43-48 ACC_CHANNEL count=8` 背书），
+    一个 VALID 一拍并行算全 lane 不串扰。是 ManualMatmulOperator（matmul，e2e bit-perfect，
+    hco 亲跑确认）已验证机制。原 B1「4 列共用 old_i 互相覆盖」因果倒置——真会覆盖的是
+    「4 个独立 addtree op 在单物理单元不同拍各写全 128bit」。债务 DEBT-026-ADDTREE-8CH-RTL：
+    8 通道独立性仅 sim+spec 背书，无 RTL 源，升 Accepted 需 VCS。
+
+    **广播通路忠实度争议 → 隔离到 ADR-027（model-A 性质，本算子不碰 sim-core）**：
+    「单广播 a → 4 列」的忠实建模撞两道墙（hco BLOCK on Q2.1）：
+      (1) local-buffer 修法（ADR-026 第 103-108 行原计划）：SMT 全 UNSAT（4 RTOVR 读同
+          SHIFTUP_D 源 / 4 读同 intermediate cell / 4 写 buffer 均撞强对齐，证伪）。
+      (2) indep 修法（4 独立 SHIFTUP op）：SMT SAT@II=6 但 sim 单 shiftup 单元+单 dr_d
+          无法服务多广播消费者（偶列对/奇列 0）。
+      (3) 根节点 Q2.1（hco）：`fpmul.yaml PREC_32 count=4` → FPMUL 是 SIMD 4-lane，
+          「4 列」很可能是 1 FPMUL 跨拍调用而非 4 物理乘法器；4-FPMUL-op DFG 是绕 SMT 的
+          脚手架、数据通路忠实度未证。需 user RTL 表 78/79 单 SMC lane 组织裁定（DEBT-026-
+          BCAST-MULTI）。故本轮**走 model-A 预分发激活隔离争议**，把广播通路留 ADR-027。
+    诊断开关 BROADCAST=True 保留 buffer/indep 两分支供 ADR-027 复现 UNSAT/sim-gap（默认 False）。
+    Stage-2a 聚焦 4-col packing：M=1 单左行（M>4 多行映射 8 通道是 Stage-2b）。
+    """
+
+    parallel_dim = "N"
+    K = 4          # 单 tile 收缩维（4-lane）
+    COLS = 4       # cols_per_smc（真 Matmul_Q 每 SMC 4 列）
+    M = 1          # 左行数（Stage-2a 聚焦 4-col 密集打包；M>4 是 Stage-2b）
+    BUF_BANK = 7   # 广播 a 的本地缓冲 bank（仅 BROADCAST=True 诊断路径用）
+    BROADCAST = False  # 交付路径=False（model-A 预分发）；True=广播通路诊断（ADR-027，UNSAT/sim-gap）
+
+    def __init__(self, **kwargs):
+        pass
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp32",
+                  "stride": 4, "smc_layout": "broadcast"},     # 激活行 K=4（一个 4-lane 词）
+            "b": {"bank": 1, "offset": 0, "role": "input", "precision": "fp32",
+                  "stride": 4, "smc_layout": "partitioned"},   # 权重 COLS 列 × K（每列一词）
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp32",
+                  "smc_layout": "partitioned"},                # 输出 COLS 个/词（dense）
+        }
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        # 激活 X[M,K] 广播：flat (M*K,)
+        a = rng.uniform(1.0, 5.0, self.M * self.K).astype(np.float32)
+        # 权重 W：每 SMC COLS 列，每列 K 个 → (smc_num, COLS*K)。
+        # 列 c = b[k, c*K:(c+1)*K]（连续存为第 c 个 4-lane 词）。
+        b = rng.uniform(1.0, 5.0, (smc_num, self.COLS * self.K)).astype(np.float32)
+        # per-列 key b0..b{COLS-1}：供 auditor 按 distinct meta_name 建模每列 expected
+        # （否则单 "b" key + 单 slice → 把 4 列都当 col0 → rigid-audit 假阳性）。
+        out = {"a": a, "b": b}
+        for c in range(self.COLS):
+            out[f"b{c}"] = b[:, c * self.K:(c + 1) * self.K].copy()   # (smc_num, K)
+        return out
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"]
+        b = input_data["b"]
+        smc_num = b.shape[0]
+        X = a.reshape(self.M, self.K)                         # [M, K]
+        # 每 SMC COLS 列点积：Q[s,i,c]=dot(X[i],W[:,c])，密集 4/词（一行一词，COLS lane）。
+        # golden shape (smc_num, M*4)：行 i 的 COLS 个结果落 word i 的 lane 0..COLS-1。
+        golden = np.zeros((smc_num, 4 * self.M), dtype=np.float32)
+        for s in range(smc_num):
+            W = b[s].reshape(self.COLS, self.K)               # [COLS, K]
+            for i in range(self.M):
+                for c in range(self.COLS):
+                    golden[s, 4 * i + c] = float(np.dot(X[i], W[c]))
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]
+        b = input_data["b"]
+        a_addr = self.get_bank_addr("a", spec)
+        b_addr = self.get_bank_addr("b", spec)
+        if self.BROADCAST:
+            programs[0].inject_vector(a_addr, a, stride=1)     # 广播激活仅注入 SMC_0
+        else:
+            # 诊断模式：a 复制 COLS 份到每 SMC bank0（COLS 个 4-lane 词）
+            a_rep = np.tile(a, self.COLS).astype(np.float32)
+            for prog in programs:
+                prog.inject_vector(a_addr, a_rep, stride=1)
+        for k, prog in enumerate(programs):
+            prog.inject_vector(b_addr, b[k], stride=1)         # COLS 列权重（COLS*K 个）
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        buf_base = self.BUF_BANK * 256
+        BCAST_MODE = getattr(self, "BCAST_MODE", "indep")  # 诊断：indep / buffer
+        if self.BROADCAST and BCAST_MODE == "indep":
+            pass  # 4 个独立广播 a-read 在循环内建（各自 SHIFTUP，不共享源）
+        elif self.BROADCAST:
+            # ── buffer 模式（v4，已证 UNSAT，留作对照）──
+            ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                           meta_name="a", logical_addr=0 * 256 + 0, stride=4, role="input", iq_id=30)
+            rt_abuf = b.make_op("RTOVR", "rt_abuf_UR_W3_S", PS.UR_W3_S, [ar])
+            b.make_op("UR_WRITE", "a_buf_write", RT.UR_WRITE, [rt_abuf],
+                      logical_addr=buf_base + 0, stride=4, role="intermediate", iq_id=39)
+
+        # ── 2. 各列：本地 a-read（破对称） × 权重列 → FPMUL → 写中间 temp bank ──
+        # temp-bank 往返（mirror ManualMatmulOperator）：4 个串行 FPMUL 的乘积写 4 个
+        # 不同 temp bank，再并行读回 → 把 4 路串行乘积「重定时」成一拍对齐的 4 通道读，
+        # 喂单 addtree。直接 mul→addtree_S{c} 会让 4 路串行输出对不齐单 addtree 发射拍
+        # → 结构性 UNSAT（v1 实测 II=4..64 全 UNSAT）。
+        temp_banks = [2, 3, 4, 6]
+        temp_reads = []
+        for c in range(self.COLS):
+            # a-read 破 FPMUL_S0 强对齐对称：4 个 distinct cell（False，交付路径）/ buffer 或
+            # indep（True，ADR-027 诊断）。iq_id 错开读端口。
+            if self.BROADCAST and BCAST_MODE == "indep":
+                # 4 个独立广播 a-read：各 meta_name="a" → inject 各建自己的 SHIFTUP →
+                # 各喂自己的 FPMUL_S0（不共享 SHIFTUP_D 源 → 不撞强对齐）。
+                # **全部 pin r0**（iq_id=30）：sim shiftup `data`=get_read_data(0)（port0），
+                # 4 个广播 a-read 必须都在 r0 才能让各 SHIFTUP 读到 a（否则 dr_d 取空 port0=0）。
+                a_loc = b.make_op("UR_READ", f"a_loc{c}", RT.UR_READ, [],
+                                  meta_name="a", logical_addr=0 * 256 + 0, stride=4,
+                                  role="input", iq_id=30)
+            elif self.BROADCAST:
+                a_loc = b.make_op("UR_READ", f"a_loc{c}", RT.UR_READ, ["a_buf_write"],
+                                  meta_name="abuf", logical_addr=buf_base + 0, stride=4,
+                                  role="intermediate", iq_id=30 + c)
+            else:
+                # 交付路径（BROADCAST=False，model-A 预分发）：直接读 bank0 第 c 个复制词
+                # （mirror matmul 的 4 distinct input 读 → SAT）。
+                a_loc = b.make_op("UR_READ", f"a_loc{c}", RT.UR_READ, [],
+                                  meta_name="a", logical_addr=0 * 256 + c, stride=4,
+                                  role="input", iq_id=30 + (c % 2) * 2)
+            # 权重列 c：bank1 第 c 个词。indep 路径 r0 留给广播 a → 权重用 r1..r3；
+            # 其余路径用与 matmul 同款 31/33 双端口（已证 SAT）。
+            w_iq = 31 + (c % 3) if (self.BROADCAST and BCAST_MODE == "indep") else 31 + (c % 2) * 2
+            # meta_name=f"b{c}"：auditor 据此读 input_data["b{c}"]=列 c（避假阳性）；
+            # 实际地址走 logical_addr，与单 "b" 块注入布局一致（sim 读不变）。
+            w_c = b.make_op("UR_READ", f"w{c}_read", RT.UR_READ, [],
+                            meta_name=f"b{c}", logical_addr=1 * 256 + c, stride=4,
+                            role="input", iq_id=w_iq)
+            rt_a = b.make_op("RTOVR", f"rt_a{c}_FPMUL_S0", PS.FPMUL_S0, [a_loc])
+            rt_w = b.make_op("RTOVR", f"rt_w{c}_FPMUL_S1", PS.FPMUL_S1, [w_c])
+            mul = b.make_op("FPMUL", f"inl_mul{c}", RT.FPMUL, [rt_a, rt_w], iq_id=3)
+            # 乘积经 RTOVR 搬运到写总线 → 写 temp bank（stride=4 均一读周期）
+            write_ps = getattr(PS, f"UR_W{c}_S")
+            rt_write = b.make_op("RTOVR", f"rt_mul{c}_{write_ps.name}", write_ps, [mul], sel=3)
+            twrite_name = f"temp_write{c}"
+            twrite_addr = temp_banks[c] * 256 + 0
+            b.make_op("UR_WRITE", twrite_name, RT.UR_WRITE, [rt_write],
+                      logical_addr=twrite_addr, stride=4, role="intermediate",
+                      iq_id=36 + (c % 3))
+            # 并行读回（ur-r0..r3 均一 stride=4）
+            tr = b.make_op("UR_READ", f"temp_read{c}", RT.UR_READ, [twrite_name],
+                           logical_addr=twrite_addr, stride=4, role="intermediate", iq_id=30 + c)
+            temp_reads.append(tr)
+
+        # ── 3. 单 addtree 4 通道 → D0 dense [Q0,Q1,Q2,Q3] ─────────────
+        rt_sums = []
+        for c in range(self.COLS):
+            rt_sum = b.make_op("RTOVR", f"rt_temp_read{c}_FP32ADDTREE5TO1_S{c}",
+                               getattr(PS, f"FP32ADDTREE5TO1_S{c}"), [temp_reads[c]])
+            rt_sums.append(rt_sum)
+        # cumulative=False：K=4 单 tile，每通道一拍 reduce 完；M=1 无跨行复用。
+        y_sum = b.make_op("FP32ADDTREE5TO1", "y_0", RT.FP32ADDTREE5TO1, rt_sums,
+                          cumulative=False, reduction_per_channel=4, iq_id=26)
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # M=1：单迭代（inner_loops=0）。COLS 列在一次迭代内并行/串行打包。
+        for op in ops:
+            op.metadata.update({"shape": [self.M], "inner_loops": self.M - 1, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+        if self.BROADCAST:
+            ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
+        return ops
+
+
 class ManualMatmulOperator(BaseOperator):
     """
     手动编排的 Matmul DFG。
