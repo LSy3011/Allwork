@@ -106,9 +106,11 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 - **张力**：4-col 要 4 个独立 a-read（SAT 需要）vs 广播只能单源（B2 / multi-broadcast sim 限制）。二者直接冲突。
 - **修法（local-buffer 间接，初判）**：广播 a 一次 → SHIFTUP → 写本地 bank → 各 SMC 4 次独立读 → 4 FPMULs。**↓ 下方 2026-06-01-b 证伪：local-buffer 全 UNSAT。**
 
-### Stage-2a 落地（2026-06-01-b：local-buffer 证伪 → model-A 预分发交付；广播通路 → ADR-027）
+### Stage-2a 落地（2026-06-01-c：**真广播 direct 交付**，amended by ADR-028）
 
-**结论：DEBT-026-PACK（dense 4/词打包）已落地 + 8/8 bit-perfect（exit=0）**；广播-到-4列 的忠实通路被 hco BLOCK（根节点 Q2.1），隔离到 **[ADR-027](ADR-027-sim-multi-broadcast-shiftup.md)**。
+> **⚠ 2026-06-01-c 订正（[ADR-028](ADR-028-broadcast-shiftup-latch-window-relax.md)，hco APPROVE-with-notes agentId a5f93c926224c323c）**：下方 2026-06-01-b 的「走 model-A 预分发 + 广播通路 BLOCK on RTL 表 78/79（ADR-027）」**前提被证伪**。真根因不是乘法器数（`fpmul.yaml throughput=1+PREC_32 count=4` 已定死=1 个 SIMD-4-lane 跨拍 4 次）、也不是 sim 多广播缺口，而是 `dependency_axioms` 的 **RTOVR 锁存严格约束 `t_latch==prod.t+lat`** 把一个 broadcast SHIFTUP 的多消费者锁存钉死同拍 → 同拍写 FPMUL_S0 冲突。user 裁定 **Q-a（DR_SHIFTUP_D 驻留、支持 N-RTOVR 多读）+ Q-b（时间维 scatter）** 后，**放宽该 axiom 为驻留窗口区间即解**（ADR-028）。matmul_q2 现走 **BROADCAST=True/direct 真广播**（单 SHIFTUP 喂 4 列，SHIFTUP 广播指令在固件中），8/8 bit-perfect，**取代下方 model-A 预分发**。ADR-027 标 superseded。**Stage-2b 启用 M>1 多列前须先补「M>1 + 单 SHIFTUP 喂多列」e2e**（hco note：驻留窗口上界 II-1 的多行正确性当前仅逻辑+verifier 上界守、无实测）。
+
+**（历史 2026-06-01-b）结论：DEBT-026-PACK（dense 4/词打包）已落地 + 8/8 bit-perfect（exit=0）**；广播-到-4列 的忠实通路曾被 hco BLOCK（根节点 Q2.1），隔离到 ~~[ADR-027](ADR-027-sim-multi-broadcast-shiftup.md)~~（已 superseded by ADR-028）。下方留存 model-A 期推理。
 
 - **local-buffer 修法证伪（SMT 全 UNSAT）**：实测 4 种 DFG 变体均 UNSAT —— ① 单 buffer 写 + 4 读同 cell；② 4 写 distinct 地址 + 4 读（4 RTOVR 消费单 SHIFTUP_D 撞强对齐）；③ 单写 + 4 读 distinct 读端口；④ 单写 distinct 地址。两道墙：4 RTOVR 读同一 SHIFTUP_D 源撞强对齐选通 / 4 读同一 intermediate cell UNSAT。**local-buffer 计划作废，勿再试。**
 - **indep 修法（4 独立 SHIFTUP op）SMT-SAT@II=6 但 sim 多广播缺口**：`sim/.../kernel.py:516` SHIFTUP 数据硬连读端口 0（`get_read_data(0)`）+ 单 shiftup 单元/单 dr_d → 4 个广播消费者跨拍取值时偶列对/奇列 0（实测 sim[0]=32.92✓/sim[1]=0✗/sim[2]=24.45✓）。即 `configurable.py:140-143` 点名的 multi-broadcast sim 缺口。

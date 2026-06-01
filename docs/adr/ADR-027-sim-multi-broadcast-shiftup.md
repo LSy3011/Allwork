@@ -3,15 +3,18 @@ adr_id: ADR-027
 title: sim 多广播 / SHIFTUP 单源喂多列 —— 广播-到-N列 通路忠实建模（gated on RTL 表 78/79）
 decided: 2026-06-01
 last_verified: 2026-06-01
-still_holds: proposed
+still_holds: superseded
+superseded_by: ADR-028（经查 sim 多广播改造不需要 —— RTOVR 锁存窗口放宽即解，单 dr_d 驻留 + 单 SHIFTUP 已够；indep 4-SHIFTUP 是错误方向）
 supersedes_part_of: ADR-026 B2（本轮 BLOCK multi-broadcast）
 builds_on: ADR-023, ADR-025, ADR-026
 blocked_by: DEBT-026-BCAST-MULTI
 ---
 
-# ADR-027 · sim 多广播 / 广播激活喂单 SMC 多列 —— 通路忠实建模（**Proposed / BLOCKED on RTL**）
+# ADR-027 · sim 多广播 / 广播激活喂单 SMC 多列 —— 通路忠实建模（**SUPERSEDED by ADR-028**）
 
-> **状态：Proposed，BLOCKED**。本 ADR 记录 [ADR-026](ADR-026-matmul-q-matrix-matrix-ds-transpose.md) Stage-2a 暴露的「单广播激活 a → 单 SMC 内多列点积」**通路忠实度**问题，并把它从 Stage-2a 主线**隔离**出来（Stage-2a 已用 model-A 预分发激活落地 dense 打包，见 ADR-026 2026-06-01-b）。**未实施**：根节点 Q2.1 需 user RTL 表背书（DEBT-026-BCAST-MULTI），无之不动 sim-core。
+> **⚠ SUPERSEDED（2026-06-01，[ADR-028](ADR-028-broadcast-shiftup-latch-window-relax.md)）**：本 ADR 的前提（需 sim-core 多广播改造 + BLOCK on RTL 表 78/79）**被证伪**。真根因是 `dependency_axioms` 的 RTOVR 锁存严格约束把单 SHIFTUP 的多消费者钉死同拍（非 sim 缺口、非乘法器数）。user 裁定 Q-a（DR_SHIFTUP_D 驻留、支持 N-RTOVR 多读）后，**仅放宽该 axiom 为驻留窗口区间即解**，单 dr_d + 单 SHIFTUP 已够，不需要 indep 4-SHIFTUP / sim 多广播。matmul_q2 走真广播 8/8。详见 ADR-028。下文留存历史推理。
+>
+> **（历史）状态：Proposed，BLOCKED**。本 ADR 记录 [ADR-026](ADR-026-matmul-q-matrix-matrix-ds-transpose.md) Stage-2a 暴露的「单广播激活 a → 单 SMC 内多列点积」**通路忠实度**问题，并把它从 Stage-2a 主线**隔离**出来（Stage-2a 已用 model-A 预分发激活落地 dense 打包，见 ADR-026 2026-06-01-b）。**未实施**：根节点 Q2.1 需 user RTL 表背书（DEBT-026-BCAST-MULTI），无之不动 sim-core。
 
 ## Context（为何需要本 ADR）
 

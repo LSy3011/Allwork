@@ -68,21 +68,39 @@ class DependencyAxioms(AxiomBase):
                 if latch_vars is not None:
                     latch_vars[(op.trace_id, prod_id)] = t_latch
                 
-                # 1. 严格采样约束（生产者完成输出的时刻，RTOVR 必须在 1 拍内立即采样，防寄存器覆盖溢出）
-                DependencyAxioms._add_constraint(
-                    solver,
-                    t_latch == t_vars[prod_id] + lat_p,
-                    f"rtovr_strict_{op.trace_id}_{prod_id}"
+                # 1. 采样约束（producer 输出就绪后 RTOVR 采样到 t_latch）。
+                # ── ADR-028 (user RTL 裁定 Q-a/Q-b, 2026-06-01)：DR_SHIFTUP_D 是**驻留**广播值，
+                #   硬件支持 N 个 RTOVR 在**驻留窗口内不同拍**各采样一次（多列点积 = 时间维 scatter，
+                #   Q-b），**无 1-拍瞬态覆盖**（区别普通 producer 的输出 1 拍后即被下一发射覆盖）。
+                #   原 strict `t_latch == prod.t + lat` 把一个 SHIFTUP 的**全部消费者锁存钉死同一拍**
+                #   → N 个 RTOVR 同拍写 FPMUL_S0 端口冲突 → 多列(cols_per_smc>1)必 UNSAT（ADR-026
+                #   Stage-2a 张力真根因）。故对 broadcast SHIFTUP 放宽为**驻留窗口区间**：
+                #   prod.t+lat <= t_latch <= prod.t+lat+II-1（窗口内任一拍采样，下个广播值落 dr_d 前）。
+                #   普通 producer 仍严格 `==`（瞬态输出，必须当拍采样）。counter-verifier
+                #   (ucode_solver 维度4) 本就用 undersample(>=)+overwrite(<prod.t+lat+II) 区间、非
+                #   strict ==，故无需同步改。见 ADR-028 + hco 复核。
+                prod_is_bcast_shiftup = (
+                    producer.op_type.upper() == "SHIFTUP"
+                    and producer.metadata.get("broadcast") == 1
                 )
-                
-                # Multipliers, ALUs, UR_WRITE, and addition trees do not have elastic buffers, 
-                # so they must be executed in the cycle immediately following latching (strict equality == t_latch + 1)
-                # to match RtoVR's 1-cycle latency.
-                latch_cond = (t_vars[op.trace_id] == t_latch + 1)
+                if prod_is_bcast_shiftup:
+                    DependencyAxioms._add_constraint(
+                        solver, t_latch >= t_vars[prod_id] + lat_p,
+                        f"rtovr_bcast_lo_{op.trace_id}_{prod_id}")
+                    DependencyAxioms._add_constraint(
+                        solver, t_latch <= t_vars[prod_id] + lat_p + (II - 1),
+                        f"rtovr_bcast_hi_{op.trace_id}_{prod_id}")
+                else:
+                    DependencyAxioms._add_constraint(
+                        solver, t_latch == t_vars[prod_id] + lat_p,
+                        f"rtovr_strict_{op.trace_id}_{prod_id}")
 
+                # 2. 无弹性缓冲消费者（乘法器/ALU/UR_WRITE/加法树）必须在锁存后**正好 1 拍**执行
+                # （匹配 RtoVR 1-cycle latency）。此约束 per-consumer 恒严格——广播放宽的是「何时锁存」
+                # （上方 t_latch 区间），不是「锁存后多久消费」。
                 DependencyAxioms._add_constraint(
                     solver,
-                    latch_cond,
+                    t_vars[op.trace_id] == t_latch + 1,
                     f"rtovr_latch_to_consumer_{op.trace_id}_{prod_id}"
                 )
                 

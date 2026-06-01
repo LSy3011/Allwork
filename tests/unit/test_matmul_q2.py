@@ -83,13 +83,26 @@ class TestMatmulQ2DensePacking(unittest.TestCase):
             self.assertIn(rt.trace_id, addtrees[0].metadata.get("depends_on", []),
                           f"通道 RTOVR {rt.trace_id} 应喂唯一 addtree op {addtree_id}")
 
-    def test_shipped_path_is_model_a_predistribute(self):
-        """交付路径 BROADCAST=False：model-A 预分发激活，DFG 无 SHIFTUP（广播通路留 ADR-027）。"""
-        self.assertFalse(self.op.BROADCAST, "交付路径应 BROADCAST=False（model-A 预分发）")
+    def test_shipped_path_is_faithful_single_broadcast(self):
+        """交付路径（ADR-028）：真广播 —— **单**广播 SHIFTUP（驻留 DR_SHIFTUP_D），
+        COLS 个 FPMUL_S0 RTOVR 全消费它（时间维 scatter，Q-b）。靠 broadcast-SHIFTUP 锁存
+        窗口放宽 axiom 解 SAT（非 model-A 预分发，SHIFTUP 广播指令在固件中）。"""
+        self.assertTrue(self.op.BROADCAST, "交付路径应 BROADCAST=True（真广播，非 model-A）")
         ops = self.op.get_dfg(spec=None)
-        shiftups = [o for o in ops if o.op_type.upper() == "SHIFTUP"]
-        self.assertEqual(len(shiftups), 0,
-                         "model-A 预分发路径不应有 SHIFTUP（广播通路忠实 = ADR-027 DEBT-026-BCAST-MULTI）")
+        shiftups = [o for o in ops if o.op_type.upper() == "SHIFTUP"
+                    and o.metadata.get("broadcast") == 1]
+        self.assertEqual(len(shiftups), 1,
+                         f"应**唯一**广播 SHIFTUP（单驻留源喂多列），实际 {len(shiftups)}")
+        sup_id = shiftups[0].trace_id
+        # COLS 个 FPMUL_S0 RTOVR 全消费这一个 SHIFTUP（sel=29 SHIFTUP_D）
+        s0_rtovrs = [o for o in ops if o.op_type.upper() == "RTOVR"
+                     and "FPMUL_S0" in o.trace_id]
+        self.assertEqual(len(s0_rtovrs), self.op.COLS,
+                         f"应 COLS={self.op.COLS} 个 FPMUL_S0 RTOVR（每列一个）")
+        for rt in s0_rtovrs:
+            self.assertIn(sup_id, rt.metadata.get("depends_on", []),
+                          f"{rt.trace_id} 应消费唯一广播源 {sup_id}（驻留 DR_SHIFTUP_D）")
+            self.assertEqual(rt.metadata.get("sel"), 29, "应 sel=SHIFTUP_D(29)")
 
 
 class TestAddtree8ChannelIndependence(unittest.TestCase):
@@ -129,6 +142,65 @@ class TestAddtree8ChannelIndependence(unittest.TestCase):
             self.assertAlmostEqual(got[i], sums[i], places=2,
                                    msg=f"通道{i} 应={sums[i]}（per-lane 独立 old_i），实得 {got[i]}；"
                                        f"全通道 {got}")
+
+
+class TestBroadcastLatchRelax(unittest.TestCase):
+    """ADR-028 反证：RTOVR 锁存放宽**确在生效且只对 broadcast SHIFTUP 生效**（hco 建议）。
+    直接喂 add_latency_axiom 一个 producer + 2 消费者：
+      - broadcast SHIFTUP producer → 2 消费者可落**不同**拍（驻留窗口 scatter）→ 原 UNSAT 解。
+      - 普通 producer → 2 消费者**钉死同拍**（strict ==）→ 多消费者同拍冲突的根因。"""
+
+    def _build(self, producer_optype, producer_meta):
+        import z3
+        from ir.mir.mir_op import MIROp
+        from synthesis.axioms.dependency_axioms import DependencyAxioms
+
+        class _Spec:
+            delays = {"SHIFTUP": 1, "FPMUL": 4, "UR_READ": 1}
+
+        prod = MIROp(op_type=producer_optype, logic_cycle=0, trace_id="prod",
+                     metadata=dict(producer_meta))
+        cons = []
+        for i in range(2):
+            cons.append(MIROp(op_type="FPMUL", logic_cycle=0, trace_id=f"c{i}",
+                              metadata={"depends_on": ["prod"],
+                                        "rtovr_deps": {"prod": {"dvr": -1, "sel": 29}}}))
+        ops = [prod] + cons
+        solver = z3.Solver()
+        tv = {o.trace_id: z3.Int(f"t_{o.trace_id}") for o in ops}
+        DependencyAxioms.add_latency_axiom(solver, ops, tv, II=6, spec=_Spec())
+        solver.add(tv["prod"] == 0)
+        return solver, tv, z3
+
+    def test_broadcast_consumers_can_scatter(self):
+        """broadcast SHIFTUP：2 消费者可落不同拍（c0=2, c1=5 同时可满足）。"""
+        solver, tv, z3 = self._build("SHIFTUP", {"broadcast": 1})
+        solver.push()
+        solver.add(tv["c0"] == 2, tv["c1"] == 5)
+        self.assertEqual(solver.check(), z3.sat,
+                         "broadcast 放宽后 2 消费者应能落不同拍（驻留窗口 scatter）")
+        solver.pop()
+
+    def test_normal_producer_pins_consumers_same_cycle(self):
+        """普通 producer：2 消费者钉死同拍 → 不同拍 UNSAT（原 strict 行为，多消费者冲突根因）。"""
+        solver, tv, z3 = self._build("UR_READ", {})
+        solver.push()
+        solver.add(tv["c0"] == 2, tv["c1"] == 5)
+        self.assertEqual(solver.check(), z3.unsat,
+                         "普通 producer 应钉死同拍（strict ==），不同拍必 UNSAT")
+        solver.pop()
+        # 且同拍可满足（c0=c1=2）
+        solver.push()
+        solver.add(tv["c0"] == 2, tv["c1"] == 2)
+        self.assertEqual(solver.check(), z3.sat, "普通 producer 同拍应可满足")
+        solver.pop()
+
+    def test_relax_only_for_broadcast_flag(self):
+        """非 broadcast 的 SHIFTUP（broadcast≠1）不享放宽 → 仍钉同拍（guard 精确性）。"""
+        solver, tv, z3 = self._build("SHIFTUP", {"broadcast": 0})
+        solver.add(tv["c0"] == 2, tv["c1"] == 5)
+        self.assertEqual(solver.check(), z3.unsat,
+                         "broadcast=0 的 SHIFTUP 不享放宽，不同拍应 UNSAT（guard 只认 broadcast==1）")
 
 
 if __name__ == "__main__":

@@ -288,31 +288,28 @@ class ManualMatmulQOperator(BaseOperator):
 class ManualMatmulQ2Operator(BaseOperator):
     """ADR-026 Stage-2a：Matmul_Q cols_per_smc=4（密集 4/词打包，解 DEBT-026-PACK）。
 
-    **交付机制（BROADCAST=False，model-A 预分发激活）**：激活 a 在 data-prep 层复制
-    注入每 SMC bank0 的 COLS 个词 → 各 SMC 4 个本地 a-read（distinct cell，破 FPMUL_S0
-    强对齐对称）× 4 权重列 → 4 FPMUL → 4 temp-bank 往返重定时 → **单 addtree 4 通道
-    S0..S3** → D0 dense [Q0,Q1,Q2,Q3] 一词 → bank5。`--op matmul_q2 --mode e2e` 8 SMC
-    全 bit-perfect。
+    **交付机制（BROADCAST=True / BCAST_MODE="direct"，真广播，ADR-028）**：**单** a-read
+    （broadcast）→ inject 后唯一 SHIFTUP（驻留 DR_SHIFTUP_D）→ COLS 个 FPMUL_S0 RTOVR
+    **全消费这一个广播源**（时间维 scatter，Q-b）× 4 权重列 → 4 FPMUL → 4 temp-bank
+    往返重定时 → **单 addtree 4 通道 S0..S3** → D0 dense [Q0,Q1,Q2,Q3] 一词 → bank5。
+    `--op matmul_q2 --mode e2e` 8 SMC 全 bit-perfect。**SHIFTUP 广播指令在固件中**（非
+    model-A 预分发）。
+
+    **可解的关键（ADR-028 axiom 放宽，user RTL 裁定 Q-a 背书）**：原「单广播 a → 4 列」
+    撞 SMT UNSAT 的真根因 = `dependency_axioms` 的 RTOVR 锁存约束 `t_latch == prod.t+lat`
+    把一个 SHIFTUP 的**全部消费者锁存钉死同一拍** → N 个 RTOVR 同拍写 FPMUL_S0 端口冲突。
+    user 确认 DR_SHIFTUP_D 是**驻留**广播值、硬件支持 N 个 RTOVR 在驻留窗口内不同拍各读
+    （Q-a），故对 broadcast SHIFTUP 放宽为锁存**区间** [prod.t+lat, prod.t+lat+II-1]，
+    各列错拍 scatter → SAT。普通 producer 仍严格 ==。**非 model-A、不碰 sim-core**。
 
     **单 addtree 4 通道（hco 2026-06-01 重裁，推翻原 B1）**：addtree 有 8 个 per-lane
     独立累加器通道（`fp32_add_tree_unit.py:112-145` `add_result[i]=Si[0..3]+old_i`，
     old_i=输出寄存器 lane i；spec `fp32addtree5to1.yaml:43-48 ACC_CHANNEL count=8` 背书），
-    一个 VALID 一拍并行算全 lane 不串扰。是 ManualMatmulOperator（matmul，e2e bit-perfect，
-    hco 亲跑确认）已验证机制。原 B1「4 列共用 old_i 互相覆盖」因果倒置——真会覆盖的是
-    「4 个独立 addtree op 在单物理单元不同拍各写全 128bit」。债务 DEBT-026-ADDTREE-8CH-RTL：
-    8 通道独立性仅 sim+spec 背书，无 RTL 源，升 Accepted 需 VCS。
+    一个 VALID 一拍并行算全 lane 不串扰。原 B1「4 列共用 old_i 互相覆盖」因果倒置。
+    债务 DEBT-026-ADDTREE-8CH-RTL：8 通道独立性仅 sim+spec 背书，无 RTL 源，升 Accepted 需 VCS。
 
-    **广播通路忠实度争议 → 隔离到 ADR-027（model-A 性质，本算子不碰 sim-core）**：
-    「单广播 a → 4 列」的忠实建模撞两道墙（hco BLOCK on Q2.1）：
-      (1) local-buffer 修法（ADR-026 第 103-108 行原计划）：SMT 全 UNSAT（4 RTOVR 读同
-          SHIFTUP_D 源 / 4 读同 intermediate cell / 4 写 buffer 均撞强对齐，证伪）。
-      (2) indep 修法（4 独立 SHIFTUP op）：SMT SAT@II=6 但 sim 单 shiftup 单元+单 dr_d
-          无法服务多广播消费者（偶列对/奇列 0）。
-      (3) 根节点 Q2.1（hco）：`fpmul.yaml PREC_32 count=4` → FPMUL 是 SIMD 4-lane，
-          「4 列」很可能是 1 FPMUL 跨拍调用而非 4 物理乘法器；4-FPMUL-op DFG 是绕 SMT 的
-          脚手架、数据通路忠实度未证。需 user RTL 表 78/79 单 SMC lane 组织裁定（DEBT-026-
-          BCAST-MULTI）。故本轮**走 model-A 预分发激活隔离争议**，把广播通路留 ADR-027。
-    诊断开关 BROADCAST=True 保留 buffer/indep 两分支供 ADR-027 复现 UNSAT/sim-gap（默认 False）。
+    **诊断开关**（BCAST_MODE）：direct=交付真广播路径；indep/buffer/model-A(BROADCAST=False)
+    留作历史对照（前两者证伪：buffer SMT-UNSAT、indep sim 多广播 gap；见 ADR-026/027）。
     Stage-2a 聚焦 4-col packing：M=1 单左行（M>4 多行映射 8 通道是 Stage-2b）。
     """
 
@@ -320,8 +317,8 @@ class ManualMatmulQ2Operator(BaseOperator):
     K = 4          # 单 tile 收缩维（4-lane）
     COLS = 4       # cols_per_smc（真 Matmul_Q 每 SMC 4 列）
     M = 1          # 左行数（Stage-2a 聚焦 4-col 密集打包；M>4 是 Stage-2b）
-    BUF_BANK = 7   # 广播 a 的本地缓冲 bank（仅 BROADCAST=True 诊断路径用）
-    BROADCAST = False  # 交付路径=False（model-A 预分发）；True=广播通路诊断（ADR-027，UNSAT/sim-gap）
+    BUF_BANK = 7   # 仅 buffer 诊断路径用
+    BROADCAST = True   # 交付=True（真广播 direct，ADR-028）；False=model-A 预分发（历史对照）
 
     def __init__(self, **kwargs):
         pass
@@ -385,11 +382,21 @@ class ManualMatmulQ2Operator(BaseOperator):
     def get_dfg(self, spec: Any = None) -> List[Any]:
         b = MIROpBuilder()
         buf_base = self.BUF_BANK * 256
-        BCAST_MODE = getattr(self, "BCAST_MODE", "indep")  # 诊断：indep / buffer
-        if self.BROADCAST and BCAST_MODE == "indep":
-            pass  # 4 个独立广播 a-read 在循环内建（各自 SHIFTUP，不共享源）
+        # 交付路径 = "direct"（ADR-028：单广播源 a 喂 COLS 列，靠 broadcast-SHIFTUP RTOVR
+        # 采样放宽 axiom 解 SAT）。其余 mode 留作诊断/对照（model-A 预分发 / indep / buffer）。
+        BCAST_MODE = getattr(self, "BCAST_MODE", "direct")
+        ar_shared = None
+        if self.BROADCAST and BCAST_MODE == "direct":
+            # ── ADR-028 忠实路径：**单** a-read（broadcast）→ inject 后唯一 SHIFTUP；
+            #   COLS 个 FPMUL_S0 RTOVR 全消费它（驻留 DR_SHIFTUP_D，Q-a 硬件支持多读）。
+            #   原 strict 采样 axiom 把这 COLS 个 RTOVR 钉死同拍 → UNSAT；放宽后各列错拍读 → SAT。
+            ar_shared = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                                  meta_name="a", logical_addr=0 * 256 + 0, stride=4,
+                                  role="input", iq_id=30)
+        elif self.BROADCAST and BCAST_MODE == "indep":
+            pass  # 4 个独立广播 a-read 在循环内建（各自 SHIFTUP，不共享源）—— sim 多广播缺口诊断
         elif self.BROADCAST:
-            # ── buffer 模式（v4，已证 UNSAT，留作对照）──
+            # ── buffer 模式（已证 UNSAT，留作对照）──
             ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
                            meta_name="a", logical_addr=0 * 256 + 0, stride=4, role="input", iq_id=30)
             rt_abuf = b.make_op("RTOVR", "rt_abuf_UR_W3_S", PS.UR_W3_S, [ar])
@@ -404,9 +411,10 @@ class ManualMatmulQ2Operator(BaseOperator):
         temp_banks = [2, 3, 4, 6]
         temp_reads = []
         for c in range(self.COLS):
-            # a-read 破 FPMUL_S0 强对齐对称：4 个 distinct cell（False，交付路径）/ buffer 或
-            # indep（True，ADR-027 诊断）。iq_id 错开读端口。
-            if self.BROADCAST and BCAST_MODE == "indep":
+            # a-source 选择：direct=共享单广播 ar（交付）；indep/buffer/model-A=诊断或对照。
+            if self.BROADCAST and BCAST_MODE == "direct":
+                a_loc = ar_shared      # COLS 列共消费唯一广播 a-read（→ 唯一 SHIFTUP_D）
+            elif self.BROADCAST and BCAST_MODE == "indep":
                 # 4 个独立广播 a-read：各 meta_name="a" → inject 各建自己的 SHIFTUP →
                 # 各喂自己的 FPMUL_S0（不共享 SHIFTUP_D 源 → 不撞强对齐）。
                 # **全部 pin r0**（iq_id=30）：sim shiftup `data`=get_read_data(0)（port0），
@@ -424,9 +432,10 @@ class ManualMatmulQ2Operator(BaseOperator):
                 a_loc = b.make_op("UR_READ", f"a_loc{c}", RT.UR_READ, [],
                                   meta_name="a", logical_addr=0 * 256 + c, stride=4,
                                   role="input", iq_id=30 + (c % 2) * 2)
-            # 权重列 c：bank1 第 c 个词。indep 路径 r0 留给广播 a → 权重用 r1..r3；
+            # 权重列 c：bank1 第 c 个词。direct/indep 路径 r0 留给广播 a → 权重用 r1..r3；
             # 其余路径用与 matmul 同款 31/33 双端口（已证 SAT）。
-            w_iq = 31 + (c % 3) if (self.BROADCAST and BCAST_MODE == "indep") else 31 + (c % 2) * 2
+            _bcast_r0 = self.BROADCAST and BCAST_MODE in ("direct", "indep")
+            w_iq = 31 + (c % 3) if _bcast_r0 else 31 + (c % 2) * 2
             # meta_name=f"b{c}"：auditor 据此读 input_data["b{c}"]=列 c（避假阳性）；
             # 实际地址走 logical_addr，与单 "b" 块注入布局一致（sim 读不变）。
             w_c = b.make_op("UR_READ", f"w{c}_read", RT.UR_READ, [],
