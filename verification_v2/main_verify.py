@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -26,6 +26,8 @@ OPERATOR_MAP = {
     # matmul 使用手动 DFG（ManualMatmulOperator），不走 ConfigurableOperator 的
     # compile_with_adpc 路径（后者对 4-operand 公式生成的 DFG 结构 SMT 不可解）
     "matmul": ManualMatmulOperator,
+    # ADR-025：N 维广播 matmul 走手搭 operator（覆盖 matmul_parallel_n.yaml 的 UNSAT configurable 路径）
+    "matmul_parallel_n": ManualMatmulParallelNOperator,
 }
 
 CATEGORIES = {

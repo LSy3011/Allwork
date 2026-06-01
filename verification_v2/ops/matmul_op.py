@@ -4,6 +4,179 @@ from .base import BaseOperator
 from ir.mir.builder import MIROpBuilder
 from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
+
+def _inject_shiftup_broadcast(ops: List[Any], broadcast_names: set, spec: Any) -> List[Any]:
+    """ADR-025 D2 / ADR-023 D2(B)：对 broadcast 输入的 UR_READ 后插 SHIFTUP MIROp，
+    消费者 RTOVR sel 改为 SHIFTUP_D=29；sim 由 cluster._broadcast_shiftup_fanout 同拍 fan-out。
+    复用 configurable._inject_shiftup_broadcast 同款逻辑（单广播源，避开 multi-broadcast 限制）。"""
+    from ir.mir.mir_op import MIROp
+
+    if not broadcast_names:
+        return ops
+    smc_num = 32
+    if spec is not None and hasattr(spec, "params"):
+        smc_num = getattr(spec.params, "PARAM_SMC_NUM", 32)
+    smc_id_en = smc_num - 1
+    SHIFTUP_D_SEL = 29
+    # sim/smc_simulator/core/kernel.py：SHIFTUP 本地 data = ur-r0 读端口 → 广播源 pin 到 ur-r0
+    UR_R0_IQ_ID = 30
+    if spec is not None and hasattr(spec, "config"):
+        UR_R0_IQ_ID = spec.config.get("iq_registry", {}).get("UR_READ", 30)
+
+    ur_to_shiftup: Dict[str, str] = {}
+    new_ops = list(ops)
+    for op in ops:
+        if (op.op_type.upper() == "UR_READ"
+                and op.metadata.get("meta_name") in broadcast_names
+                and op.metadata.get("role") == "input"):
+            if len(ur_to_shiftup) == 0:
+                op.metadata["iq_id"] = UR_R0_IQ_ID  # 单广播源 pin ur-r0
+            sup_id = f"shiftup_{op.trace_id}"
+            sup_op = MIROp(
+                op_type="SHIFTUP", logic_cycle=0, trace_id=sup_id,
+                metadata={
+                    "depends_on": [op.trace_id],
+                    "iq_type": RT.SHIFTUP,
+                    "broadcast": 1,
+                    "smc_id_en": smc_id_en,
+                    "smc_id": 0,
+                    "math": f"shiftup_broadcast({op.metadata.get('meta_name')})",
+                    "dep_port": "D",
+                },
+            )
+            new_ops.append(sup_op)
+            ur_to_shiftup[op.trace_id] = sup_id
+
+    if not ur_to_shiftup:
+        return ops
+    shiftup_ids = set(ur_to_shiftup.values())
+    for op in new_ops:
+        if op.trace_id in shiftup_ids:
+            continue
+        deps = op.metadata.get("depends_on", [])
+        if any(d in ur_to_shiftup for d in deps):
+            op.metadata["depends_on"] = [
+                ur_to_shiftup[d] if d in ur_to_shiftup else d for d in deps
+            ]
+            if op.op_type.upper() == "RTOVR":
+                op.metadata["sel"] = SHIFTUP_D_SEL
+    # 重建 rtovr_deps（清旧 stale UR_READ 条目）
+    for op in new_ops:
+        if "rtovr_deps" in op.metadata:
+            op.metadata["rtovr_deps"] = {}
+    for op in new_ops:
+        if op.op_type.upper() != "RTOVR":
+            continue
+        prod_ids = op.metadata.get("depends_on", [])
+        if not prod_ids:
+            continue
+        prod_id = prod_ids[0]
+        for consumer in new_ops:
+            if op.trace_id in consumer.metadata.get("depends_on", []):
+                consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                    "dvr": op.metadata.get("dvr", -1),
+                    "sel": op.metadata.get("sel", -1),
+                }
+    return new_ops
+
+
+class ManualMatmulParallelNOperator(BaseOperator):
+    """ADR-025：8-SMC N 维 matmul（output-stationary）。
+    广播激活向量 a（SHIFTUP，单源）+ 每 SMC 与本地权重列 b_n 点积
+    （SMC 内 FP32ADDTREE5TO1 + 跨 tile cumulative 累加）→ 每 SMC 输出 y_n（partitioned）。
+    y_n = Σ_i a[i]·b_n[i]。复用 ManualMatmulOperator 的 SMC 内点积结构（绕 configurable
+    4-operand UNSAT），单广播流（避开 multi-broadcast sim 限制）。"""
+
+    parallel_dim = "N"
+
+    def __init__(self, **kwargs):
+        pass
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp32",
+                  "stride": 1, "smc_layout": "broadcast"},
+            "b": {"bank": 1, "offset": 0, "role": "input", "precision": "fp32",
+                  "stride": 1, "smc_layout": "partitioned"},
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp32",
+                  "smc_layout": "partitioned"},
+        }
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, n_rows).astype(np.float32)          # broadcast 1D
+        b = rng.uniform(1.0, 5.0, (smc_num, n_rows)).astype(np.float32)  # partitioned 2D
+        return {"a": a, "b": b}
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"]
+        b = input_data["b"]
+        smc_num = b.shape[0]
+        # y_n = 全向量点积 dot(a, b_n)（4-lane addtree + cumulative 跨 tile 累加终值）。
+        # shape (smc_num, 1)：每 SMC 单标量输出（stride=0 原地累写），verifier 走 per-SMC 8/8。
+        golden = np.array([[np.dot(a, b[n]).astype(np.float32)] for n in range(smc_num)],
+                          dtype=np.float32)
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]
+        b = input_data["b"]
+        a_addr = self.get_bank_addr("a", spec)
+        b_addr = self.get_bank_addr("b", spec)
+        # broadcast a：只注入 SMC_0（OQ 单源），follower 由 SHIFTUP fan-out 供值
+        programs[0].inject_vector(a_addr, a, stride=1)
+        # partitioned b：每 SMC 注入自己的列
+        for k, prog in enumerate(programs):
+            prog.inject_vector(b_addr, b[k], stride=1)
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        # 单 4-lane 点积链：a(broadcast) × b(partitioned) → FPMUL → addtree S0 reduce → y_n
+        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                       meta_name="a", logical_addr=0 * 256 + 0, stride=1, role="input", iq_id=30)
+        br = b.make_op("UR_READ", "b_read", RT.UR_READ, [],
+                       meta_name="b", logical_addr=1 * 256 + 0, stride=1, role="input", iq_id=31)
+        rt_a = b.make_op("RTOVR", "rt_a_FPMUL_S0", PS.FPMUL_S0, [ar])
+        rt_b = b.make_op("RTOVR", "rt_b_FPMUL_S1", PS.FPMUL_S1, [br])
+        mul = b.make_op("FPMUL", "inl_mul", RT.FPMUL, [rt_a, rt_b], iq_id=3)
+        # 单路乘积直喂 addtree（无 matmul_op 的 4 路 RTOVR 对齐冲突，去 temp bank 中转避免吞吐减半）
+        rt_sum = b.make_op("RTOVR", "rt_mul_FP32ADDTREE5TO1_S0",
+                           PS.FP32ADDTREE5TO1_S0, [mul])
+        # cumulative 跨迭代累加 old_i 来自 pipeline 末级（延迟 4）→ 必须 II>=4 否则累加被打断。
+        # 自环 loop_carried 边让 IIAnalyzer 取 rec-MII>=4（matmul_op 旧版靠 4 路 FPMUL 资源 II
+        # 偶然兜住，单路乘积无此保护，须显式建模递归）。
+        y_sum = b.make_op("FP32ADDTREE5TO1", "y_0", RT.FP32ADDTREE5TO1, [rt_sum],
+                          cumulative=True, reduction_per_channel=4, iq_id=26,
+                          loop_carried_depends_on={"y_0": 4})
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+        # 输出 = 每 SMC 单标量 dot(a,b_n)：stride=0 原地累写，addr0 终值 = 完整点积
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=0, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        # rtovr_deps 自动补全
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # SIMD loop 元数据（256 rows / 4 lanes → 64 迭代）
+        for op in ops:
+            op.metadata.update({"shape": [256], "inner_loops": 63, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+        # ADR-025 D1.2：broadcast 注入 SHIFTUP
+        ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
+        return ops
+
+
 class ManualMatmulOperator(BaseOperator):
     """
     手动编排的 Matmul DFG。
