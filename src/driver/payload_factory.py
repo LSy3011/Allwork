@@ -89,6 +89,12 @@ class UnitPayloadFactory:
                     val = op.metadata.get("logic_op")
                     if val is None and str(op.trace_id).startswith("sub"):
                         val = 1
+                elif field_name == "ACCUMULATE":
+                    # ADR-029 / RTL 表 517：addtree accumulate 位 = DFG 的 cumulative 标志。
+                    # MIROp metadata 用 `cumulative`（bool），RTL/code_fields 用 `accumulate`。
+                    # matmul/matmul_parallel_n cumulative=True→1（跨 tile 累加）；
+                    # matmul_q/q2 cumulative=False→0（单 tile 独立）。
+                    val = 1 if op.metadata.get("cumulative") else 0
             
             if val is not None:
                 # 字符串转数字编码机制：

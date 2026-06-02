@@ -184,9 +184,14 @@ modules:
   FP32ADDTREE5TO1:
     type: compute
     latency: 4
-    code_bits: 6
+    # RTL 表 517（user 2026-06-02）：vld(1)+accumulate(1)+smc_id_en(5)=7 bit。
+    # accumulate: 'b1 累加（old_i 参与）/ 'b0 不累加。原 yaml 漏此位（=6）→ body 少 1 bit
+    # 令 emitter 与真 RTL 错位（VCS 解码整条 header 左移、假 JUMP）+ cumulative 未编码进固件。
+    # 见 ADR-029。字段顺序严格按表 517：vld(bit0) → accumulate(bit1) → smc_id_en(bit2-6)。
+    code_bits: 7
     code_fields:
       - {name: VALID, bits: 1}
+      - {name: accumulate, bits: 1}
       - {name: smc_id_en, bits: 5}
 
   FP32ADDTREE8TO1:

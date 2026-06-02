@@ -640,12 +640,28 @@ functional_units:
         type: data
         rtovr_src_id: 27
     micro_instructions:
+    # RTL 表 517（user 2026-06-02）：vld → accumulate → smc_id_en（共 7 bit）。
+    # 原 master 仅 VALID（漏 accumulate + smc_id_en）→ body 与真 RTL 错位（VCS 解码假 JUMP）
+    # + cumulative 未编码进固件。见 ADR-029。本 spec 是 HardwareSpec.load 的权威源
+    # （覆盖 modules.yaml.code_fields 与 specs/units/*.yaml），故修必落此处。
     - field: VALID
       width: 1
       default: 0
       encoding:
         0: INVALID
         1: VALID
+    - field: accumulate
+      width: 1
+      default: 0
+      encoding:
+        0: NO_ACCUM      # old_i 不参与，本拍 reduce 独立
+        1: ACCUM         # old_i 参与累加（cumulative）
+    - field: smc_id_en
+      width: 5
+      default: 0
+      # ⚠ DEBT-029-SMCEN：addtree smc_id_en 当前 emit=0（master 原本就没此字段，恒 0 pad）。
+      # 表 517 语义：smc_id_en >= SMC_ID 才使能 → =0 仅 SMC_0。多-SMC addtree 在 VCS 上
+      # 是否需 emit PARAM_SMC_NUM-1（使能全 SMC）待裁定，与本次 accumulate 修复正交。
     behavioral_semantics:
       data_layouts:
         ACC_CHANNEL:

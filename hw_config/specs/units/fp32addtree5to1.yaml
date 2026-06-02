@@ -31,12 +31,20 @@ ports:
     type: data
     rtovr_src_id: 27
 micro_instructions:
+# RTL 表 517（user 2026-06-02）：vld → accumulate → smc_id_en。accumulate 位原缺失，
+# 见 ADR-029。顺序须与 modules.yaml code_fields 一致（decoder 按序解 body 位）。
 - field: VALID
   width: 1
   default: 0
   encoding:
     0: INVALID
     1: VALID
+- field: accumulate
+  width: 1
+  default: 0
+  encoding:
+    0: NO_ACCUM      # old_i 不参与，本拍 reduce 独立
+    1: ACCUM         # old_i 参与累加（cumulative）
 - field: smc_id_en
   width: 5
   default: 0

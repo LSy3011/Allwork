@@ -78,6 +78,10 @@ class FP32AddTree5To1Unit(Component):
         ctrl_code = inputs.get('ctrl', 0)
         instr = self.decoder.decode(ctrl_code)
         valid_trigger = (instr.VALID == "VALID")
+        # ADR-029 / RTL 表 517：accumulate 位决定 old_i 是否参与（'b1 累加 / 'b0 独立）。
+        # 缺省取 ACCUM(1) 兜底旧流。matmul cumulative=1→累加；matmul_q/q2 cumulative=0→base=0。
+        _acc = getattr(instr, "accumulate", "ACCUM")
+        do_accum = str(_acc).upper() in ("ACCUM", "1", "YES", "TRUE") or _acc in (1, True)
 
         # ── 1. 输入锁存 ──────────────────────────────────────────
         for i in range(8):
@@ -95,11 +99,12 @@ class FP32AddTree5To1Unit(Component):
                     print(f"    Input S{i} Valid! Val: {inputs[f's{i}']:032x}", flush=True)
             print(f"    regs_s: {[f'{x:032x}' for x in self.regs_s]}", flush=True)
 
-        # ── 2. old_i：硬件永不清零，固定来自 pipeline 末级寄存器 ──
+        # ── 2. old_i：按 accumulate 位决定是否参与（ADR-029）──
         #   add_result[i] = Si[0]+Si[1]+Si[2]+Si[3]+old_i
-        #   old_i = dr_d0.lane[i] (i<4)  或  dr_d1.lane[i-4] (i>=4)
-        base_d0 = self.dr_d0
-        base_d1 = self.dr_d1
+        #   accumulate=1：old_i = dr_d0.lane[i] (i<4) / dr_d1.lane[i-4] (i>=4)（跨拍累加）
+        #   accumulate=0：old_i = 0（本拍 reduce 独立，不累加上一拍）
+        base_d0 = self.dr_d0 if do_accum else 0
+        base_d1 = self.dr_d1 if do_accum else 0
 
         res_d0 = base_d0
         res_d1 = base_d1
