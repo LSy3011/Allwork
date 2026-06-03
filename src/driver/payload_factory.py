@@ -95,6 +95,18 @@ class UnitPayloadFactory:
                     # matmul/matmul_parallel_n cumulative=True→1（跨 tile 累加）；
                     # matmul_q/q2 cumulative=False→0（单 tile 独立）。
                     val = 1 if op.metadata.get("cumulative") else 0
+                elif field_name == "SMC_ID_EN":
+                    # ADR-030 / DEBT-029-SMCEN 闭合：smc_id_en 是阈值门控
+                    # （smc_id_en >= SMC_ID 才使能；user 2026-06-03 RTL 裁定：所有硬件单元
+                    # smc_id_en 含义一致）。多-SMC 默认全员参与本地计算 → 缺省 emit
+                    # PARAM_SMC_NUM-1（=N-1，使能 SMC_0..N-1）。原缺省落 field.default=0
+                    # → 仅 SMC_0 跑 addtree，SMC_1..7 被门控掉（VCS 上多-SMC bug；sim 全盲不暴露）。
+                    # SHIFTUP 等显式设 smc_id_en 的 op 由 meta_upper 命中（val 非 None），不进此分支。
+                    # ⚠ 精确匹配 SMC_ID_EN，绝不命中 compute 的 SMC_ID 字段——后者 ≠ smc_id_en，
+                    #   hco REJECT 扩 scope（DEBT-023-COMPUTE-ADDR，compute SMC_ID 维持 default 0）。
+                    params = getattr(hw_spec, "params", None)
+                    smc_num = getattr(params, "PARAM_SMC_NUM", 1) if params is not None else 1
+                    val = max(smc_num - 1, 0)
             
             if val is not None:
                 # 字符串转数字编码机制：
