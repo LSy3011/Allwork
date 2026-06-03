@@ -79,7 +79,7 @@ micro_instructions:
   encoding:
     0: ADD
     1: SUB
-- field: SMC_ID
+- field: smc_id_en
   width: 5
   default: 0
 behavioral_semantics:

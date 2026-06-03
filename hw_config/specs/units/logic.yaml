@@ -49,7 +49,7 @@ micro_instructions:
   encoding:
     0: PREC_16
     1: PREC_32
-- field: SMC_ID
+- field: smc_id_en
   width: 5
   default: 0
 behavioral_semantics:

@@ -1,6 +1,6 @@
 unit_name: SHIFTDN
 latency: 1
-code_bits: 129  # vld(1) + data(128) — 严格按硬件 spec 表 547
+code_bits: 7  # ADR-031 / v0.4.19 表 547：vld(1)+broadcast(1)+smc_id_en(5)；data 走源寄存器 DVR_SHIFTDN_S 非立即数
 attributes:
   throughput: 1
   desc: Cross-SMC chain shift (downward), no broadcast field (OQ-5 + spec 表 547)
@@ -22,23 +22,25 @@ ports:
       width: 129
       cross_smc_dst: true
 micro_instructions:
-  # 严格按硬件 spec 表 547，仅 2 个字段。
-  # 注意 spec gap：SHIFTDN 功能公式用 smc_id_en，但 spec 表 545（接口）+ 表 547（微指令）均未列。
-  # sim 层暂 fallback 到 PARAM_SMC_NUM-1 = 31（注：ADR-019 errata task #19 known gap，
-  # 待硬件 spec 进一步澄清）。
+  # ADR-031 / v0.4.19 表 547：vld + broadcast + smc_id_en = 7bit。
+  # data 走源寄存器 DVR_SHIFTDN_S（非指令立即数）——原 spec 误把 data(128) 当指令字段。
+  # smc_id_en 双义（表 547 注「与一般计算模块有差别」）：广播时=阈值门控 smc_id_en>=SMC_ID 使能；
+  # 不广播时=要读取的目的 UR 的 SMC ID（端点寻址）。
   - field: VALID
     width: 1
     default: 0
     encoding:
       0: INVALID
       1: VALID
-  - field: data
-    width: 128
+  - field: broadcast
+    width: 1
     default: 0
-    desc: "起点 SMC 通过 DVR_SHIFTDN_S 输入；该 microinstruction data 字段为读出数据"
+  - field: smc_id_en
+    width: 5
+    default: 0
 behavioral_semantics:
   start_point: "SMC_ID == smc_id_en: CRD_SHIFTDN_O <- DVR_SHIFTDN_S"
   chain_propagation: "SMC_ID < smc_id_en: CRD_SHIFTDN_O <- CRD_SHIFTDN_I"
   chain_stage_latency: 1
-  smc_id_en_source: "spec gap — 功能公式用但 spec 表均未列；sim fallback PARAM_SMC_NUM-1"
+  smc_id_en_source: "ADR-031 / v0.4.19 表 547 已列 smc_id_en（含于微指令，非 spec gap）；emit 缺省 PARAM_SMC_NUM-1"
   iq_slot_consumption: "SMC_ID <= smc_id_en 沿途每 SMC 在 t=t0（同步发射，OQ-8 (i)）各消耗自己的 SHIFTDN IQ slot"

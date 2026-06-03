@@ -11,7 +11,7 @@ modules:
       - {name: DST_PREC, bits: 1}
       - {name: UPDATE_ST, bits: 1}
       - {name: SUB, bits: 1}
-      - {name: SMC_ID, bits: 5}
+      - {name: smc_id_en, bits: 5}   # ADR-031：SMC_ID 是 smc_id_en 异名，统一命名（除 RTOVR 全单元一致）
     parallelism:
       prec_16bit:
         lanes: 8
@@ -30,7 +30,7 @@ modules:
       - {name: VALID, bits: 1}
       - {name: SRC_PREC, bits: 1}
       - {name: DST_PREC, bits: 1}
-      - {name: SMC_ID, bits: 5}
+      - {name: smc_id_en, bits: 5}   # ADR-031：SMC_ID 是 smc_id_en 异名，统一命名（除 RTOVR 全单元一致）
     # 核心拆分对齐逻辑
     parallelism:
       prec_16bit:
@@ -64,7 +64,7 @@ modules:
           SELECT_LE: 9
           SELECT_NE: 10
       - {name: PRECISION, bits: 1, default: 1}
-      - {name: SMC_ID, bits: 4, default: 0}
+      - {name: smc_id_en, bits: 5, default: 0}   # ADR-031 / v0.4.19 表 541：LOGIC smc_id_en 5bit（原 4bit 错，字段和 10→11=code_bits）
 
   RTOVR:
     type: router
@@ -83,7 +83,7 @@ modules:
       - {name: VALID, bits: 1}
       - {name: BANK, bits: 3}
       - {name: ADDR, bits: 8}
-      - {name: SMC_ID, bits: 5}
+      - {name: smc_id_en, bits: 5}   # ADR-031：SMC_ID 是 smc_id_en 异名，统一命名（除 RTOVR 全单元一致）
 
   UR_WRITE:
     type: memory_access
@@ -95,7 +95,7 @@ modules:
       - {name: BANK, bits: 3}
       - {name: ADDR, bits: 8}
       - {name: wbe, bits: 16}
-      - {name: SMC_ID, bits: 5}
+      - {name: smc_id_en, bits: 5}   # ADR-031：SMC_ID 是 smc_id_en 异名，统一命名（除 RTOVR 全单元一致）
 
   STB:
     type: transfer
@@ -137,11 +137,12 @@ modules:
   INTTOFP:
     type: compute
     latency: 1
-    code_bits: 10
+    code_bits: 11   # ADR-031 / v0.4.19 表 538：vld+src_prec+dst_prec+src_sign+src_pos+dst_pos+smc_id_en
     code_fields:
       - {name: vld, bits: 1}
       - {name: src_prec, bits: 1}
       - {name: dst_prec, bits: 1}
+      - {name: src_sign, bits: 1}   # ADR-031：表 538 有此字段，原 modules.yaml 漏
       - {name: src_pos, bits: 1}
       - {name: dst_pos, bits: 1}
       - {name: smc_id_en, bits: 5}
@@ -220,7 +221,8 @@ modules:
     latency: 1
     inputs: [CRD_SHIFTDN_I, DVR_SHIFTDN_S, SMC_ID]  # 硬件 spec 表 545：CRD（下行）不是 CRU
     outputs: [CRD_SHIFTDN_O]
-    code_bits: 129  # 严格按硬件 spec 表 547（仅 vld + data）
+    code_bits: 7  # ADR-031 / v0.4.19 表 547：vld(1)+broadcast(1)+smc_id_en(5)；data 走源寄存器 DVR_SHIFTDN_S 非立即数
     code_fields:
       - {name: VALID, bits: 1}
-      - {name: data, bits: 128}
+      - {name: broadcast, bits: 1}
+      - {name: smc_id_en, bits: 5}

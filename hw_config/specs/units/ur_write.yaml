@@ -23,6 +23,6 @@ micro_instructions:
 - field: wbe
   width: 16
   default: 0xffff
-- field: SMC_ID
+- field: smc_id_en
   width: 5
   default: 0

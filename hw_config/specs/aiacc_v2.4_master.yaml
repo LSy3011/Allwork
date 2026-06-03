@@ -152,7 +152,7 @@ functional_units:
       encoding:
         0: PREC_16
         1: PREC_32
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
     behavioral_semantics:
@@ -217,7 +217,7 @@ functional_units:
       encoding:
         0: PREC_16
         1: PREC_32
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
     behavioral_semantics:
@@ -283,6 +283,9 @@ functional_units:
       encoding:
         0: UNSIGNED
         1: SIGNED
+    - field: smc_id_en
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
@@ -307,7 +310,7 @@ functional_units:
           logic: 32xInt8 -> 32xFP16 scattered across D0-D3
   FP32ADDTREE8TO1:
     unit_name: FP32ADDTREE8TO1
-    latency: 4
+    latency: 3
     attributes:
       throughput: 1
       desc: 8-to-1 Reduction FP32 Add Tree (16-bit to 32-bit)
@@ -331,6 +334,9 @@ functional_units:
         1: VALID
     - field: DST_REG
       width: 2
+    - field: smc_id_en
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
   INTADD:
@@ -415,7 +421,7 @@ functional_units:
       encoding:
         0: ADD
         1: SUB
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
     behavioral_semantics:
@@ -584,6 +590,9 @@ functional_units:
       encoding:
         0: LOW
         1: HIGH
+    - field: smc_id_en
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
@@ -754,7 +763,7 @@ functional_units:
       encoding:
         0: PREC_16
         1: PREC_32
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
     behavioral_semantics:
@@ -777,7 +786,7 @@ functional_units:
   SHIFTDN:
     unit_name: SHIFTDN
     latency: 1
-    code_bits: 129  # 严格按硬件 spec 表 547（仅 vld + data）
+    code_bits: 7  # ADR-031 / v0.4.19 表 547：vld(1)+broadcast(1)+smc_id_en(5)
     attributes:
       throughput: 1
       desc: Cross-SMC chain shift (downward), no broadcast field (spec 表 547)
@@ -799,15 +808,18 @@ functional_units:
         width: 129
         cross_smc_dst: true
     micro_instructions:
-    # 严格按硬件 spec 表 547，仅 2 个字段（spec gap: 功能公式用 smc_id_en 但 spec 表均未列）
+    # ADR-031 / v0.4.19 表 547：vld + broadcast + smc_id_en = 7bit（data 走源寄存器 DVR_SHIFTDN_S，非立即数；原 spec 误把 data 当指令立即数）。
     - field: VALID
       width: 1
       default: 0
       encoding:
         0: INVALID
         1: VALID
-    - field: data
-      width: 128
+    - field: broadcast
+      width: 1
+      default: 0
+    - field: smc_id_en
+      width: 5
       default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
@@ -838,7 +850,7 @@ functional_units:
     - field: wbe
       width: 16
       default: 65535
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
   RTOVR:
@@ -903,6 +915,9 @@ functional_units:
       encoding:
         0: LOW
         1: HIGH
+    - field: smc_id_en
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
@@ -979,7 +994,7 @@ functional_units:
       encoding:
         0: ADD
         1: SUB
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
     behavioral_semantics:
@@ -1029,7 +1044,7 @@ functional_units:
     - field: ADDR
       width: 8
       default: 0
-    - field: SMC_ID
+    - field: smc_id_en
       width: 5
       default: 0
   INTTOINT:
@@ -1092,6 +1107,9 @@ functional_units:
       encoding:
         0: LOW
         1: HIGH
+    - field: smc_id_en
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
@@ -1158,6 +1176,9 @@ functional_units:
       encoding:
         0: LOW
         1: HIGH
+    - field: smc_id_en
+      width: 5
+      default: 0
     behavioral_semantics:
       latching: pre_load_on_valid_or_nonzero
       data_layouts:
