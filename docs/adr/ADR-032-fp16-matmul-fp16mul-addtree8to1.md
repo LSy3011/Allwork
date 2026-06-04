@@ -58,6 +58,16 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 | S3 | 8-SMC 广播 mirror matmul_parallel_n 换 FP16MUL 通路 | 8/8 bit-perfect |
 | S4 | VCS | — |
 
+### S1 实施备注（2026-06-04 摸底，checkpoint，下次冷启动从此接）
+**S1 不是 greenfield —— 有按旧错 spec 建的 sim 代码要重写。** 现状：
+- `sim/smc_simulator/units/fp16_mul_unit.py`（`FP16MulUnit`，已注册 kernel.py:94/evaluate:492）是**旧错结构**：只建模 `regs_s0×regs_s1→D0`（D1-7 恒 0，get_outputs:88），kernel **只喂 s0-s3**（缺 s4-s7）。真结构 = S0-S7→D0-D7：`D0[x]=S0[x]*S4[x], D1[x]=S0[x+4]*S4[x+4]`…（4 对×8 lane=32 乘）。
+- `sim/.../fp32addtree8to1_unit.py` 已部分实现（注释写"8 个 FP16 对"可疑，须核对 spec = 8 FP32→1）。
+- `hw_config/specs/units/fp16mul.yaml`（sim SpecLoader 第三链读此，非 master）是旧 spec（S0/S1+SRC_PREC/DST_PREC），须改正（DEBT-FP16-SIMLOADER）。
+- **精度 gotcha**：`fp_utils.fp16_mul_hw` 是 FP16×FP16→**FP16**；真 FP16MUL 是 FP16×FP16→**FP32**。须新写 `fp16_mul_to_fp32`（FP16 操作数转 FP32 再 fp32_mul_hw），且 **golden 须与之逐 bit 一致**否则 bit-perfect 挂。
+- 硬编码 `/home/zhangjun/...` sys.path.append 在 ~10 sim unit（无害，现有 e2e 都过）。
+
+**S1 子步**：S1-1 `fp16_mul_to_fp32`+重写 FP16MulUnit（32 乘）→ S1-2 核 fp32addtree8to1_unit → S1-3 kernel 喂 s4-s7+路由 D0-D7 → S1-4 DFG 算子 ManualFp16Matmul（load 微指令+compute+addtree8to1，参 matmul_op.py ManualMatmulQOperator）→ S1-5 FP16 golden（np.float16 乘/float32 累加，须对齐 sim 舍入）→ S1-6 op yaml+e2e。范式照搬 `matmul_op.py:180-285`（单 tile 无 cumulative）。
+
 ## Consequences
 - **正面**：~8× 乘法吞吐（32 vs 4 MAC/指令）+ ADDTREE8TO1 latency 3 vs ADDTREE5TO1 4 → cumulative rec-MII 4→3；对齐硬件钦定的「加法树 matmul」路径（V1.0 不支持 MAC matmul）。
 - **精度**：FP16 乘/FP32 累加，非 FP32-exact，仅 FP16 推理适用（user 已定目标）。
