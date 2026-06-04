@@ -852,10 +852,14 @@ class ManualFp16MatmulQOperator(BaseOperator):
         mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, mul_deps, iq_id=18)
 
         # 8 个 D → COLS 条 ADDTREE8TO1（tree_c 读 D{2c}/D{2c+1} → dst_id=c）。
-        # tree 间加**顺序依赖链**（tree_c 依赖 prev_tree，非 RTOVR 故仅排序不映射端口）：
-        # 4 条 tree 分写同一输出寄存器的 4 lane（部分 lane 累积），但 SMT 调度序 ≠ 循环序 →
-        # 若 rt_out 只依赖某一条 tree，其余 lane 可能在 rt_out 读后才写 → 该 lane=0（实测 Q2=0）。
-        # 链化保证执行序 tree0→…→tree{COLS-1}，rt_out 依赖**末条**即读到全 lane 齐。
+        # tree 间**顺序依赖链**（tree_c 依赖 prev_tree）：COLS 条 tree 分写同一输出寄存器的
+        # COLS 个 lane（部分 lane 累积），rt_out 依赖末条即读全 lane 齐。
+        # ⚠ II 优化尝试（去链化紧排 → II 4→6）已验证**会破**：tight schedule 下 SMT 的
+        #   producer-resident 窗口柔性 latch 选的拍，sim（决定论 cycle 再生）无法复现 → addtree
+        #   读到 s0=s1=0（D-pair 未配送，实测全 lane=0）。根因 = DEBT-032-RESIDENT-TIMING
+        #   （resident 窗口 sim 忠实性未验）+ sim addtree8to1 back-to-back invocation 流水未建模。
+        #   链化（每边 +addtree_lat=3，非 overlap）是当前 **sim-忠实**的保守解（II=10 但正确）。
+        #   降 II 至硬下界 4 须先闭合上述 DEBT（VCS + sim 流水建模）。见 ADR-032 S2。
         trees = []
         prev_tree = None
         for c in range(self.COLS):
@@ -869,7 +873,7 @@ class ManualFp16MatmulQOperator(BaseOperator):
             trees.append(tree)
             prev_tree = tree
 
-        # 单一输出 RTOVR 读最终 D（依赖末条 tree，4 lane 齐）→ bank5 稠密 [Q0..Q{COLS-1}]。
+        # 单一输出 RTOVR 读末条 tree 的 D（链化保末条最后执行 → COLS lane 齐）→ bank5 稠密。
         rt_out = b.make_op("RTOVR", "rt_y_UR_W0_S", PS.UR_W0_S, [prev_tree], sel=28)
         b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
                   logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)

@@ -109,8 +109,20 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 
 **结论**：FP16MUL 在乘法阶段达成 **8× MAC/指令**（32 vs 4），坐实 ADR-032 吞吐目标；省去 matmul_q2 的 temp-bank 往返（D 输出常驻直喂 addtree）。当前端到端 II=10 受 **4 条 ADDTREE8TO1 链化串行**主导（非乘法瓶颈）—— 收益落在乘法密度，reduce 串行是下一优化点（并行 reduce / 双缓冲，**DEBT-FP16-DBLBUF / DEBT-FP16-ADDTREE-SERIAL** defer）。
 
+**II 优化尝试（2026-06-04，降 II 至硬下界 4，已验证受阻、保守解维持）**：
+- 硬下界 = II=4（4 条 reduce 串行于单 ADDTREE8TO1 实例 iq28）。当前 II=10 由**链化每边 +addtree_lat(3)** 主导。
+- **试 1（rt_out 依赖全部 tree）**：counter-verifier 拒（RTOVR 物理 1-源模型，不可有 4 producer）。
+- **试 2（仅末条 tree 顺序依赖前 COLS-1 条 + 紧排）**：SMT 出 **II=6 SAT**，但 e2e **全 lane=0**。
+  in-process trace 定位：tight schedule 下 addtree VALID 拍读到 **s0=s1=0**（FP16MUL D-pair 未配送）。
+  **根因 = DEBT-032-RESIDENT-TIMING**：producer-resident 窗口的柔性 latch 让 SMT 选了某些拍，
+  **sim（决定论 cycle 逐拍再生）无法复现该柔性采样** → D 未在 addtree 读拍到位。即 hco 标的
+  「resident 窗口 sim 忠实性未验」在 tight schedule 下暴露（非乘法/调度 bug，是 sim 时序保真缺口）。
+- **结论**：链化（每边 +3、**非 overlap**）是当前 **sim-忠实**的保守解（II=10 但 bit-perfect 正确）。
+  降 II 至 4 须先闭合 DEBT-032-RESIDENT-TIMING（VCS 验 resident 窗口错拍采样）+ sim addtree8to1
+  back-to-back invocation 流水建模（当前 dr 累积对 overlap invocation 不忠实）。**不 ship 破的优化。**
+
 **S2 新增/确认债务**：
-- **DEBT-FP16-ADDTREE-SERIAL**：4 条 addtree 链化串行（II=10）为正确性（输出 lane 收集）所需的保守解；并行 reduce 或多通道一拍收集可降 II。
+- **DEBT-FP16-ADDTREE-SERIAL**：4 条 addtree 链化串行（II=10）为正确性 + sim 忠实所需的保守解；降至硬下界 4 受阻于 DEBT-032-RESIDENT-TIMING + sim addtree 流水建模（见上「II 优化尝试」）。
 - **DEBT-FP16-DBLBUF**（defer，用户裁定）：寄存器每源 2 份 src_*_id ping-pong 支撑 II=1，需 NEEDS-USER-FACT #4（三微指令发射时序）。
 - **NEEDS-USER-FACT #7（角色互换前提）**：硬件 S0-S3 能否装 4 个**不同**值（load_s0123 仅 src3210_high_id 1bit，可能广播组加载）。若 S0-S3 只能广播加载，则角色互换不成立、须走 faithful S4-S7 本地路径（阻塞于微指令消歧 fact，DEBT-FP16-LOADDECODE）。**当前 sim 对 S0-S3 按 4 独立寄存器建模（kernel 分端口喂），VCS 须验。**
 - **hco 审：APPROVE-with-notes（agentId a73026e9e1224f650，proposed 维持不升 Accepted）**：`modules.yaml` FP16MUL inputs 扩 `[S0,S4567,S1,S2,S3]`（加法式）+ `dependency_axioms.py` producer-resident 推广含 FP16MUL（axiom 变更）。两处软件/SMT 层逻辑自洽（纯可行域扩大 + positional 纯索引）、SHIFTUP 零回归。hco 补登债务（见下）+ 要求加 FP16MUL resident SMT 反证测试（已加 `test_smt_adversarial.py`）。
