@@ -748,7 +748,8 @@ functional_units:
     # 真 compute 微指令（表512 CRU_FP16MUL）= vld+src_0_id(1)+src_1_id(1)+smc_id_en(5)=8bit。
     # 此处仅 compute 组（loader override 顶层 code_fields）；load_s0123/load_s4567 三组在 modules.yaml micro_groups。
     micro_instructions:
-    - field: vld
+    - field: VALID   # 命名归一：toolchain 全单元 valid 位约定大写 VALID（payload_factory
+                     # 的 valid 注入与 sim decoder 均按 "VALID" 匹配；原 docx 名 vld 会漏注入）
       width: 1
       default: 0
       encoding:

@@ -270,5 +270,51 @@ def fp16_mul_hw(bits_a: int, bits_b: int) -> int:
     res_f_field = res_h & 0x3FF
     if res_e == 0 and res_f_field != 0:
         res_h = (res_h & 0x8000)
-        
+
     return res_h
+
+def fp16_mul_to_fp32(bits_a: int, bits_b: int) -> int:
+    """FP16 × FP16 → FP32 乘法（硬件 FP16MUL，表512-514，功能 5.3.3）。
+
+    与 fp16_mul_hw 的关键区别：输出是 **FP32**（32bit），不是 FP16。
+    FP16 尾数 11bit，两数乘积 ≤22bit，FP32 尾数 23bit → 乘积**精确无舍入**；
+    指数同理（FP16 ±15 → 乘积 ±30，远在 FP32 ±127 内）。
+    因此本函数用 Python double 中转即可得到精确 FP32 结果。
+    FP16 输入 denormal 走 FTZ（与 fp16_mul_hw 一致）。
+    """
+    sa = (bits_a >> 15) & 1
+    ea = (bits_a >> 10) & 0x1F
+    fa = bits_a & 0x3FF
+
+    sb = (bits_b >> 15) & 1
+    eb = (bits_b >> 10) & 0x1F
+    fb = bits_b & 0x3FF
+
+    # NaN 输入 → FP32 NaN
+    if (ea == 0x1F and fa != 0) or (eb == 0x1F and fb != 0):
+        return 0x7FC00000
+
+    # FTZ（FP16 denormal 输入 flush 到带符号零）
+    if ea == 0: fa = 0
+    if eb == 0: fb = 0
+
+    # 0 * Inf = NaN
+    if (ea == 0 and eb == 0x1F) or (ea == 0x1F and eb == 0):
+        return 0x7FC00000
+
+    f_a = struct.unpack('<e', struct.pack('<H', (sa << 15) | (ea << 10) | fa))[0]
+    f_b = struct.unpack('<e', struct.pack('<H', (sb << 15) | (eb << 10) | fb))[0]
+
+    res_f = f_a * f_b  # double 中转，对 FP16×FP16 精确
+    try:
+        res_bits = struct.unpack('<I', struct.pack('<f', res_f))[0]
+    except OverflowError:
+        res_bits = (0x7F800000 | ((sa ^ sb) << 31))
+
+    # Flush FP32 denormal 结果（FP16×FP16 不会产生，保持与 fp32_mul_hw 一致）
+    res_e = (res_bits >> 23) & 0xFF
+    res_f_field = res_bits & 0x7FFFFF
+    if res_e == 0 and res_f_field != 0:
+        res_bits = (res_bits & 0x80000000)
+
+    return res_bits

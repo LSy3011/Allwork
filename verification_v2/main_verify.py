@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQ2Operator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -32,6 +32,8 @@ OPERATOR_MAP = {
     "matmul_q": ManualMatmulQOperator,
     # ADR-026 Stage-2a：Matmul_Q cols_per_smc=4 密集打包（local-buffer 修法）
     "matmul_q2": ManualMatmulQ2Operator,
+    # ADR-032 S1：FP16 推理 matmul 最小通路（FP16MUL + FP32ADDTREE8TO1，单 SMC K=8）
+    "fp16_matmul_min": ManualFp16MatmulOperator,
 }
 
 CATEGORIES = {

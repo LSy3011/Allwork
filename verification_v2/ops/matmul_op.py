@@ -668,3 +668,100 @@ class ManualMatmulOperator(BaseOperator):
                 print(f"[DEBUG DFG] Op {op.trace_id} rtovr_deps: {op.metadata['rtovr_deps']}", flush=True)
 
         return ops
+
+
+class ManualFp16MatmulOperator(BaseOperator):
+    """ADR-032 S1：FP16 推理 matmul 最小通路（单 SMC，单 tile K=8，M=1）。
+
+    数据通路（v0.4.19 表512-520）：
+      a(8×FP16 激活行) → FP16MUL_S0；b(8×FP16 权重列) → FP16MUL_S4567(load_s4567 选 S4)
+      → FP16MUL 32 乘出 D0/D1（各 4×FP32，= a[0..3]*b[0..3] / a[4..7]*b[4..7]）
+      → RTOVR D0→ADDTREE8TO1_S0、D1→ADDTREE8TO1_S1
+      → FP32ADDTREE8TO1 把 8 个 FP32 平衡树求和 → 1 标量 = Σ_{k=0..7} a[k]·b[k]（K=8 点积）
+      → 写 bank5 lane0。
+
+    精度：FP16 乘 / FP32 累加（FP16×FP16→FP32 精确，22bit 乘积 ≤ FP32 23bit 尾数）。
+    单 SMC（无 parallel_dim）；连续打包、单份寄存器、不 cumulative。
+    债务：DEBT-FP16-DBLBUF / -MULTITILE（S2）；满 32 乘 8-D 全用（S2）；8-SMC 广播（S3）。
+    """
+
+    K = 8   # 单 tile 收缩维 = FP16MUL 一对源(S0×S4)的 8 lane
+
+    def __init__(self, **kwargs):
+        pass
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp16", "stride": 1},
+            "b": {"bank": 1, "offset": 0, "role": "input", "precision": "fp16", "stride": 1},
+            # 输出 FP32：shape [4] 强制读回端按 1 词 4×FP32 解包（read-back 固定 fp32 4-lane），
+            # 否则默认 (iters, vector_lanes=8) 会按 fp16 8-lane 误读。lane0=点积，lane1-3=0。
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp32", "shape": [4]},
+        }
+
+    def prepare_input(self, n_rows: int) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.K).astype(np.float16)
+        b = rng.uniform(1.0, 5.0, self.K).astype(np.float16)
+        return {"a": a, "b": b}
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"].astype(np.float16)
+        b = input_data["b"].astype(np.float16)
+        f32 = np.float32
+        # FP16×FP16→FP32 精确（= numpy float32 乘，单次舍入），逐 lane
+        p = (a.astype(np.float32) * b.astype(np.float32))     # 8 个 FP32 乘积
+        # 镜像 fp32addtree8to1_unit._reduce8 的平衡树求和顺序（D0=p[0..3], D1=p[4..7]）
+        l0 = f32(p[0] + p[1]); l1 = f32(p[2] + p[3])
+        l2 = f32(p[4] + p[5]); l3 = f32(p[6] + p[7])
+        m0 = f32(l0 + l1); m1 = f32(l2 + l3)
+        s = f32(m0 + m1)
+        golden = np.zeros(4, dtype=np.float32)
+        golden[0] = s
+        return {"y": golden, "intermediates": []}
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        # 激活行（广播源）与权重列（本地源）各一个 128-bit 词（8×FP16）。
+        # precision="fp16" 驱动 element_bits=16 → MockProgram/emitter 按 fp16 8-lane 打包输入。
+        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                       meta_name="a", logical_addr=0 * 256 + 0, stride=1,
+                       role="input", iq_id=30, precision="fp16")
+        br = b.make_op("UR_READ", "b_read", RT.UR_READ, [],
+                       meta_name="b", logical_addr=1 * 256 + 0, stride=1,
+                       role="input", iq_id=31, precision="fp16")
+        # 激活 → FP16MUL_S0（广播源槽 0）；权重 → FP16MUL_S4567（本地共享总线，low_id 选 S4）
+        rt_a = b.make_op("RTOVR", "rt_a_FP16MUL_S0", PS.FP16MUL_S0, [ar])
+        rt_b = b.make_op("RTOVR", "rt_b_FP16MUL_S4567", PS.FP16MUL_S4567, [br])
+        mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, [rt_a, rt_b], iq_id=18)
+        # FP16MUL 双输出 D0/D1 → addtree8to1 的 S0/S1（dep_port 选源 D0=18 / D1=19）
+        rt_d0 = b.make_op("RTOVR", "rt_d0_FP32ADDTREE8TO1_S0", PS.FP32ADDTREE8TO1_S0,
+                          [mul], dep_port="D0")
+        rt_d1 = b.make_op("RTOVR", "rt_d1_FP32ADDTREE8TO1_S1", PS.FP32ADDTREE8TO1_S1,
+                          [mul], dep_port="D1")
+        # 8 个 FP32 求和 → 1 标量（dst_id=0 → 写 D lane0）。单 tile 不 cumulative。
+        y_sum = b.make_op("FP32ADDTREE8TO1", "y_0", RT.FP32ADDTREE8TO1, [rt_d0, rt_d1],
+                          cumulative=False, reduction_per_channel=8, iq_id=28)
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=28)
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        # RTOVR 增广边依赖（anti-overwrite / 时序对齐），与 ManualMatmulOperator 同款
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # 单 tile 单次发射：无 loop。
+        for op in ops:
+            op.metadata.update({"shape": [1], "inner_loops": 0, "outer_loops": 0,
+                                "inner_inc": 0, "outer_inc": 0})
+        return ops

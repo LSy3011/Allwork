@@ -68,6 +68,25 @@ class TestFP16MULSchema(unittest.TestCase):
         self.assertIsNone(getattr(fpmul, "micro_groups", None), "FPMUL 不应有 micro_groups")
         self.assertEqual(BitPacker.get_unit_bits(self.spec, "FPMUL"), 41 + 8)
 
+    def test_compute_valid_bit_injected(self):
+        """ADR-032 S1 可证伪：FP16MUL compute payload 的 valid 位被置 1。
+        回归锁：字段名若退回 `vld`（payload_factory 按 'VALID' 匹配 → 漏命中 → VALID 缺失），
+        本断言失败。曾导致 FP16MUL 永不触发、D0/D1 恒 0（S1 e2e 才暴露）。"""
+        op = MIROp("FP16MUL", 0, "t_valid", metadata={"micro_variant": "compute"})
+        pl = UnitPayloadFactory.build(op, {}, {}, self.spec)
+        self.assertEqual(pl.get("VALID"), 1, "compute 必须注入 VALID=1，否则单元永不触发")
+
+    def test_compute_input_port_in_dvr_map(self):
+        """ADR-032 S1 可证伪：FP16MUL inputs 首端口名须命中 dvr_map（RTOVR 选通槽）。
+        回归锁：若退回 'S0123'（load 总线名，非 dvr_map 键）→ ucode_solver positional 查
+        target_slot 落 0，rt_a 误路由。断言首端口 == 'S0' 且在 dvr_map 中。"""
+        m = self.spec.modules["FP16MUL"]
+        inputs = m.inputs if hasattr(m, "inputs") else m.model_dump().get("inputs", [])
+        first_port = inputs[0].split("-")[-1]
+        dvr = self.spec.get_dvr_map().get("FP16MUL", {})
+        self.assertIn(first_port, dvr, f"首端口 {first_port} 须是 dvr_map 选通槽名（非 load 总线名）")
+        self.assertEqual(dvr[first_port], 19, "FP16MUL_S0 选通槽 == 19")
+
 
 if __name__ == "__main__":
     unittest.main()

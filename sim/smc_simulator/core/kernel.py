@@ -499,6 +499,11 @@ class ParallelKernel:
             's2_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S2),
             's3': get_port_data(RtoVROutput.DVR_FP16MUL_S3),
             's3_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S3),
+            # S4-S7 共享单一 DVR 端口 S4567（表514 load_s4567，src7654_low_id 选 4/5/6/7）。
+            # S1 单 tile K=8 仅用 S0×S4 一对 → S4567 端口数据路由到 s4；s5-s7 留 0。
+            # DEBT-FP16-DBLBUF/S2：满 32 乘时需按 load_s4567.low_id 分时路由 s5/s6/s7。
+            's4': get_port_data(RtoVROutput.DVR_FP16MUL_S4567),
+            's4_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S4567),
         })
         self.units['int8tofp16'].evaluate({
             'ctrl': controls.get('int8tofp16', 0),

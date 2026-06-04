@@ -2,12 +2,24 @@ unit_name: FP16MUL
 latency: 4
 attributes:
   throughput: 1
-  desc: 8xFP16 Multiplier
+  desc: 8-source FP16 Multiplier (S0-S7 -> D0-D7, 32 FP16 muls -> FP32, v0.4.19 表512-514)
 ports:
   inputs:
   - name: S0
     width: 128
   - name: S1
+    width: 128
+  - name: S2
+    width: 128
+  - name: S3
+    width: 128
+  - name: S4
+    width: 128
+  - name: S5
+    width: 128
+  - name: S6
+    width: 128
+  - name: S7
     width: 128
   outputs:
   - name: D0
@@ -42,6 +54,10 @@ ports:
     width: 128
     type: data
     rtovr_src_id: 25
+# compute 微指令（表512 CRU_FP16MUL，8bit）。须与 master modules.yaml FP16MUL
+# compute code_fields 逐位对齐（LSB 对齐：VALID@0），否则 sim 解码 header 偏移错位。
+# load_s0123(7bit)/load_s4567(9bit) 是独立 load 微指令，sim 不经本 decoder 解码
+# —— sim 用 RtoVR 数据总线直接锁存 S0-S7 寄存器（见 fp16_mul_unit.py latching）。
 micro_instructions:
 - field: VALID
   width: 1
@@ -49,28 +65,25 @@ micro_instructions:
   encoding:
     0: INVALID
     1: VALID
-- field: SRC_PREC
+- field: src_0_id
   width: 1
-  default: 1
-  encoding:
-    0: PREC_16
-    1: PREC_32
-- field: DST_PREC
+  default: 0
+- field: src_1_id
   width: 1
-  default: 1
-  encoding:
-    0: PREC_16
-    1: PREC_32
+  default: 0
+- field: smc_id_en
+  width: 5
+  default: 0
 behavioral_semantics:
   latching: pre_load_on_valid_or_nonzero # 支持“数据先到、指令后发”模式
   data_layouts:
     FP16: { element_type: FP16, count: 8, width: 16 }
-  
+
   execution_modes:
     - name: FP16MUL_CORE
       condition: "VALID == 'VALID'"
-      input_source: [S0, S1]
+      input_source: [S0, S1, S2, S3, S4, S5, S6, S7]
       layout: FP16
       operation:
         type: ARITHMETIC
-        primitive: fp_mul_hw
+        primitive: fp16_mul_to_fp32

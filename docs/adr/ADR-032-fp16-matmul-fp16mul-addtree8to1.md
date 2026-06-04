@@ -68,11 +68,33 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 
 **S1 子步**：S1-1 `fp16_mul_to_fp32`+重写 FP16MulUnit（32 乘）→ S1-2 核 fp32addtree8to1_unit → S1-3 kernel 喂 s4-s7+路由 D0-D7 → S1-4 DFG 算子 ManualFp16Matmul（load 微指令+compute+addtree8to1，参 matmul_op.py ManualMatmulQOperator）→ S1-5 FP16 golden（np.float16 乘/float32 累加，须对齐 sim 舍入）→ S1-6 op yaml+e2e。范式照搬 `matmul_op.py:180-285`（单 tile 无 cumulative）。
 
+### S1 实施完成（2026-06-04，e2e bit-perfect，hco APPROVE-with-notes agentId abf2114e69920c671）
+**`--op fp16_matmul_min --mode e2e` exit=0，Golden=71.37392 = SMC=71.37392，Diff=0.000000；98 pytest pass（+7 可证伪单测）；fp32 matmul e2e 未破。** 通路：a(8×FP16)→FP16MUL_S0、b(8×FP16)→FP16MUL_S4567 → FP16MUL 出 D0/D1 → addtree8to1 S0/S1 → 8 FP32 平衡树求和 → bank5 lane0。
+
+落地件：
+- **S1-1** `fp_utils.fp16_mul_to_fp32`（FP16×FP16→FP32 精确）+ 重写 `FP16MulUnit` 为真结构 S0-S7→D0-D7（32 乘，regs[0..7]）。
+- **S1-2** 重写 `fp32addtree8to1_unit._reduce8`（旧错把 S0/S1 当 FP16 半字拼接 → 改 S0/S1 各 4×FP32、8 个 FP32 **平衡加法树**求和）。
+- **S1-3** kernel 喂 s4（DVR_FP16MUL_S4567，S1 只用 S0×S4 一对）+ D0-D7 路由（已在）。
+- **S1-4** `ManualFp16MatmulOperator`（matmul_op.py）+ 注册 `fp16_matmul_min`；DFG 用 dep_port="D0"/"D1" 选 FP16MUL 双输出源。
+- **S1-5/6** golden（numpy float32 镜像 sim 求和序）；无 op yaml（手搭 operator，同 matmul_q）。
+
+**4 处 hw_config 契约修复（hco 全 APPROVE，均为修 bug/正确建模，非行为变更）**：
+1. **`vld`→`VALID`**（master + modules FP16MUL 全 micro 组）：payload_factory valid 注入按 `field.name.upper()=="VALID"` 匹配，`vld`→"VLD" 漏命中 → **compute VALID 位从未置 1，FP16MUL 永不触发**（emit body 缺 VALID、sim 解码 INVALID、D0/D1 恒 0）。重命名修复（bit 宽/encoding 不变，与 ADR-031 SMC_ID→smc_id_en 同性质命名归一）。**ADR-032 S0 宣称的「FPMUL/FP16MUL 固件 bit 级已验 smc_id_en=7」只验了 smc_id_en，漏验 vld → 本 bug 潜伏至 S1 e2e 才暴露。**
+2. **FP16MUL inputs `S0123`→`S0`**：ucode_solver 按 inputs 位置序查 dvr_map 解 RTOVR 选通槽，dvr_map 键是 {S0..S3,S4567}，"S0123"(load 总线名) 无键 → rt_a 误落 slot0。改 compute 选通槽名 S0。
+3. **sim 第三链 fp16mul.yaml**（**注：`sim/aiacc_hardware/specs` 是 symlink → hw_config/specs，第三链=同一文件**）：compute 微指令旧 FPMUL 翻版(VALID+SRC_PREC+DST_PREC=3bit)→ v0.4.19 真 compute(VALID+src_0_id+src_1_id+smc_id_en=8bit)；inputs 补 S0-S7。payload 宽 8 与 master 一致（防 sim decoder header 偏移）。**闭合 DEBT-FP16-SIMLOADER**。
+4. **fp32addtree8to1.yaml latency 4→3**：ADR-031 漏改的第三链，同步到权威值 3（modules+pipeline_delays）。
+
+**DEBT-FP16-AUDITOR**：rigid auditor 的 actual 值解码硬编码 FP32（auditor.py `struct.unpack('>f')`+LSB32），无法解码 FP16 输入/混合中间值 → 对 fp16 路径**系统性假阳性**。已在 `audit_truth_alignment` 顶部对 element_bits=16 路径**显式跳过 + 大声告警**（非静默），正确性由最终 golden parity（bit-perfect）背书。S2+ 若要逐-op 审计需让 auditor 按 element_bits 解 lane。
+
 ## Consequences
 - **正面**：~8× 乘法吞吐（32 vs 4 MAC/指令）+ ADDTREE8TO1 latency 3 vs ADDTREE5TO1 4 → cumulative rec-MII 4→3；对齐硬件钦定的「加法树 matmul」路径（V1.0 不支持 MAC matmul）。
 - **精度**：FP16 乘/FP32 累加，非 FP32-exact，仅 FP16 推理适用（user 已定目标）。
-- **债务**：DEBT-FP16-DBLBUF（S1 单份寄存器，S2 还双缓冲）/ DEBT-FP16-LAYOUT（S1 连续打包，S2+ 转置间插需表78 B 因子）/ DEBT-FP16-MULTITILE（S2+ 多 tile cumulative）/ DEBT-FP16-SCHEMA（若 S1 走逃生门）。
-- **NEEDS-USER-FACT 残留（不阻塞 S1，阻塞 S2 吞吐优化）**：#4 三微指令 load↔compute 发射时序 / IQ 占用 / overlap（决定 II 真实下界，v0.4.19 无此时序表，需 user RTL 时序）。
+- **债务**：DEBT-FP16-DBLBUF（S1 单份寄存器，S2 还双缓冲）/ DEBT-FP16-LAYOUT（S1 连续打包，S2+ 转置间插需表78 B 因子）/ DEBT-FP16-MULTITILE（S2+ 多 tile cumulative；**含 S2 满 32 乘补 inputs S1/S2/S3 端口时复核 ucode_solver positional 对齐**）/ ~~DEBT-FP16-SCHEMA~~（未走逃生门）/ ~~DEBT-FP16-SIMLOADER~~（S1 闭合）。
+- **S1 新增债务（hco abf2114e69920c671 要求显式落账）**：
+  - **DEBT-FP16-LOADDECODE**：sim 不解码 load_s0123(7bit)/load_s4567(9bit) 微指令——sim 用 RtoVR 数据总线直接锁存 regs[0..7]，load 微指令的 src*_high/low_id/smc_id_en 字段在 sim **完全旁路**。e2e 对 load 微指令字段正确性增信为零；VCS 须验 low_id/high_id 路由。
+  - **DEBT-FP16-ADDTREE-ORDER**：FP32ADDTREE8TO1 的 8 输入求和顺序用**平衡加法树**（依 "AddTree" 命名假设，无 RTL C 参考）。golden 镜像同序 → e2e bit-perfect 是 **sim-vs-golden 自洽，对 VCS 忠实性增信近零**（FP32 加法非结合，不同拓扑产不同 LSB）。**不可据此升 Accepted。**
+  - **DEBT-FP16-AUDITOR**：见上（rigid auditor FP32-only 解码，fp16 路径显式跳过）。
+- **NEEDS-USER-FACT 残留**：#4 三微指令 load↔compute 发射时序 / IQ 占用 / overlap（II 下界，阻塞 S2 吞吐）；**#5（S1 新增）RTL 表520 或 RTL 是否钦定 addtree8to1 8 输入归约拓扑（平衡树 vs 链式 vs 其他配对）——决定 DEBT-FP16-ADDTREE-ORDER 是否需改序**；**#6 确认 FP16MUL latency=4 是单元 pipeline depth 而非整条 FP16MUL→FP32 通路延迟（与 FP32ADDTREE8TO1=3 串联时勿重复计延迟）**。
 
 ## 关联
 - hco 评审（agentId a768d375631d89661）：方向 APPROVE，3 阻断（master 错/接线/schema）+ NEEDS-USER-FACT；S1 最小范围建议本 ADR D3 采纳。

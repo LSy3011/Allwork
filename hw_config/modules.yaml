@@ -46,11 +46,15 @@ modules:
   FP16MUL:
     type: compute
     latency: 4
-    inputs: [DVR-FP16MUL-S0123, DVR-FP16MUL-S4567]
+    # 端口名须与 rtovr_config producers_dvr 的 FP16MUL_S* 一致（ucode_solver 按 inputs
+    # 位置序 positional 查 dvr_map 解 RTOVR 选通槽）。S1 单 tile K=8 只用广播源 S0 + 本地
+    # 共享总线 S4567（load_s4567.low_id 选 S4）。原名 "S0123"(load 总线名)与 dvr_map 键 "S0"
+    # 不匹配 → rt_a 误落 slot0。满 32 乘(S2)需补 S1/S2/S3 端口。见 ADR-032 S1。
+    inputs: [DVR-FP16MUL-S0, DVR-FP16MUL-S4567]
     outputs: [DR-FP16MUL-D0, DR-FP16MUL-D1, DR-FP16MUL-D2, DR-FP16MUL-D3, DR-FP16MUL-D4, DR-FP16MUL-D5, DR-FP16MUL-D6, DR-FP16MUL-D7]
     code_bits: 8
     code_fields:
-      - {name: vld, bits: 1}
+      - {name: VALID, bits: 1}
       - {name: src_0_id, bits: 1}
       - {name: src_1_id, bits: 1}
       - {name: smc_id_en, bits: 5}
@@ -58,20 +62,20 @@ modules:
       compute:        # 表512 CRU_FP16MUL：触发 32 FP16 乘
         code_bits: 8
         code_fields:
-          - {name: vld, bits: 1}
+          - {name: VALID, bits: 1}
           - {name: src_0_id, bits: 1}
           - {name: src_1_id, bits: 1}
           - {name: smc_id_en, bits: 5}
       load_s0123:     # 表513 CRU_FP16MUL_S0123：load 广播源 S0-S3 进 DR 寄存器堆
         code_bits: 7
         code_fields:
-          - {name: vld, bits: 1}
+          - {name: VALID, bits: 1}
           - {name: src3210_high_id, bits: 1}
           - {name: smc_id_en, bits: 5}
       load_s4567:     # 表514 CRU_FP16MUL_S4567：load 本地源 S4-S7（low_id 选 4/5/6/7）
         code_bits: 9
         code_fields:
-          - {name: vld, bits: 1}
+          - {name: VALID, bits: 1}
           - {name: src7654_high_id, bits: 1}
           - {name: src7654_low_id, bits: 2}
           - {name: smc_id_en, bits: 5}
