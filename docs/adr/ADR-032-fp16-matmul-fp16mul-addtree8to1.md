@@ -113,17 +113,16 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 **II 优化尝试（2026-06-04，降 II 至硬下界 4，已验证受阻、保守解维持）**：
 - 硬下界 = II=4（4 条 reduce 串行于单 ADDTREE8TO1 实例 iq28）。当前 II=10 由**链化每边 +addtree_lat(3)** 主导。
 - **试 1（rt_out 依赖全部 tree）**：counter-verifier 拒（RTOVR 物理 1-源模型，不可有 4 producer）。
-- **试 2（仅末条 tree 顺序依赖前 COLS-1 条 + 紧排）**：SMT 出 **II=6 SAT**，但 e2e **全 lane=0**。
-  in-process trace 定位：tight schedule 下 addtree VALID 拍读到 **s0=s1=0**（FP16MUL D-pair 未配送）。
-  **根因 = DEBT-032-RESIDENT-TIMING**：producer-resident 窗口的柔性 latch 让 SMT 选了某些拍，
-  **sim（决定论 cycle 逐拍再生）无法复现该柔性采样** → D 未在 addtree 读拍到位。即 hco 标的
-  「resident 窗口 sim 忠实性未验」在 tight schedule 下暴露（非乘法/调度 bug，是 sim 时序保真缺口）。
-- **结论**：链化（每边 +3、**非 overlap**）是当前 **sim-忠实**的保守解（II=10 但 bit-perfect 正确）。
-  降 II 至 4 须先闭合 DEBT-032-RESIDENT-TIMING（VCS 验 resident 窗口错拍采样）+ sim addtree8to1
-  back-to-back invocation 流水建模（当前 dr 累积对 overlap invocation 不忠实）。**不 ship 破的优化。**
+- **试 2（仅末条 tree 顺序依赖前 COLS-1 条 + 紧排）**：SMT 出 **II=6 SAT**。
+
+**深挖（2026-06-04，专项调查 sim addtree 流水建模降 II）—— 确认 addtree 非瓶颈、tight 非 robust**：
+- **sim addtree8to1 流水**：trace 确认单元**正确处理 back-to-back（overlap）invocation**（cyc11/12/13 连发各读真 D-pair、dr 部分 lane 累积正确）。**addtree 流水建模不是 II 瓶颈**（我此前的「dr 累积对 overlap 不忠实」推断有误，特此订正）。
+- **tight（II=6）单-SMC 确定性通过（3/3 bit-perfect）但 multi-SMC 全灭（S3 fp16_matmul_n 0/8，sim 全 0）**。
+- **根因（精炼）= DEBT-032-RESIDENT-TIMING**：tight 下首发 tree 在 **FP16MUL D 尚未就绪**的拍读 D（trace：iter-0 某 tree s0=0）。单-SMC 靠**固件多迭代（warmup + steady）的 steady 迭代覆盖**侥幸纠正；multi-SMC 的 cluster lockstep 时序下 warmup 不纠 → 全灭。即 SMT 的 producer-resident **窗口下界**与 sim 的 FP16MUL **固定延迟流水 D 就绪拍**在 tight 下错位（链化的 +3 间隔恰好把 tree 推到 D 稳定就绪后，故 robust）。
+- **结论**：**降 II 的真瓶颈是 resident-timing 保真（非 addtree 流水）**。robust 降 II 须让 SMT resident 窗口下界对齐 sim 实际 D 就绪拍（或 VCS 闭合 resident 时序）——属 DEBT-032-RESIDENT-TIMING（hco 已标升 Accepted 阻断），非调度层 tweak。链化（II=10）是当前**单/多-SMC 双 robust** 的 sim-忠实解。**tight 单-SMC 的「通过」是 warmup 侥幸、multi-SMC 揭穿，不 ship。**
 
 **S2 新增/确认债务**：
-- **DEBT-FP16-ADDTREE-SERIAL**：4 条 addtree 链化串行（II=10）为正确性 + sim 忠实所需的保守解；降至硬下界 4 受阻于 DEBT-032-RESIDENT-TIMING + sim addtree 流水建模（见上「II 优化尝试」）。
+- **DEBT-FP16-ADDTREE-SERIAL**：4 条 addtree 链化串行（II=10）为**单/多-SMC 双 robust** 的 sim-忠实保守解。降至硬下界 4 的真瓶颈 = **DEBT-032-RESIDENT-TIMING（FP16MUL D 就绪拍 SMT/sim 对齐）**，**非** sim addtree 流水建模（专项调查证实 addtree 正确处理 overlap，见上「深挖」）。
 - **DEBT-FP16-DBLBUF**（defer，用户裁定）：寄存器每源 2 份 src_*_id ping-pong 支撑 II=1，需 NEEDS-USER-FACT #4（三微指令发射时序）。
 - **NEEDS-USER-FACT #7（角色互换前提）**：硬件 S0-S3 能否装 4 个**不同**值（load_s0123 仅 src3210_high_id 1bit，可能广播组加载）。若 S0-S3 只能广播加载，则角色互换不成立、须走 faithful S4-S7 本地路径（阻塞于微指令消歧 fact，DEBT-FP16-LOADDECODE）。**当前 sim 对 S0-S3 按 4 独立寄存器建模（kernel 分端口喂），VCS 须验。**
 - **hco 审：APPROVE-with-notes（agentId a73026e9e1224f650，proposed 维持不升 Accepted）**：`modules.yaml` FP16MUL inputs 扩 `[S0,S4567,S1,S2,S3]`（加法式）+ `dependency_axioms.py` producer-resident 推广含 FP16MUL（axiom 变更）。两处软件/SMT 层逻辑自洽（纯可行域扩大 + positional 纯索引）、SHIFTUP 零回归。hco 补登债务（见下）+ 要求加 FP16MUL resident SMT 反证测试（已加 `test_smt_adversarial.py`）。
