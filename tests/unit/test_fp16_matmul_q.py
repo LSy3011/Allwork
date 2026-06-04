@@ -107,5 +107,36 @@ class TestFp16MatmulQGolden(unittest.TestCase):
             self.assertEqual(float(g0[c]), float(g1[c]), f"改 b1 不应影响列 {c}")
 
 
+class TestFp16MatmulParallelN(unittest.TestCase):
+    """ADR-032 S3：8-SMC N 维广播 golden 可证伪。"""
+    def _op(self):
+        from verification_v2.ops.matmul_op import ManualFp16MatmulParallelNOperator
+        return ManualFp16MatmulParallelNOperator()
+
+    def test_per_smc_golden_shape_and_correctness(self):
+        """golden (smc_num, COLS)，每 SMC[s,c] = dot(广播 a, 本地 b_c[s])。"""
+        op = self._op()
+        smc_num = 8
+        data = op.prepare_input(8, smc_num=smc_num)
+        self.assertEqual(data["a"].shape, (op.K,), "广播 a 是 1D（K,）")
+        self.assertEqual(data["b0"].shape, (smc_num, op.K), "权重 b0 partitioned 2D")
+        g = op.get_golden(data, vector_lanes=8)["y"]
+        self.assertEqual(g.shape, (smc_num, op.COLS), "golden (smc_num, COLS)")
+        a = data["a"]
+        for s in range(smc_num):
+            for c in range(op.COLS):
+                manual = float(np.dot(a.astype(np.float32), data[f"b{c}"][s].astype(np.float32)))
+                self.assertAlmostEqual(float(g[s, c]), manual, places=2,
+                                       msg=f"SMC{s} 列{c} golden != 独立点积")
+
+    def test_smc_outputs_distinct(self):
+        """可证伪：各 SMC 权重不同 → 各 SMC golden 不同（防 partitioned 退化成广播）。"""
+        op = self._op()
+        g = op.get_golden(op.prepare_input(8, smc_num=8), vector_lanes=8)["y"]
+        # SMC_0 与 SMC_1 的输出行不应全等（不同 partitioned 权重）
+        self.assertFalse(np.allclose(g[0], g[1]),
+                         "不同 SMC 的 partitioned 权重应产不同输出")
+
+
 if __name__ == "__main__":
     unittest.main()

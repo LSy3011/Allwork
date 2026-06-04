@@ -57,6 +57,7 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 | S2 | 满 32 乘（8 D 全用 + 4 ADDTREE8TO1）+ 双缓冲建模 + **II/时序实测 vs FPMUL 基线**（收益落地点） | 时序对比报告 |
 | **S2 ✅ 2026-06-04** | **`--op fp16_matmul_q` 满 32 乘 e2e bit-perfect（4 列 Q0-Q3 全对，II=10）。角色互换 + 激活走 SHIFTUP + FP16MUL producer-resident axiom 放宽。双缓冲 defer。** | **达成（hco 待审 axiom + modules.yaml inputs）** |
 | S3 | 8-SMC 广播 mirror matmul_parallel_n 换 FP16MUL 通路 | 8/8 bit-perfect |
+| **S3 ✅ 2026-06-04** | **`--op fp16_matmul_n` 8-SMC N 维广播 e2e 8/8 bit-perfect（每 SMC 满 32 乘 4 列,partitioned 输出,II=10）。`ManualFp16MatmulParallelNOperator`(subclass S2)+ parallel_dim=N + SHIFTUP 跨-SMC 广播。一次过。** | **达成** |
 | S4 | VCS | — |
 
 ### S1 实施备注（2026-06-04 摸底，checkpoint，下次冷启动从此接）
@@ -129,6 +130,12 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 - **DEBT-032-RESIDENT-TIMING**：producer-resident 放宽的「驻留窗口 = prod.t+lat..+II-1」是 sim/SMT 假设，无 RTL broadcast/resident 流式时序表（同源 DEBT-023-BCAST-TIMING / DEBT-028）。VCS 跑出 8 RTOVR 各采正确 D 前不得升 Accepted。
 - **DEBT-032-ADDR-INTERCHANGE**：S2 角色互换 sim 通路 bit-perfect 不保 RTL 寻址一致，绑定 NEEDS-USER-FACT #7。
 - **NEEDS-USER-FACT-032-D-RESIDENT（hco 标，升 Accepted 阻断）**：FP16MUL D0-D7 是否在 DR 寄存器堆**常驻至下次 compute**、支持驻留窗口内多 RTOVR 错拍读？放宽的唯一物理前提——spec「每源 2 份」描述的是**输入 source 寄存器双缓冲**，外推到**输出 D 常驻可错拍读**是跨字段推断，RTL 无 D 输出驻留时序表佐证。若 RTL 是 D 输出 1-拍瞬态 → 放宽产 RTL 不可实现调度 → VCS 必挂。
+
+### S3 实施完成（2026-06-04，8-SMC N 维广播 8/8 bit-perfect，一次过）
+**`--op fp16_matmul_n --mode e2e` exit=0，多-SMC emit smc_num=8，All 8 SMC outputs bit-perfect（每 SMC 满 32 乘 4 列，per-SMC 各自点积全对，II=10）；107 pytest pass（+2 可证伪单测）；fp16_matmul_q / matmul_q / matmul_parallel_n 无回归。**
+- `ManualFp16MatmulParallelNOperator`（**subclass `ManualFp16MatmulQOperator`，复用 S2 的 SMC 内满 32 乘 DFG**）+ `parallel_dim="N"` + tensor_configs smc_layout（a broadcast / b{c} partitioned / y partitioned）+ `inject_data_per_smc`（a 仅注 SMC_0、权重 per-SMC）+ get_golden (smc_num, COLS)。
+- 机制 = **单 SMI 全局指令流 lockstep 复制 + SHIFTUP 跨-SMC 广播激活**（mirror ManualMatmulParallelNOperator / ADR-023/025）。S2 的 DFG 已用 `_inject_shiftup_broadcast({"a"})`（COLS≥4），多-SMC 下即真跨-SMC fan-out，**get_dfg 零改动**。
+- 继承 S2 全部债务（RESIDENT-TIMING / ADDR-INTERCHANGE / ADDTREE-SERIAL / D-RESIDENT / #7）；8/8 bit-perfect 是 sim-vs-golden 自洽（per-SMC），同 ADR-023/025 局限，升 Accepted 需 VCS。
 
 ## Consequences
 - **正面**：~8× 乘法吞吐（32 vs 4 MAC/指令）+ ADDTREE8TO1 latency 3 vs ADDTREE5TO1 4 → cumulative rec-MII 4→3；对齐硬件钦定的「加法树 matmul」路径（V1.0 不支持 MAC matmul）。

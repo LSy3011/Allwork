@@ -900,3 +900,66 @@ class ManualFp16MatmulQOperator(BaseOperator):
         if self.COLS >= 4:
             ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
         return ops
+
+
+class ManualFp16MatmulParallelNOperator(ManualFp16MatmulQOperator):
+    """ADR-032 S3：FP16 matmul 8-SMC N 维广播（output-stationary，满 32 乘/SMC）。
+
+    广播激活（SHIFTUP 单源 → fan-out 到 8 SMC）× 每 SMC **本地** COLS 权重列（partitioned）
+    → 每 SMC 算自己的 COLS 个 K=8 点积 → 各 SMC bank5 稠密 [Q0..Q{COLS-1}]（partitioned）。
+    **复用 S2（ManualFp16MatmulQOperator）的 SMC 内 DFG**（满 32 乘 1 FP16MUL → 8 D →
+    COLS 条 ADDTREE8TO1 链化）—— 单 SMI 全局指令流 lockstep 复制 + SHIFTUP 跨-SMC 广播
+    （mirror ManualMatmulParallelNOperator）。golden (smc_num, COLS)，per-SMC 8/8 bit-perfect。
+    """
+
+    parallel_dim = "N"
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        cfg = {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp16",
+                  "stride": 1, "smc_layout": "broadcast"},
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp32",
+                  "shape": [4], "smc_layout": "partitioned"},
+        }
+        for c in range(self.COLS):
+            cfg[f"b{c}"] = {"bank": self.WBANK[c], "offset": 0, "role": "input",
+                            "precision": "fp16", "stride": 1, "smc_layout": "partitioned"}
+        return cfg
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.K).astype(np.float16)              # broadcast 1D（K=8）
+        out = {"a": a}
+        for c in range(self.COLS):
+            out[f"b{c}"] = rng.uniform(1.0, 5.0, (smc_num, self.K)).astype(np.float16)  # partitioned 2D
+        return out
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"].astype(np.float16)
+        f32 = np.float32
+
+        def dot8(act, w):
+            p = (act.astype(np.float32) * w.astype(np.float32))
+            l0 = f32(p[0] + p[1]); l1 = f32(p[2] + p[3])
+            l2 = f32(p[4] + p[5]); l3 = f32(p[6] + p[7])
+            return f32(f32(l0 + l1) + f32(l2 + l3))
+
+        smc_num = input_data["b0"].shape[0]
+        golden = np.zeros((smc_num, 4), dtype=np.float32)   # (smc_num, COLS) per-SMC 4 点积
+        for s in range(smc_num):
+            for c in range(self.COLS):
+                golden[s, c] = dot8(a, input_data[f"b{c}"][s].astype(np.float16))
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]
+        a_addr = self.get_bank_addr("a", spec)
+        programs[0].inject_vector(a_addr, a, stride=1)        # 广播 a 仅注入 SMC_0（SHIFTUP fan-out）
+        for c in range(self.COLS):
+            b_addr = self.get_bank_addr(f"b{c}", spec)
+            for k, prog in enumerate(programs):
+                prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)  # 权重列 c per-SMC
+
+    # get_dfg 继承 ManualFp16MatmulQOperator（单 SMC 内 DFG + SHIFTUP 广播）；多 SMC emit 复制。
