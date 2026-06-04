@@ -22,13 +22,25 @@ class ModuleField(BaseModel):
     default: int = 0
     encoding: Dict[Any, Any] = Field(default_factory=dict)
 
+class MicroGroup(BaseModel):
+    """ADR-032 D2：单元的一条命名微指令组（FP16MUL 有 compute/load_s0123/load_s4567 三组）。
+
+    每组独立 code_bits + code_fields。单微指令单元（30+ 现存）不用此字段，
+    走顶层 code_bits/code_fields（向后兼容红线：绝不动 ModuleSpec.code_bits:int 签名）。
+    """
+    code_bits: int
+    code_fields: List[ModuleField] = []
+
+
 class ModuleSpec(BaseModel):
     type: str
     latency: int
     inputs: List[str] = []   # 设为可选，增强容错性
     outputs: List[str] = []
-    code_bits: int
+    code_bits: int                                    # 单微指令单元 = 该单元；多微指令单元 = 镜像默认组（compute）
     code_fields: List[ModuleField] = []
+    # ADR-032 D2：多微指令单元（如 FP16MUL）的命名组；None=单微指令（现存全部）。
+    micro_groups: Optional[Dict[str, MicroGroup]] = None
 
 class IQConfig(BaseModel):
     module: str

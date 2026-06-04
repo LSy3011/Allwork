@@ -744,25 +744,22 @@ functional_units:
         width: 128
         type: data
         rtovr_src_id: 25
+    # ADR-032：改正——原为 FPMUL copy-paste（SRC_PREC/DST_PREC，FP16MUL 无此字段，v0.4.19:185 自点 Typo）。
+    # 真 compute 微指令（表512 CRU_FP16MUL）= vld+src_0_id(1)+src_1_id(1)+smc_id_en(5)=8bit。
+    # 此处仅 compute 组（loader override 顶层 code_fields）；load_s0123/load_s4567 三组在 modules.yaml micro_groups。
     micro_instructions:
-    - field: VALID
+    - field: vld
       width: 1
       default: 0
       encoding:
         0: INVALID
         1: VALID
-    - field: SRC_PREC
+    - field: src_0_id
       width: 1
-      default: 1
-      encoding:
-        0: PREC_16
-        1: PREC_32
-    - field: DST_PREC
+      default: 0
+    - field: src_1_id
       width: 1
-      default: 1
-      encoding:
-        0: PREC_16
-        1: PREC_32
+      default: 0
     - field: smc_id_en
       width: 5
       default: 0
@@ -775,10 +772,16 @@ functional_units:
           width: 16
       execution_modes:
       - name: FP16MUL_CORE
-        condition: VALID == 'VALID'
+        condition: vld == 'VALID'
         input_source:
         - S0
         - S1
+        - S2
+        - S3
+        - S4
+        - S5
+        - S6
+        - S7
         layout: FP16
         operation:
           type: ARITHMETIC

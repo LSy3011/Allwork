@@ -57,13 +57,20 @@ class UnitPayloadFactory:
 
         module_spec = hw_spec.modules[m_type]
 
+        # ADR-032 D2：多微指令单元（如 FP16MUL）按 op.metadata['micro_variant'] 选组
+        # （compute/load_s0123/load_s4567）；缺省/未知/单微指令单元 → 顶层 code_fields（向后兼容）。
+        active_fields = module_spec.code_fields
+        variant = op.metadata.get("micro_variant")
+        if variant and getattr(module_spec, "micro_groups", None) and variant in module_spec.micro_groups:
+            active_fields = module_spec.micro_groups[variant].code_fields
+
         # ADR-018 v7 D5: MIROp metadata 约定 lowercase 键（与 axiom 读取一致），
         # 而 code_fields 与 payload 约定 UPPERCASE。这里对 op.metadata 做大写映射，
         # 使 lookup 双向兼容（既兼容历史 UPPERCASE 直填，也兼容 lowercase MIROp）。
         meta_upper = {str(k).upper(): v for k, v in op.metadata.items()}
 
         # 3. 动态驱动：遍历 YAML 定义的每个 field
-        for field in module_spec.code_fields:
+        for field in active_fields:
             field_name = field.name.upper()
 
             # 特殊全局字段：默认设置 VALID=1，SRC_PREC/DST_PREC=1 (FP32)，PRECISION=1

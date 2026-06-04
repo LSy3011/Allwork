@@ -40,6 +40,46 @@ modules:
         lanes: 4
         formula: "DR_D[x] = S0[x] * S1[x] (x=0..3)"
 
+  # ADR-032：FP16 推理 matmul 乘法器（v0.4.19 表512-514）。3 微指令 compute/load_s0123/load_s4567。
+  # compute 读 DR_FP16MUL_S* 寄存器堆（非 DVR）→ 必须 emit load 微指令（hco option b）。
+  # 顶层 code_bits/code_fields 镜像 compute 组（向后兼容）；micro_groups 载全 3 组。
+  FP16MUL:
+    type: compute
+    latency: 4
+    inputs: [DVR-FP16MUL-S0123, DVR-FP16MUL-S4567]
+    outputs: [DR-FP16MUL-D0, DR-FP16MUL-D1, DR-FP16MUL-D2, DR-FP16MUL-D3, DR-FP16MUL-D4, DR-FP16MUL-D5, DR-FP16MUL-D6, DR-FP16MUL-D7]
+    code_bits: 8
+    code_fields:
+      - {name: vld, bits: 1}
+      - {name: src_0_id, bits: 1}
+      - {name: src_1_id, bits: 1}
+      - {name: smc_id_en, bits: 5}
+    micro_groups:
+      compute:        # 表512 CRU_FP16MUL：触发 32 FP16 乘
+        code_bits: 8
+        code_fields:
+          - {name: vld, bits: 1}
+          - {name: src_0_id, bits: 1}
+          - {name: src_1_id, bits: 1}
+          - {name: smc_id_en, bits: 5}
+      load_s0123:     # 表513 CRU_FP16MUL_S0123：load 广播源 S0-S3 进 DR 寄存器堆
+        code_bits: 7
+        code_fields:
+          - {name: vld, bits: 1}
+          - {name: src3210_high_id, bits: 1}
+          - {name: smc_id_en, bits: 5}
+      load_s4567:     # 表514 CRU_FP16MUL_S4567：load 本地源 S4-S7（low_id 选 4/5/6/7）
+        code_bits: 9
+        code_fields:
+          - {name: vld, bits: 1}
+          - {name: src7654_high_id, bits: 1}
+          - {name: src7654_low_id, bits: 2}
+          - {name: smc_id_en, bits: 5}
+    parallelism:
+      fp16:
+        lanes: 32
+        formula: "D{0..7}[x] = S{0..3}[x|x+4] * S{4..7}[x|x+4]（4 对 × 8 lane = 32 FP16 乘，FP32 出）"
+
   LOGIC:
     type: compute
     latency: 1

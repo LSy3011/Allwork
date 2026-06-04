@@ -1,0 +1,70 @@
+---
+adr_id: ADR-032
+title: FP16 推理 matmul 高吞吐通路（FP16MUL + FP32ADDTREE8TO1）—— S0 设计
+decided: 2026-06-04
+last_verified: 2026-06-04
+still_holds: proposed
+builds_on: ADR-031, ADR-025, ADR-023
+---
+
+# ADR-032 · FP16 推理 matmul 通路（FP16MUL + FP32ADDTREE8TO1）
+
+> **状态：Proposed（feature 级新功能，S0 设计阶段，doc-first per ADR-004）**。user 定目标精度 = FP16 推理 matmul（FP16 乘 / FP32 累加）。用硬件 FP16MUL（32 FP16 乘/指令）+ FP32ADDTREE8TO1（8→1 reduce）替代当前 FPMUL(4×FP32)+ADDTREE5TO1，目标 ~8× 乘法吞吐。权威源 = 设计文档 v0.4.19。hco 评审（agentId a768d375631d89661）APPROVE 方向 + 标 3 阻断 + NEEDS-USER-FACT。
+
+## Context
+- **基线**：当前 matmul（`matmul_op.py` ManualMatmul* 系列）= FPMUL(4 FP32 lane)→FP32ADDTREE5TO1(4→1+cumulative II>=4)。8-SMC 广播 matmul_parallel_n 8/8 bit-perfect（ADR-025）。FP32 精度。
+- **目标**：FP16 推理（LLAMA2 类，文档表79/711 举例 Matmul_Q/K/V/QK/QKV/FC，K=4096 大收缩维）。
+- **scaffolding 已在**（hco 核实）：`hw_resource.py:53-67` 有 FP16MUL_S0..S3/S4567 PortSlot + ResourceType + RtoVR D0-D7（src_id 18-25）；master 有 FP16MUL/ADDTREE8TO1 functional_unit；`pipeline_delays.yaml` 有延迟。
+
+## 硬件事实（v0.4.19，权威）
+### FP16MUL（表512-514，功能 5.3.3）
+- 输入 S0-S7，各 8×FP16(128bit)；输出 D0-D7，各 4×FP32(128bit)。
+- `D0[x]=S0[x]*S4[x], D1[x]=S0[x+4]*S4[x+4]`（x=0..3）；同理 S1×S5→D2/D3、S2×S6→D4/D5、S3×S7→D6/D7。= **4 对×8 lane = 32 FP16 乘/指令，FP32 出**。
+- **latency = 4**（user 2026-06-04 裁定；`pipeline_delays.yaml` 现写 2 是**错的**，需修 2→4）。
+- **3 微指令**：表512 CRU_FP16MUL（compute，vld+src_0_id(1)+src_1_id(1)+smc_id_en(5)=8bit）/ 表513 S0123（load S0-S3，vld+src3210_high_id(1)+smc_id_en(5)=7bit）/ 表514 S4567（load S4-S7，vld+src7654_high_id(1)+src7654_low_id(2)+smc_id_en(5)=9bit）。
+- 寄存器文件每源 2 份（src_*_id 选）——load/compute ping-pong 双缓冲，支撑 II=1。
+
+### FP32ADDTREE8TO1（表520，功能）
+- 输入 S0/S1，各 4×FP32；输出 D[x]，x=0..7。
+- `D[dst_id] = sum(S0[0..3], S1[0..3])` = **8 个 FP32 求和 → 1 标量**，写 D[dst_id]（表520 dst_id(2)）。latency 3。
+
+### 数据通路（接线正解，hco 阻断 #2/#5 已解）
+K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8）。FP16MUL 一指令 4 对 → 8 个 D → **4 条 ADDTREE8TO1 → 4 个 K=8 点积并行**。大 K = cumulative 跨 tile 累加（mirror 当前 matmul 自环 loop_carried）。
+
+## Decision
+
+### D1. 改正 master spec FP16MUL（阻断 #1，doc-first 第一步）
+`aiacc_v2.4_master.yaml` 当前把 FP16MUL 建成 FPMUL 翻版（S0/S1 两输入 + micro=VALID/SRC_PREC/DST_PREC/smc_id_en），**错**。改成 v0.4.19：S0-S7 八源、D0-D7、latency 4（latency 本就 4 不变，结构改）、3 微指令。同步 `pipeline_delays.yaml` FP16MUL 2→4。
+
+### D2. 扩 schema 支持「单元多微指令」（阻断 #3，hco 选项 b，**已实施 2026-06-04**）
+**SCOPING 裁定（hco agentId a42a43da2f317e6a3）= (b) 必须建模 load 微指令。** 硬依据：FPMUL compute 直读 DVR（RtoVR live 总线，无 load 微指令）；**FP16MUL compute 读 `DR_FP16MUL_S*` 寄存器堆（非 DVR），该寄存器堆仅 load 微指令 valid 时从 DVR 写入** → RTOVR 只到 DVR、跨不过 DVR→DR 锁存 → option (a) 不成立。最小 emit 集 = `{compute, load_s4567}`（S4-S7 本地源必 load）；`load_s0123`（S0-S3 广播源）是否 emit 待 DR_S0123 驻留语义（NEEDS-USER-FACT #1）。
+
+**实施（91 pass / 6 skip，4 个 8-SMC e2e 不破）**：
+- `hw_spec.py`：加 `MicroGroup` 子模型 + `ModuleSpec.micro_groups: Optional[Dict]`（**绝不动 `code_bits:int` 签名**，纯 additive）；单微指令单元（30+ 现存）`micro_groups=None` 走顶层 code_fields，零影响。
+- modules.yaml：加 FP16MUL（顶层 code_bits=8 镜像 compute 组 + `micro_groups` 载 compute(8)/load_s0123(7)/load_s4567(9)）。
+- master：改正 FP16MUL micro（原 FPMUL copy-paste 的 SRC_PREC/DST_PREC→真 compute vld+src_0_id+src_1_id+smc_id_en；input_source S0-S7）。
+- `pipeline_delays.yaml`：FP16MUL 2→4。
+- payload_factory.build + packer.pack_capsule/get_unit_bits：加 `micro_variant` 参数选组（缺省→顶层，向后兼容）。
+- 测试 `test_fp16mul_schema.py`（4 用例：3 组加载/variant 选组/packer 偏移/单微指令兼容）。
+- **DEBT-FP16-SIMLOADER（未做，S1 还）**：第三条加载链 `sim/aiacc_hardware/src/spec_loader.py` 独立读 units yaml、不认 micro_groups dict —— 仅 sim 跑 FP16MUL 时（S1）需同步，本批不阻塞（sim FP16MUL 单元尚未建）。
+- **latency 4 caveat**：user 裁定单元 latency=4（master/modules/pipeline_delays 已对齐）；hco 存疑「4 是否为 FP16MUL→addtree 通路延迟而非单元」——以 user 裁定为准，VCS 时复核（NEEDS-USER-FACT #2）。
+
+### D3. 分阶段实施
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| S0 | 本 ADR + D1 改正 master + D2 schema 决策 | hco APPROVE |
+| S1 | 单 SMC 单 tile **K=8**（1 FP16MUL pair D0/D1 + 1 ADDTREE8TO1）、单份寄存器、连续打包、不 cumulative；sim 新单元 fp16mul + fp32addtree8to1；FP16 golden（np.float16 乘/float32 累加） | `--op fp16_matmul_min` e2e bit-perfect + TimingVerifier 无 Bank 冲突 + ≥1 可证伪单测 |
+| S2 | 满 32 乘（8 D 全用 + 4 ADDTREE8TO1）+ 双缓冲建模 + **II/时序实测 vs FPMUL 基线**（收益落地点） | 时序对比报告 |
+| S3 | 8-SMC 广播 mirror matmul_parallel_n 换 FP16MUL 通路 | 8/8 bit-perfect |
+| S4 | VCS | — |
+
+## Consequences
+- **正面**：~8× 乘法吞吐（32 vs 4 MAC/指令）+ ADDTREE8TO1 latency 3 vs ADDTREE5TO1 4 → cumulative rec-MII 4→3；对齐硬件钦定的「加法树 matmul」路径（V1.0 不支持 MAC matmul）。
+- **精度**：FP16 乘/FP32 累加，非 FP32-exact，仅 FP16 推理适用（user 已定目标）。
+- **债务**：DEBT-FP16-DBLBUF（S1 单份寄存器，S2 还双缓冲）/ DEBT-FP16-LAYOUT（S1 连续打包，S2+ 转置间插需表78 B 因子）/ DEBT-FP16-MULTITILE（S2+ 多 tile cumulative）/ DEBT-FP16-SCHEMA（若 S1 走逃生门）。
+- **NEEDS-USER-FACT 残留（不阻塞 S1，阻塞 S2 吞吐优化）**：#4 三微指令 load↔compute 发射时序 / IQ 占用 / overlap（决定 II 真实下界，v0.4.19 无此时序表，需 user RTL 时序）。
+
+## 关联
+- hco 评审（agentId a768d375631d89661）：方向 APPROVE，3 阻断（master 错/接线/schema）+ NEEDS-USER-FACT；S1 最小范围建议本 ADR D3 采纳。
+- user RTL 裁定：目标精度 FP16 推理（2026-06-04）；FP16MUL latency=4（2026-06-04）。
+- 设计文档 v0.4.19 表512-520/78/79/711；提取工具 `verification_v2/tools/spec_doc_align.py`（注：仅抓「上行微指令表」，表78/79 功能表抓不到，本 ADR 接线靠手读 docx XML 补）。
