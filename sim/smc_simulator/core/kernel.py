@@ -500,10 +500,20 @@ class ParallelKernel:
             's3': get_port_data(RtoVROutput.DVR_FP16MUL_S3),
             's3_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S3),
             # S4-S7 共享单一 DVR 端口 S4567（表514 load_s4567，src7654_low_id 选 4/5/6/7）。
-            # S1 单 tile K=8 仅用 S0×S4 一对 → S4567 端口数据路由到 s4；s5-s7 留 0。
-            # DEBT-FP16-DBLBUF/S2：满 32 乘时需按 load_s4567.low_id 分时路由 s5/s6/s7。
+            # ADR-032 S2 角色互换：4 个不同权重列放 S0-S3（各独立端口），广播激活放 S4-S7
+            # → S4567 端口的单一广播激活值同时喂 s4=s5=s6=s7（同值，无需 low_id 区分）。
+            # D0/D1=S0×S4=w0⊙act … D6/D7=S3×S7=w3⊙act → 4 点积。点积可交换，数学等价
+            # 硬件钦定布局（激活→S0-S3 广播 / 权重→S4-S7 本地）。fidelity 缺口（S0-S3 能否装
+            # 4 不同值 / 广播角色互换）见 ADR-032 S2 NEEDS-USER-FACT；faithful S4-S7 本地
+            # 时分加载（load_s4567 low_id 解码）= DEBT-FP16-LOADDECODE（阻塞于微指令消歧 fact）。
             's4': get_port_data(RtoVROutput.DVR_FP16MUL_S4567),
             's4_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S4567),
+            's5': get_port_data(RtoVROutput.DVR_FP16MUL_S4567),
+            's5_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S4567),
+            's6': get_port_data(RtoVROutput.DVR_FP16MUL_S4567),
+            's6_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S4567),
+            's7': get_port_data(RtoVROutput.DVR_FP16MUL_S4567),
+            's7_valid': get_port_valid(RtoVROutput.DVR_FP16MUL_S4567),
         })
         self.units['int8tofp16'].evaluate({
             'ctrl': controls.get('int8tofp16', 0),

@@ -47,10 +47,11 @@ modules:
     type: compute
     latency: 4
     # 端口名须与 rtovr_config producers_dvr 的 FP16MUL_S* 一致（ucode_solver 按 inputs
-    # 位置序 positional 查 dvr_map 解 RTOVR 选通槽）。S1 单 tile K=8 只用广播源 S0 + 本地
-    # 共享总线 S4567（load_s4567.low_id 选 S4）。原名 "S0123"(load 总线名)与 dvr_map 键 "S0"
-    # 不匹配 → rt_a 误落 slot0。满 32 乘(S2)需补 S1/S2/S3 端口。见 ADR-032 S1。
-    inputs: [DVR-FP16MUL-S0, DVR-FP16MUL-S4567]
+    # 位置序 positional 查 dvr_map 解 RTOVR 选通槽：deps[i] → inputs[i]）。
+    # 顺序为 [S0, S4567, S1, S2, S3]：**加法式扩展**——S1(单对)用前 2 位 S0/S4567 不变；
+    # S2(满 32 乘 4 列)按 deps=[w0, act, w1, w2, w3] 对齐 S0/S4567/S1/S2/S3（ADR-032 S2
+    # 角色互换：4 权重列→S0-S3、广播激活→S4567）。S4567 置第 2 位是为保 S1 deps[1]→S4567。
+    inputs: [DVR-FP16MUL-S0, DVR-FP16MUL-S4567, DVR-FP16MUL-S1, DVR-FP16MUL-S2, DVR-FP16MUL-S3]
     outputs: [DR-FP16MUL-D0, DR-FP16MUL-D1, DR-FP16MUL-D2, DR-FP16MUL-D3, DR-FP16MUL-D4, DR-FP16MUL-D5, DR-FP16MUL-D6, DR-FP16MUL-D7]
     code_bits: 8
     code_fields:

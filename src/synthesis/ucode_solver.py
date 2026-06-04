@@ -412,6 +412,12 @@ class UCodeSynthesizer:
         # ADR-011: tristate 分流
         res = solver.check()
         if res == z3.unsat:
+            if _DEBUG_SOLVER:
+                try:
+                    core = solver.unsat_core()
+                    print(f"[UNSAT-CORE] ({len(core)} constraints): {[str(c) for c in core]}", flush=True)
+                except Exception as _e:
+                    print(f"[UNSAT-CORE] unavailable: {_e}", flush=True)
             return (SolverStatus.UNSAT, None)
         if res != z3.sat:
             # z3.unknown — 不调 unsat_core（ADR-011 阻断项：unknown 时该 API 行为未定义）

@@ -251,6 +251,52 @@ class TestSMTRefutation(unittest.TestCase):
         self._assert_unsat(ops, II=1,
             msg="II=1 同 FPADD 实例同 slot 必 UNSAT；若 SAT 则 add_resource_constraint 缺 ALU 排他")
 
+    def _fp16mul_fanout_graph(self):
+        """镜像 ADR-032 S2 满 32 乘的输出侧 crux：1 FP16MUL → 8 个 RTOVR（D0-D7），
+        4 个写 ADDTREE8TO1_S0（槽 32）、4 个写 S1（槽 33），每 2 个（D{2c}/D{2c+1}）喂 1 条
+        ADDTREE8TO1（iq28，4 条串行）。每条 tree 要求其 S0/S1 两 RTOVR **同拍**锁存
+        (consumer==latch+1)，4 条 tree 串行 → 4 组锁存拍互异 → 8 个 RTOVR 必须在 FP16MUL
+        常驻窗口内**错拍**采样。strict `==` 钉死全部同拍 → 4 条 tree 被逼同拍同单元 → UNSAT。"""
+        b = MIROpBuilder()
+        u0 = b.make_op("UR_READ", "u0", RT.UR_READ, [], "U0", iq_id=30)
+        u1 = b.make_op("UR_READ", "u1", RT.UR_READ, [], "U1", iq_id=31)
+        ri0 = b.make_op("RTOVR", "ri0", PS.FP16MUL_S0, [u0])
+        ri1 = b.make_op("RTOVR", "ri1", PS.FP16MUL_S4567, [u1])
+        mul = b.make_op("FP16MUL", "mul", RT.FP16MUL, [ri0, ri1], iq_id=18)
+        for c in range(4):
+            rlo = b.make_op("RTOVR", f"rd{2*c}", PS.FP32ADDTREE8TO1_S0, [mul], dep_port=f"D{2*c}")
+            rhi = b.make_op("RTOVR", f"rd{2*c+1}", PS.FP32ADDTREE8TO1_S1, [mul], dep_port=f"D{2*c+1}")
+            b.make_op("FP32ADDTREE8TO1", f"t{c}", RT.FP32ADDTREE8TO1, [rlo, rhi], iq_id=28)
+        return b.get_dfg()
+
+    def test_fp16mul_resident_window_enables_sat(self):
+        """
+        [反证 R11 · ADR-032 S2] FP16MUL 输出 producer-resident 放宽守门（用真算子 DFG）。
+
+        满 32 乘真算子 DFG：1 FP16MUL → 8 RTOVR（4 抢 ADDTREE8TO1_S0、4 抢 S1）+ 输入侧
+        4 权重 + SHIFTUP 激活。8 个输出 RTOVR 必须在 FP16MUL 常驻窗口内**错拍**采样不同 D。
+          - resident 放宽生效（dependency_axioms `prod_is_resident` 含 FP16MUL）→ II=10 SAT。
+          - 若 FP16MUL 分支被误删（还原 strict `t_latch==prod.t+lat`）→ 8 RTOVR 钉死同拍、
+            4 条 tree 被逼同单元同拍 → **MAX_II 内全 UNSAT**（实测 patch 掉分支后 II≤20 全
+            UNSAT）→ 本断言 res 为 None → 失败（回归即暴露）。
+        与 `test_fp16_matmul_q.py`（验数值）互补：本测试钉住 SMT 放宽语义本身。
+        """
+        from verification_v2.ops.matmul_op import ManualFp16MatmulQOperator
+        ops = ManualFp16MatmulQOperator().get_dfg(spec=self.spec)
+        res = self.synthesizer.solve_with_units(ops, MII=1, MAX_II=16)
+        self.assertIsNotNone(res,
+            msg="满 32 乘真 DFG 应 SAT；若 UNSAT 则 prod_is_resident 的 FP16MUL 分支失效")
+        self.assertGreaterEqual(res["II"], 4,
+            msg="4 条 ADDTREE8TO1 串行于 iq28 → II>=4 下界")
+
+    def test_fp16mul_fanout_below_addtree_bound_unsat(self):
+        """[反证 R11b] 最小图 II=3 必 UNSAT：4 条 ADDTREE8TO1 串行于单元 iq28 鸽巢下界 II>=4。
+        守 addtree 单元发射排他（与 resident 放宽正交，放宽不会过度放水越过此下界）。"""
+        import copy
+        ops = self._fp16mul_fanout_graph()
+        self._assert_unsat(copy.deepcopy(ops), II=3,
+            msg="II=3 应 UNSAT（4 ADDTREE8TO1 串行下界 II=4）；若 SAT 则 addtree 单元排他漏洞")
+
 
 class TestMultiSMCAxioms(unittest.TestCase):
     """

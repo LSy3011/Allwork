@@ -765,3 +765,134 @@ class ManualFp16MatmulOperator(BaseOperator):
             op.metadata.update({"shape": [1], "inner_loops": 0, "outer_loops": 0,
                                 "inner_inc": 0, "outer_inc": 0})
         return ops
+
+
+class ManualFp16MatmulQOperator(BaseOperator):
+    """ADR-032 S2：FP16 推理 matmul 满 32 乘（单 SMC，K=8，4 列稠密）。
+
+    **角色互换**（ADR-032 S2 NEEDS-USER-FACT）：4 个不同权重列放 S0-S3（各独立 DVR 端口），
+    广播激活放 S4-S7（共享 S4567 单端口，同值无需 low_id 区分；kernel 喂 s4=s5=s6=s7）。
+      D0/D1=S0×S4=w0⊙act、D2/D3=S1×S5=w1⊙act、D4/D5=S2×S6=w2⊙act、D6/D7=S3×S7=w3⊙act
+      → 1 个 FP16MUL 指令算全 32 乘 → 8 个 D → 4 条 FP32ADDTREE8TO1（dst_id 0/1/2/3，SMT
+      串行化于单元 iq28）→ Q[c]=dot(act, w_c) → bank5 一词稠密 4 lane [Q0,Q1,Q2,Q3]。
+    点积可交换 → 与硬件钦定布局（激活→S0-S3 广播 / 权重→S4-S7 本地）数学等价。
+    fidelity 缺口（S0-S3 能否装 4 不同值 / faithful S4-S7 本地加载）见 ADR-032 S2 DEBT。
+    单 tile 不 cumulative；双缓冲 defer（DEBT-FP16-DBLBUF）。
+    """
+
+    K = 8     # 收缩维（FP16MUL 一对源 8 lane）
+    # COLS=4 满 32 乘：激活走 SHIFTUP（broadcast，resident）解耦其 read 时序 → 4 权重各占
+    # 1 read 端口/1 bank 同拍读，激活在更早拍读 ur-r0（释放端口）。4 列 × 8 lane × (低/高半)
+    # = 32 FP16 乘/指令。COLS=3 时退化为直读激活（不经 SHIFTUP，4 read 恰满 4 端口）。见 ADR-032 S2。
+    COLS = 4
+
+    def __init__(self, **kwargs):
+        pass
+
+    # 各权重列放**互异 bank**（b0→bank1 … b3→bank4）：FP16MUL strict latch 强制全输入同拍
+    # read，同 bank 同拍 2 read → Bank 冲突 UNSAT（实测 unsat-core）。激活 bank0。
+    WBANK = [1, 2, 3, 4]   # COLS 个权重列的 bank
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        cfg = {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp16", "stride": 1},
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp32", "shape": [4]},
+        }
+        for c in range(self.COLS):
+            cfg[f"b{c}"] = {"bank": self.WBANK[c], "offset": 0, "role": "input",
+                            "precision": "fp16", "stride": 1}
+        return cfg
+
+    def prepare_input(self, n_rows: int) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.K).astype(np.float16)             # 激活 1 行 K=8
+        out = {"a": a}
+        for c in range(self.COLS):
+            out[f"b{c}"] = rng.uniform(1.0, 5.0, self.K).astype(np.float16)  # 权重列 c，K=8
+        return out
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"].astype(np.float16)
+        f32 = np.float32
+
+        def dot8(act, w):
+            p = (act.astype(np.float32) * w.astype(np.float32))   # 8 个 FP32 乘积（精确）
+            l0 = f32(p[0] + p[1]); l1 = f32(p[2] + p[3])
+            l2 = f32(p[4] + p[5]); l3 = f32(p[6] + p[7])
+            return f32(f32(l0 + l1) + f32(l2 + l3))               # 镜像 _reduce8 平衡树
+
+        golden = np.zeros(4, dtype=np.float32)
+        for c in range(self.COLS):
+            golden[c] = dot8(a, input_data[f"b{c}"].astype(np.float16))
+        return {"y": golden, "intermediates": []}
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        # 激活（广播）1 word + 4 权重列（各 1 word，bank1 word c）。precision=fp16 驱动 8-lane 打包。
+        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                       meta_name="a", logical_addr=0 * 256 + 0, stride=1,
+                       role="input", iq_id=30, precision="fp16")
+        # COLS 个权重列各 1 个 UR read：互异 read 端口（31..）+ 互异 bank（WBANK[c]）。
+        # 激活端口 30 + COLS 权重 = COLS+1 个同拍 read，须 ≤4 端口且各占不同 bank（故 COLS≤3）。
+        w_reads = []
+        for c in range(self.COLS):
+            wc = b.make_op("UR_READ", f"w{c}_read", RT.UR_READ, [],
+                           meta_name=f"b{c}", logical_addr=self.WBANK[c] * 256 + 0, stride=1,
+                           role="input", iq_id=30 + c, precision="fp16")  # ur-r0..3（激活走 SHIFTUP 错拍占 ur-r0）
+            w_reads.append(wc)
+
+        # RTOVR：权重列 c → FP16MUL_S{c}（S0-S2）；激活 → FP16MUL_S4567（广播 s4=s5=s6=s7）。
+        rt_w = [b.make_op("RTOVR", f"rt_w{c}_FP16MUL_S{c}", getattr(PS, f"FP16MUL_S{c}"), [w_reads[c]])
+                for c in range(self.COLS)]
+        rt_act = b.make_op("RTOVR", "rt_act_FP16MUL_S4567", PS.FP16MUL_S4567, [ar])
+
+        # FP16MUL：dep 顺序 [w0, act, w1, w2(...)] 对齐 modules.yaml inputs [S0,S4567,S1,S2,S3]。
+        mul_deps = [rt_w[0], rt_act] + [rt_w[c] for c in range(1, self.COLS)]
+        mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, mul_deps, iq_id=18)
+
+        # 8 个 D → COLS 条 ADDTREE8TO1（tree_c 读 D{2c}/D{2c+1} → dst_id=c）。
+        # tree 间加**顺序依赖链**（tree_c 依赖 prev_tree，非 RTOVR 故仅排序不映射端口）：
+        # 4 条 tree 分写同一输出寄存器的 4 lane（部分 lane 累积），但 SMT 调度序 ≠ 循环序 →
+        # 若 rt_out 只依赖某一条 tree，其余 lane 可能在 rt_out 读后才写 → 该 lane=0（实测 Q2=0）。
+        # 链化保证执行序 tree0→…→tree{COLS-1}，rt_out 依赖**末条**即读到全 lane 齐。
+        trees = []
+        prev_tree = None
+        for c in range(self.COLS):
+            rt_d_lo = b.make_op("RTOVR", f"rt_d{2*c}_FP32ADDTREE8TO1_S0", PS.FP32ADDTREE8TO1_S0,
+                                [mul], dep_port=f"D{2*c}")
+            rt_d_hi = b.make_op("RTOVR", f"rt_d{2*c+1}_FP32ADDTREE8TO1_S1", PS.FP32ADDTREE8TO1_S1,
+                                [mul], dep_port=f"D{2*c+1}")
+            tdeps = [rt_d_lo, rt_d_hi] + ([prev_tree] if prev_tree else [])
+            tree = b.make_op("FP32ADDTREE8TO1", f"y_{c}", RT.FP32ADDTREE8TO1, tdeps,
+                             cumulative=False, reduction_per_channel=8, dst_id=c, DST_REG=c, iq_id=28)
+            trees.append(tree)
+            prev_tree = tree
+
+        # 单一输出 RTOVR 读最终 D（依赖末条 tree，4 lane 齐）→ bank5 稠密 [Q0..Q{COLS-1}]。
+        rt_out = b.make_op("RTOVR", "rt_y_UR_W0_S", PS.UR_W0_S, [prev_tree], sel=28)
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        for op in ops:
+            op.metadata.update({"shape": [1], "inner_loops": 0, "outer_loops": 0,
+                                "inner_inc": 0, "outer_inc": 0})
+        # COLS=4 满 32 乘：激活走 SHIFTUP（broadcast/resident）—— 解耦激活 read 时序，使 4 个
+        # 权重 read 在 compute-1 同拍各占 1 端口/1 bank，激活在更早拍读 ur-r0（释放端口）。
+        # rt_act（→FP16MUL_S4567）经 helper 改消费 SHIFTUP_D（sel=29），producer-resident 放宽
+        # （dependency_axioms SHIFTUP+broadcast）允许其在驻留窗口内采样。COLS≤3 不需 SHIFTUP。
+        if self.COLS >= 4:
+            ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
+        return ops

@@ -55,6 +55,7 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 | S0 | 本 ADR + D1 改正 master + D2 schema 决策 | hco APPROVE |
 | S1 | 单 SMC 单 tile **K=8**（1 FP16MUL pair D0/D1 + 1 ADDTREE8TO1）、单份寄存器、连续打包、不 cumulative；sim 新单元 fp16mul + fp32addtree8to1；FP16 golden（np.float16 乘/float32 累加） | `--op fp16_matmul_min` e2e bit-perfect + TimingVerifier 无 Bank 冲突 + ≥1 可证伪单测 |
 | S2 | 满 32 乘（8 D 全用 + 4 ADDTREE8TO1）+ 双缓冲建模 + **II/时序实测 vs FPMUL 基线**（收益落地点） | 时序对比报告 |
+| **S2 ✅ 2026-06-04** | **`--op fp16_matmul_q` 满 32 乘 e2e bit-perfect（4 列 Q0-Q3 全对，II=10）。角色互换 + 激活走 SHIFTUP + FP16MUL producer-resident axiom 放宽。双缓冲 defer。** | **达成（hco 待审 axiom + modules.yaml inputs）** |
 | S3 | 8-SMC 广播 mirror matmul_parallel_n 换 FP16MUL 通路 | 8/8 bit-perfect |
 | S4 | VCS | — |
 
@@ -85,6 +86,37 @@ K=8 点积 = 1 FP16MUL（S0×S4→D0,D1）+ 1 ADDTREE8TO1（S0=D0,S1=D1→sum8�
 4. **fp32addtree8to1.yaml latency 4→3**：ADR-031 漏改的第三链，同步到权威值 3（modules+pipeline_delays）。
 
 **DEBT-FP16-AUDITOR**：rigid auditor 的 actual 值解码硬编码 FP32（auditor.py `struct.unpack('>f')`+LSB32），无法解码 FP16 输入/混合中间值 → 对 fp16 路径**系统性假阳性**。已在 `audit_truth_alignment` 顶部对 element_bits=16 路径**显式跳过 + 大声告警**（非静默），正确性由最终 golden parity（bit-perfect）背书。S2+ 若要逐-op 审计需让 auditor 按 element_bits 解 lane。
+
+### S2 实施完成（2026-06-04，满 32 乘 e2e bit-perfect，hco 待审）
+**`--op fp16_matmul_q --mode e2e` exit=0，4 列 Q0=71.37/Q1=66.18/Q2=84.16/Q3=79.02 全 Diff=0；II=10；100 pytest pass（+3 可证伪单测）；matmul/matmul_q2/fp16_matmul_min 无回归。** `ManualFp16MatmulQOperator`（K=8, COLS=4）：1 个 FP16MUL 指令算全 **32 乘** → 8 个 D → 4 条 FP32ADDTREE8TO1（dst_id 0-3，链化串行于单元 iq28）→ bank5 稠密 [Q0..Q3]。
+
+**关键设计（用户裁定：角色互换 + 双缓冲 defer）**：
+- **角色互换**：4 个不同权重列 → S0-S3（各独立 DVR 端口），广播激活 → S4-S7（共享 S4567 单端口，kernel 喂 s4=s5=s6=s7 同值）。`D{2c}/D{2c+1}=S{c}×S{c+4}=w_c⊙act` → Q[c]=dot(w_c,act)。点积可交换 → 与硬件钦定布局（激活广播 S0-S3 / 权重本地 S4-S7）数学等价。
+- **激活走 SHIFTUP**（COLS=4 必需）：满 32 乘需 4 权重 + 1 激活 = 5 个 UR read，但 FP16MUL **strict latch 强制全输入同拍 read** + 仅 4 个 UR read 端口 → 直读必 UNSAT。激活经 `_inject_shiftup_broadcast`（resident SHIFTUP_D）**解耦其 read 时序**（早拍读 ur-r0），4 权重在 compute-1 同拍各占 1 端口/1 bank（**权重必放互异 bank** b0-b3→bank1-4，否则同 bank 同拍 read = Bank 冲突 UNSAT，实测 unsat-core 证）。
+- **FP16MUL producer-resident axiom 放宽（`dependency_axioms.py`）**：FP16MUL 的 D0-D7 在 DR 寄存器堆**常驻**（spec「每源 2 份」，同 DR_SHIFTUP_D 性质）。满 32 乘 = 8 个 RTOVR 读同一 FP16MUL，4 个抢 addtree8to1 的 S0 端口、4 个抢 S1 → 须**错拍采样常驻 D**。原 strict `t_latch==prod.t+lat` 钉死同拍 → 端口冲突必 UNSAT。故把 `prod_is_bcast_shiftup` 推广为 `prod_is_resident`（+ FP16MUL），放宽为驻留窗口区间 `[prod.t+lat, prod.t+lat+II-1]`（**复用 ADR-028 同款机制**，仅加 FP16MUL 一种 producer，不动 SHIFTUP 既有逻辑；matmul/matmul_q2 无回归）。
+- **4 addtree 链化**：4 条 tree 分写同一输出寄存器 4 lane（部分 lane 累积）。SMT 调度序 ≠ 循环序 → 若 rt_out 只依赖某一条 tree，其余 lane 可能在读后才写（实测 Q2=0）。加 tree 间顺序依赖链 → rt_out 依赖末条即读全 lane 齐。代价：II 4→10（addtree 串行 latency 主导）。
+
+**时序对比报告（II/吞吐 vs FPMUL 基线 matmul_q2）**：
+| 指标 | fp16_matmul_q（本通路） | matmul_q2（FPMUL 基线） | 说明 |
+|---|---|---|---|
+| 乘法指令数（产 4 列） | **1 FP16MUL** | 4 FPMUL | FP16MUL 一指令 32 乘 |
+| **MAC / 乘法指令** | **32**（4 列×8 lane） | 4（4 FP32 lane） | **8× MAC 密度**（ADR 钦定收益） |
+| 收缩维 K | 8 | 4 | FP16 一对源即 K=8 |
+| reduce 单元 latency | ADDTREE8TO1 = 3 | ADDTREE5TO1 = 4 | 8to1 reduce 更快 |
+| II | 10 | 6 | fp16 II 高 = 4 条 addtree **链化串行**主导 |
+| sim 总 cycle | 91 | 87 | 相当（fp16 K 翻倍 + 8× MAC 密度） |
+| #DFG ops | 26 | 37 | fp16 省去 temp-bank 重定时（D 常驻直喂 addtree） |
+
+**结论**：FP16MUL 在乘法阶段达成 **8× MAC/指令**（32 vs 4），坐实 ADR-032 吞吐目标；省去 matmul_q2 的 temp-bank 往返（D 输出常驻直喂 addtree）。当前端到端 II=10 受 **4 条 ADDTREE8TO1 链化串行**主导（非乘法瓶颈）—— 收益落在乘法密度，reduce 串行是下一优化点（并行 reduce / 双缓冲，**DEBT-FP16-DBLBUF / DEBT-FP16-ADDTREE-SERIAL** defer）。
+
+**S2 新增/确认债务**：
+- **DEBT-FP16-ADDTREE-SERIAL**：4 条 addtree 链化串行（II=10）为正确性（输出 lane 收集）所需的保守解；并行 reduce 或多通道一拍收集可降 II。
+- **DEBT-FP16-DBLBUF**（defer，用户裁定）：寄存器每源 2 份 src_*_id ping-pong 支撑 II=1，需 NEEDS-USER-FACT #4（三微指令发射时序）。
+- **NEEDS-USER-FACT #7（角色互换前提）**：硬件 S0-S3 能否装 4 个**不同**值（load_s0123 仅 src3210_high_id 1bit，可能广播组加载）。若 S0-S3 只能广播加载，则角色互换不成立、须走 faithful S4-S7 本地路径（阻塞于微指令消歧 fact，DEBT-FP16-LOADDECODE）。**当前 sim 对 S0-S3 按 4 独立寄存器建模（kernel 分端口喂），VCS 须验。**
+- **hco 审：APPROVE-with-notes（agentId a73026e9e1224f650，proposed 维持不升 Accepted）**：`modules.yaml` FP16MUL inputs 扩 `[S0,S4567,S1,S2,S3]`（加法式）+ `dependency_axioms.py` producer-resident 推广含 FP16MUL（axiom 变更）。两处软件/SMT 层逻辑自洽（纯可行域扩大 + positional 纯索引）、SHIFTUP 零回归。hco 补登债务（见下）+ 要求加 FP16MUL resident SMT 反证测试（已加 `test_smt_adversarial.py`）。
+- **DEBT-032-RESIDENT-TIMING**：producer-resident 放宽的「驻留窗口 = prod.t+lat..+II-1」是 sim/SMT 假设，无 RTL broadcast/resident 流式时序表（同源 DEBT-023-BCAST-TIMING / DEBT-028）。VCS 跑出 8 RTOVR 各采正确 D 前不得升 Accepted。
+- **DEBT-032-ADDR-INTERCHANGE**：S2 角色互换 sim 通路 bit-perfect 不保 RTL 寻址一致，绑定 NEEDS-USER-FACT #7。
+- **NEEDS-USER-FACT-032-D-RESIDENT（hco 标，升 Accepted 阻断）**：FP16MUL D0-D7 是否在 DR 寄存器堆**常驻至下次 compute**、支持驻留窗口内多 RTOVR 错拍读？放宽的唯一物理前提——spec「每源 2 份」描述的是**输入 source 寄存器双缓冲**，外推到**输出 D 常驻可错拍读**是跨字段推断，RTL 无 D 输出驻留时序表佐证。若 RTL 是 D 输出 1-拍瞬态 → 放宽产 RTL 不可实现调度 → VCS 必挂。
 
 ## Consequences
 - **正面**：~8× 乘法吞吐（32 vs 4 MAC/指令）+ ADDTREE8TO1 latency 3 vs ADDTREE5TO1 4 → cumulative rec-MII 4→3；对齐硬件钦定的「加法树 matmul」路径（V1.0 不支持 MAC matmul）。

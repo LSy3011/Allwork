@@ -79,11 +79,18 @@ class DependencyAxioms(AxiomBase):
                 #   普通 producer 仍严格 `==`（瞬态输出，必须当拍采样）。counter-verifier
                 #   (ucode_solver 维度4) 本就用 undersample(>=)+overwrite(<prod.t+lat+II) 区间、非
                 #   strict ==，故无需同步改。见 ADR-028 + hco 复核。
-                prod_is_bcast_shiftup = (
-                    producer.op_type.upper() == "SHIFTUP"
-                    and producer.metadata.get("broadcast") == 1
+                # ── ADR-032 S2：FP16MUL 的 D0-D7 输出在 DR 寄存器堆（spec「每源 2 份」），
+                #   compute 一发即**常驻**到下次 compute（与 DR_SHIFTUP_D 同性质，非 1-拍瞬态）。
+                #   满 32 乘 = 1 FP16MUL → 8 个 D，4 条 ADDTREE8TO1 时分复用单元 2 个输入端口
+                #   (S0/S1) → 8 个 RTOVR 必须在常驻窗口内**错拍**采样不同 D（4 个抢 S0 端口、4 个
+                #   抢 S1）。strict `==` 把 8 个 RTOVR 钉死同拍 → 端口冲突 → 必 UNSAT。故 FP16MUL
+                #   producer 同 broadcast-SHIFTUP 一样放宽为驻留窗口区间。见 ADR-032 S2 + hco。
+                prod_is_resident = (
+                    (producer.op_type.upper() == "SHIFTUP"
+                     and producer.metadata.get("broadcast") == 1)
+                    or producer.op_type.upper() == "FP16MUL"
                 )
-                if prod_is_bcast_shiftup:
+                if prod_is_resident:
                     DependencyAxioms._add_constraint(
                         solver, t_latch >= t_vars[prod_id] + lat_p,
                         f"rtovr_bcast_lo_{op.trace_id}_{prod_id}")
