@@ -154,6 +154,16 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
 - hco notes（已收口）：端序统一 `<`（与现存单元一致，位模式同）/ 本段方法名订正 / schema 守门测试已补 /
   忠实度 caveat 坚持（8/8 是终值 parity，不验跨-SMC gather→transpose→scatter 时序，对忠实性增信近零，升 Accepted 待 VCS）。
 
+### Stage-A' ✅ DONE（2026-06-05，K=SMC_NUM=8 全 gather + cumulative）
+- `ManualMatmulQDsTK8Operator`（matmul_q_dst_k8）：M=1、**K=8**——激活 8 元素向量**列对齐存全 8 个 SMC**
+  （每 SMC 1 元素 a[s]）→ `apply_smi_ds_t` gather 8×1 → 转置 1×8 → 恢复 8 元素行写回 SMC_0 bank0（**2 词**）→
+  复用 ParallelN **cumulative compute**（FP32ADDTREE5TO1 跨词 accumulate，loop_carried II=4）→ dot(a,W[:,s])。
+- `--op matmul_q_dst_k8 --mode e2e` **8/8 bit-perfect + Truth Audit SUCCESS**（II=4 SAT，cumulative 递归被真触发）。
+  **反证**：移除 smi_ds_t config → 0/8 全零。
+- 比 Stage-A 更忠实：**gather 全 8 SMC**（非 4）+ cumulative reduce，对齐文档 [seq1037-1039] 输入 SMC_NUM 行。
+- `apply_smi_ds_t` 泛化支持**多词行**（K=8 > word_lanes=4 → 每行拆 2 词）；新增 K=8 多词 cluster 测试。全量 pytest 118 pass。
+- 残留：M=1（单行）；M>1 + K=8 多行（Stage-A''，需 matmul_q 多行 + ParallelN cumulative 两模式合一）。
+
 ### Increment 2/3 设计（已实施，下方留档原设计）
 **缩放实例（最低 compute 风险，复用 matmul_q 已验通路）**：M=4、**K=4**、gather 跨 SMC_0..K-1（=4 个 SMC）、
 广播到全 8 SMC。激活 X[4,4] **列对齐存**（非转置间插）：SMC_s（s=0..3）持列 s = `[X[0,s]..X[3,s]]`（其 UR 行）。

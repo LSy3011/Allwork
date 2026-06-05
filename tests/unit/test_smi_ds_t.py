@@ -144,6 +144,28 @@ class TestSmiDsTClusterApply(unittest.TestCase):
         self.assertNotAlmostEqual(row0[K - 1], X[0][K - 1], places=4)  # 列 3 缺 → 错
         self.assertAlmostEqual(row0[K - 1], 0.0, places=4)             # 缺的列 = 0
 
+    def test_k8_multiword_gather_transpose_scatter(self):
+        """Stage-A'：K=8 全 gather（8 SMC × lanes=1）→ 转置 1×8 → 写回 SMC_0 bank0 2 词。
+        验证 apply_smi_ds_t 多词行（K=8 > word_lanes=4）正确拆词。"""
+        from smc_simulator.system.cluster import SystemCluster
+        from smc_simulator.units.smi_ds_t_unit import word_from_fp32_lanes, fp32_lanes_from_word
+
+        K = 8
+        a = [float(s + 1) * 1.5 for s in range(K)]   # 8 元素激活向量
+        fake = self._fake_cluster(num_kernels=8)
+        # 列对齐：SMC_s bank4 持 a[s]（lanes=1，词 = [a[s],0,0,0]）
+        for s in range(K):
+            fake.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes([a[s]])
+        cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+               "gather_smc_cnt": K, "lanes": 1, "word_lanes": 4}
+        SystemCluster.apply_smi_ds_t(fake, cfg)
+        # SMC_0 bank0 addr0 = a[0:4]，addr1 = a[4:8]（行对齐 8 元素拆 2 词）
+        w0 = fp32_lanes_from_word(fake.kernels[0].ur_bank.storage[0][0], 4)
+        w1 = fp32_lanes_from_word(fake.kernels[0].ur_bank.storage[0][1], 4)
+        for k in range(4):
+            self.assertAlmostEqual(w0[k], a[k], places=4)
+            self.assertAlmostEqual(w1[k], a[4 + k], places=4)
+
     def test_word_pack_roundtrip(self):
         """pack/unpack fp32 lane 往返一致（与 emitter/_read_sim_output 约定一致）。"""
         from smc_simulator.units.smi_ds_t_unit import word_from_fp32_lanes, fp32_lanes_from_word

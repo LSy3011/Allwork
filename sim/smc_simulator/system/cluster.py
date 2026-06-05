@@ -146,6 +146,7 @@ class SystemCluster:
         lanes = int(cfg["lanes"])
         src_bank, src_addr = int(cfg["src_bank"]), int(cfg["src_addr"])
         dst_bank, dst_addr = int(cfg["dst_bank"]), int(cfg["dst_addr"])
+        word_lanes = int(cfg.get("word_lanes", 4))   # 每 128-bit 词的 fp32 数（fp32=4）
         if gather_cnt > len(self.kernels):
             raise ValueError(f"SMI_DS_T gather_smc_cnt={gather_cnt} > num_kernels={len(self.kernels)}")
 
@@ -156,12 +157,17 @@ class SystemCluster:
             unit.gather(s, fp32_lanes_from_word(word, lanes))
         # transpose：gather 全到齐才出（未到齐抛错 = gather-before-scatter 硬约束）
         rows = unit.transpose()        # rows[m] = 行对齐激活 X[m,:]（gather_cnt 个元素）
-        # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP scatter 的 model-A 数值等价）
+        # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP scatter 的 model-A 数值等价）。
+        # 行宽 gather_cnt 可 > word_lanes（如 K=8 = 2 词）→ 每行拆 ceil(K/word_lanes) 个连续词。
+        nword = (gather_cnt + word_lanes - 1) // word_lanes
         for m in range(lanes):
-            self.kernels[0].ur_bank.storage[dst_bank][dst_addr + m] = word_from_fp32_lanes(rows[m])
+            for w in range(nword):
+                chunk = rows[m][w * word_lanes:(w + 1) * word_lanes]
+                self.kernels[0].ur_bank.storage[dst_bank][dst_addr + m * nword + w] = \
+                    word_from_fp32_lanes(chunk)
         self.logger.info(
             f"[SMI_DS_T] gather {gather_cnt} SMC × {lanes} lanes → transpose → "
-            f"scatter {lanes} rows to SMC_0 bank{dst_bank}@{dst_addr}")
+            f"scatter {lanes} rows × {nword} words to SMC_0 bank{dst_bank}@{dst_addr}")
 
     def step(self):
         # 1. ADR-019 D5: 跨 SMC chain 注入（上游 chain output → 本 kernel chain_inputs）

@@ -321,6 +321,84 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
             # 不注入 bank0：apply_smi_ds_t 在 run 前把行对齐激活写回 SMC_0 bank0
 
 
+class ManualMatmulQDsTK8Operator(ManualMatmulParallelNOperator):
+    """ADR-033 Stage-A'：SMI_DS_T **K=SMC_NUM=8 全 gather + cumulative addtree**（完全对齐文档 tile 维度）。
+
+    M=1、K=8：激活向量 8 元素 **列对齐存全 8 个 SMC**（每 SMC 持 1 元素 a[s]）→ `cluster.apply_smi_ds_t`
+    gather 8×1 → SMI_DS_T 转置 1×8 → 恢复 8 元素行对齐向量写回 SMC_0 bank0（2 词）→ 复用 ParallelN
+    cumulative compute（K=8 = 2 词，FP32ADDTREE5TO1 跨词 accumulate 累加，loop_carried II≥4）→
+    每 SMC 输出 dot(a, W[:,s])。
+
+    比 Stage-A（matmul_q_dst，K=4 gather 4 SMC、单 addtree 词无 cumulative）更忠实：**gather 全 8 SMC +
+    cumulative reduce**，对齐文档 [seq1037-1039] 输入 SMC_NUM×UR_BYTE → 输出 UR_BYTE×SMC_NUM（此处用 1 lane）。
+    忠实度边界同 Stage-A（model-A 不验时序，升 Accepted 待 VCS）。详见 ADR-033 Stage-A'。"""
+
+    K = 8
+    SRC_BANK = 4
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        # 固定 K=8（忽略 harness 传入 n_rows），与 get_dfg 的 inner_loops 一致
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.K).astype(np.float32)               # 8 元素激活向量
+        b = rng.uniform(1.0, 5.0, (smc_num, self.K)).astype(np.float32)    # 每 SMC 权重列 8 元素
+        return {"a": a, "b": b}
+
+    def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
+        # gather 全 K=8 个 SMC（每 SMC lanes=1 元素）→ 转置 1×8 → 写回 SMC_0 bank0（2 词）
+        return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+                "gather_smc_cnt": self.K, "lanes": 1, "word_lanes": 4}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]
+        b = input_data["b"]
+        b_addr = self.get_bank_addr("b", spec)
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        src_logical = self.SRC_BANK * bank_depth
+        for k, prog in enumerate(programs):
+            prog.inject_vector(b_addr, b[k], stride=1)                      # 权重列（8 元素 = 2 词）
+            if k < self.K:
+                prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float32), stride=1)  # SMC_k 持 a[k]
+            # 不注入 bank0：apply_smi_ds_t 写恢复的 8 元素向量（2 词）
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        # 复用 ParallelN cumulative 点积链，但 K=8（inner_loops = K//4-1 = 1，2 词跨词累加）
+        b = MIROpBuilder()
+        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                       meta_name="a", logical_addr=0 * 256 + 0, stride=1, role="input", iq_id=30)
+        br = b.make_op("UR_READ", "b_read", RT.UR_READ, [],
+                       meta_name="b", logical_addr=1 * 256 + 0, stride=1, role="input", iq_id=31)
+        rt_a = b.make_op("RTOVR", "rt_a_FPMUL_S0", PS.FPMUL_S0, [ar])
+        rt_b = b.make_op("RTOVR", "rt_b_FPMUL_S1", PS.FPMUL_S1, [br])
+        mul = b.make_op("FPMUL", "inl_mul", RT.FPMUL, [rt_a, rt_b], iq_id=3)
+        rt_sum = b.make_op("RTOVR", "rt_mul_FP32ADDTREE5TO1_S0", PS.FP32ADDTREE5TO1_S0, [mul])
+        y_sum = b.make_op("FP32ADDTREE5TO1", "y_0", RT.FP32ADDTREE5TO1, [rt_sum],
+                          cumulative=True, reduction_per_channel=4, iq_id=26,
+                          loop_carried_depends_on={"y_0": 4})
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=0, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        inner_loops = self.K // 4 - 1   # K=8 → 1（2 词累加）
+        for op in ops:
+            op.metadata.update({"shape": [self.K], "inner_loops": inner_loops, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+        ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
+        return ops
+
+
 class ManualMatmulQ2Operator(BaseOperator):
     """ADR-026 Stage-2a：Matmul_Q cols_per_smc=4（密集 4/词打包，解 DEBT-026-PACK）。
 
