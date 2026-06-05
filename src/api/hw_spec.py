@@ -41,6 +41,9 @@ class ModuleSpec(BaseModel):
     code_fields: List[ModuleField] = []
     # ADR-032 D2：多微指令单元（如 FP16MUL）的命名组；None=单微指令（现存全部）。
     micro_groups: Optional[Dict[str, MicroGroup]] = None
+    # ADR-033 D2：纯文档性 spec 条目（如 SMI_DS_T），sim 端 model-A 数据变换、不进 SMT 调度、
+    # 不配 IQ/RTOVR sel。emitter/solver 据此不把它当可调度单元（避免「声明却无调度引用」死 module）。
+    simulation_only: bool = False
 
 class IQConfig(BaseModel):
     module: str

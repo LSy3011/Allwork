@@ -14,7 +14,27 @@ Stage-A 取 model-A：**只建模转置数值功能 + gather 完成序约束**�
 interleave（intlv_*）4 并发时序 / CRI 字段位宽 / INST_DONE 握手 = DEBT-033-DST-CTRL / -FIELDS /
 NEEDS-USER-FACT-033-DSTDONE，本轮 defer。
 """
+import struct
 from typing import List, Optional, Sequence
+
+
+def fp32_lanes_from_word(word: int, lanes: int) -> List[float]:
+    """128-bit UR 词 → lanes 个 fp32（lane l 在 bit [l*32:l*32+32]，标准 IEEE754 位模式）。
+    与 emitter `_handle_program_data` 打包 + `_read_sim_output` 解包约定一致。"""
+    out = []
+    for l in range(lanes):
+        bits = (word >> (l * 32)) & 0xFFFFFFFF
+        out.append(struct.unpack("<f", struct.pack("<I", bits))[0])
+    return out
+
+
+def word_from_fp32_lanes(vals: Sequence[float]) -> int:
+    """lanes 个 fp32 → 128-bit UR 词（lane l 在 bit [l*32]）。"""
+    w = 0
+    for l, v in enumerate(vals):
+        bits = struct.unpack("<I", struct.pack("<f", float(v)))[0]
+        w |= (bits & 0xFFFFFFFF) << (l * 32)
+    return w
 
 
 class SmiDsTUnit:

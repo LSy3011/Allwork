@@ -263,6 +263,12 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
     trace_file = case_path / "sim_trace.log"
     trace_file.touch()
 
+    # ADR-033 Stage-A：SMI_DS_T 跨-SMC 转置 datapath（model-A 原子段，run 前一次性执行）。
+    # 列对齐激活已 poison_memory 到各 SMC bank；gather→transpose→scatter 恢复行对齐到 SMC_0。
+    smi_ds_t_cfg = config.get("smi_ds_t")
+    if smi_ds_t_cfg:
+        cluster.apply_smi_ds_t(smi_ds_t_cfg)
+
     try:
         max_cycles = config.get("max_cycles", 1000)
         cluster.run(cycles=max_cycles)

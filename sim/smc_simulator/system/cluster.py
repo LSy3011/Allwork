@@ -126,6 +126,43 @@ class SystemCluster:
                 su.dr_d = bcast_val
                 su.cru_o = bcast_val
 
+    def apply_smi_ds_t(self, cfg: dict):
+        """ADR-033 Stage-A：SMI_DS_T 跨-SMC 转置 datapath（model-A 整链原子段，hco B-BLOCK-1 裁定）。
+
+        在 cluster.run 之前一次性执行 `UR read — SHIFTDN gather — SMI_DS_T transpose —
+        SHIFTUP scatter — UR write` 的数值功能：
+          - **gather**：从 cfg['gather_smc_cnt'] 个 SMC 各读 src_bank/src_addr 的列对齐激活（非转置间插存）；
+          - **transpose**：SmiDsTUnit 把 gather_smc_cnt×lanes 的 Tile 转置为 lanes×gather_smc_cnt（行对齐）；
+          - **scatter/write**：把恢复的行对齐激活写回 SMC_0 的 dst_bank/dst_addr（供后续 SHIFTUP 广播读）。
+
+        忠实度边界（model-A，hco caveat）：本方法**不建模** SHIFTDN/SHIFTUP/转置的逐拍时序与
+        COND 就绪同步（DEBT-033-DST-CTRL / NEEDS-USER-FACT-033-DSTDONE）；只保证终值数值正确 +
+        gather-before-scatter 序约束（SmiDsTUnit.transpose() gather 未到齐即抛错）。
+        """
+        from smc_simulator.units.smi_ds_t_unit import (
+            SmiDsTUnit, fp32_lanes_from_word, word_from_fp32_lanes,
+        )
+        gather_cnt = int(cfg["gather_smc_cnt"])
+        lanes = int(cfg["lanes"])
+        src_bank, src_addr = int(cfg["src_bank"]), int(cfg["src_addr"])
+        dst_bank, dst_addr = int(cfg["dst_bank"]), int(cfg["dst_addr"])
+        if gather_cnt > len(self.kernels):
+            raise ValueError(f"SMI_DS_T gather_smc_cnt={gather_cnt} > num_kernels={len(self.kernels)}")
+
+        unit = SmiDsTUnit(smc_num=gather_cnt, lanes=lanes)
+        # gather：逐 SMC 读列对齐激活（SHIFTDN gather 的 model-A 数值等价）
+        for s in range(gather_cnt):
+            word = self.kernels[s].ur_bank.storage[src_bank][src_addr]
+            unit.gather(s, fp32_lanes_from_word(word, lanes))
+        # transpose：gather 全到齐才出（未到齐抛错 = gather-before-scatter 硬约束）
+        rows = unit.transpose()        # rows[m] = 行对齐激活 X[m,:]（gather_cnt 个元素）
+        # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP scatter 的 model-A 数值等价）
+        for m in range(lanes):
+            self.kernels[0].ur_bank.storage[dst_bank][dst_addr + m] = word_from_fp32_lanes(rows[m])
+        self.logger.info(
+            f"[SMI_DS_T] gather {gather_cnt} SMC × {lanes} lanes → transpose → "
+            f"scatter {lanes} rows to SMC_0 bank{dst_bank}@{dst_addr}")
+
     def step(self):
         # 1. ADR-019 D5: 跨 SMC chain 注入（上游 chain output → 本 kernel chain_inputs）
         self._propagate_chain_inputs()

@@ -113,7 +113,14 @@ class PipelineRunner:
             lir_stream=ops if is_multi_smc else None,
         )
         self._patch_max_cycles(output_dir, safe_max_cycles)
-        
+
+        # ADR-033 Stage-A：算子提供 SMI_DS_T 跨-SMC 转置 config → patch 进 sim_config.json
+        # （照搬 _patch_max_cycles 的 post-emit patch 模式，零 emitter 签名改动）。
+        if is_multi_smc and hasattr(operator, "smi_ds_t_config"):
+            cfg = operator.smi_ds_t_config(spec=self.spec)
+            if cfg:
+                self._patch_sim_config(output_dir, {"smi_ds_t": cfg})
+
         # 🛸 [V5.4 FIX] 保存物理指令供审计员使用
         with open(os.path.join(output_dir, "physical_instructions.json"), "w") as f:
             json.dump([instr.to_dict() for instr in physical_instrs], f, indent=2)
@@ -197,6 +204,19 @@ class PipelineRunner:
         with open(conf_path, "r") as f:
             data = json.load(f)
         data["max_cycles"] = max_cycles
+        with open(conf_path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _patch_sim_config(self, output_dir: str, extra: dict):
+        """把额外键值 patch 进 sim_config.json（同 _patch_max_cycles 的 post-emit 模式）。"""
+        conf_path = os.path.join(output_dir, "..", "sim_config.json")
+        if not os.path.exists(conf_path):
+            conf_path = os.path.join(output_dir, "sim_config.json")
+            if not os.path.exists(conf_path):
+                return
+        with open(conf_path, "r") as f:
+            data = json.load(f)
+        data.update(extra)
         with open(conf_path, "w") as f:
             json.dump(data, f, indent=2)
 

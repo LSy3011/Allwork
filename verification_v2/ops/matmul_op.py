@@ -285,6 +285,42 @@ class ManualMatmulQOperator(BaseOperator):
         return ops
 
 
+class ManualMatmulQDsTOperator(ManualMatmulQOperator):
+    """ADR-033 Stage-A：Matmul_Q 经 SMI_DS_T 跨-SMC 转置 datapath（替掉 matmul_q 的 data-prep 假转置）。
+
+    激活 X[M,K] **列对齐存**（非转置间插）：SMC_s（s<K）bank{SRC_BANK} 持列 s = [X[0,s]..X[M-1,s]]。
+    sim run 前 `cluster.apply_smi_ds_t`：gather K 个 SMC 的列 → SMI_DS_T 转置 → 行对齐 X[m,:] 写回
+    SMC_0 bank0 → 后续 SHIFTUP 广播 + 每 SMC dot(X[m,:],W[:,s])。**compute 与 matmul_q 完全一致**
+    （继承 get_dfg/get_golden/prepare_input，K=4 单 addtree 词、无 cumulative），唯一新增 = 跨-SMC 转置前端。
+
+    缩放选择：gather 跨 K 个 SMC（=4），广播到全 8 SMC；更忠实的 K=SMC_NUM=8 实例需 cumulative
+    addtree 2 词，留 Stage-A'。忠实度边界（model-A，hco caveat）：不验跨-SMC gather→transpose→scatter
+    时序（DEBT-033-DST-CTRL / NEEDS-USER-FACT-033-DSTDONE）。详见 ADR-033 D5 / 分歧台账 D-01。"""
+
+    SRC_BANK = 4   # 列对齐激活存放 bank（非转置间插）；bank0/1/5 已被 a/b/y 占
+
+    def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
+        # gather K 个 SMC（每 SMC 持一列、lanes=M 个元素）→ 转置 M×K → 行对齐写回 SMC_0 bank0
+        return {"src_bank": self.SRC_BANK, "src_addr": 0,
+                "dst_bank": 0, "dst_addr": 0,
+                "gather_smc_cnt": self.K, "lanes": self.M}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]
+        b = input_data["b"]
+        X = a.reshape(self.M, self.K).astype(np.float32)        # [M, K]
+        b_addr = self.get_bank_addr("b", spec)
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        src_logical = self.SRC_BANK * bank_depth
+        for k, prog in enumerate(programs):
+            prog.inject_vector(b_addr, b[k], stride=1)           # 权重列（同 matmul_q）
+            if k < self.K:
+                col = X[:, k].copy()                              # 列 k = [X[0,k]..X[M-1,k]]
+                prog.inject_vector(src_logical, col, stride=1)    # SMC_k bank{SRC_BANK} 持列 k（非转置间插）
+            # 不注入 bank0：apply_smi_ds_t 在 run 前把行对齐激活写回 SMC_0 bank0
+
+
 class ManualMatmulQ2Operator(BaseOperator):
     """ADR-026 Stage-2a：Matmul_Q cols_per_smc=4（密集 4/词打包，解 DEBT-026-PACK）。
 

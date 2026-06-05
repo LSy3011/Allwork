@@ -141,7 +141,20 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
 - 7 可证伪单测（`tests/unit/test_smi_ds_t.py`）全过：门 1（transpose_numeric + no-op 对偶）/ 门 4
   （param_smc_num_scalable）/ 门 5 unit 级（ordering）/ 门 2 unit 级（is_cross_smc）。全量 pytest 114 pass。
 
-### Increment 2/3 设计（待实施，可冷启续上）
+### Increment 2/3 ✅ DONE（2026-06-05，hco APPROVE-with-notes agentId `aaa75e0f3ed01d9cc`）
+- `cluster.apply_smi_ds_t(cfg)`（**实际方法名**，非设计稿的 `_smi_ds_t_transpose`）：run 前一次性 model-A 原子段——
+  从 gather_smc_cnt 个 SMC 读列对齐激活 → `SmiDsTUnit` 转置 → 行对齐写回 SMC_0 bank0。
+- config 经 `operator.smi_ds_t_config → pipeline_runner._patch_sim_config → sim_config.json →
+  physical_runner._run_multi_smc → cluster.apply_smi_ds_t`（零 emitter 签名改动，照搬 `_patch_max_cycles`）。
+- `ManualMatmulQDsTOperator`（matmul_q_dst）：激活列对齐存 bank4，复用 matmul_q compute；`--op matmul_q_dst --mode e2e`
+  **8/8 bit-perfect + Truth Audit SUCCESS**。**反证**：移除 sim_config 的 smi_ds_t → 0/8 全零（铁证转置通路在工作）。
+- `modules.yaml` SMI_DS_T 条目（`simulation_only: true`，表598 字段）+ `hw_spec.py` `ModuleSpec.simulation_only: bool=False`；
+  死 module 检查通过（matmul_q 原有仍 8/8 + 全量 pytest 116 pass）。hco 逐个核 4 个 `spec.modules` 消费者 + `resolve_iq_type`
+  确认无误调度。门 2/3/5 cluster 级测试 + schema 守门测试落地。
+- hco notes（已收口）：端序统一 `<`（与现存单元一致，位模式同）/ 本段方法名订正 / schema 守门测试已补 /
+  忠实度 caveat 坚持（8/8 是终值 parity，不验跨-SMC gather→transpose→scatter 时序，对忠实性增信近零，升 Accepted 待 VCS）。
+
+### Increment 2/3 设计（已实施，下方留档原设计）
 **缩放实例（最低 compute 风险，复用 matmul_q 已验通路）**：M=4、**K=4**、gather 跨 SMC_0..K-1（=4 个 SMC）、
 广播到全 8 SMC。激活 X[4,4] **列对齐存**（非转置间插）：SMC_s（s=0..3）持列 s = `[X[0,s]..X[3,s]]`（其 UR 行）。
 SMI_DS_T gather 4×4 → 转置 4×4 → 恢复行 X[m,:]（K=4 一词）→ SHIFTUP 广播 → 各 SMC `dot(X[m,:],W[:,s])`。
