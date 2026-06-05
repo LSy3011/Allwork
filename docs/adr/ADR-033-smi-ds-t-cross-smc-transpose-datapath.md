@@ -154,6 +154,30 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
 - hco notes（已收口）：端序统一 `<`（与现存单元一致，位模式同）/ 本段方法名订正 / schema 守门测试已补 /
   忠实度 caveat 坚持（8/8 是终值 parity，不验跨-SMC gather→transpose→scatter 时序，对忠实性增信近零，升 Accepted 待 VCS）。
 
+### Stage-A''（M>1 + K=8 多行）—— 调查：撞 ADR-026 B2/Stage-2b deferred 墙（2026-06-05）
+> **结论：非 Stage-A' 的快速扩展，是 ADR-026 显式 deferred 的多左行难题。两条 K=8 直路都被堵。**
+
+转置前端（apply_smi_ds_t）对 M>1/K=8 **已就绪**（gather 8×M → 转置 M×8，已支持多词行）；卡点在 **compute**：
+- **路 1 = cumulative 5to1（Stage-A' 串行 2 词）**：K 归约可行，但 **M 行需行间 reset**。`fp32_add_tree_unit`
+  的 `accumulate` 是**单指令字段**（payload_factory:99-104，`1 if cumulative else 0`），**无法逐迭代在
+  [reset, accum] 间交替**；且**全仓无算子用 `outer_loops>0`**（嵌套循环 + 每外层 reset 是未建模机制）。
+  单 cumulative op 跑 M×2 迭代会把所有行累加成一个值 → 错。
+- **路 2 = ADDTREE8TO1 一拍 8→1（fp16 matmul 模板）**：无 reset 问题，但需 **2 个激活词同拍**喂 S0/S1
+  → 单 SMC 同拍 2 个广播激活 = **multi-broadcast**，撞 `configurable.py:140-143` sim 缺口 + ADR-026/027
+  广播-到-多源 BLOCK。
+- **根因（ADR-026 B2 锁定）**：**多左行 = 时间串行、单广播源**；多行并行需多广播，与单广播源直接冲突。
+
+**路径前进（ADR-026 Stage-2b 钦定，任选其一，均非小工程）**：
+1. **UR 部分和**：每行 dot 的部分和写回 UR，跨行/跨 tile 用独立地址累加（绕开 addtree 单累加器 + 单广播）。
+2. **8 addtree 通道映射多行**：M 行映射 addtree 的 8 个 per-lane 独立累加通道（需「列广播 + per-lane 累加」
+   的 outer-product 形式，而非 dot-reduce；当前无 per-lane 累加单元，addtree 必 reduce）。
+3. **时间串行 M 行 + 每行独立 addtree op**：M 个独立 cumulative chain，靠调度让行 m 广播窗口对齐 chain m
+   （脆弱，依赖 SMT 时序，未验）。
+
+**建议**：Stage-A'' 需专注一段做（首选 UR 部分和），非本会话快速增量。Stage-A/A' 已充分证明 SMI_DS_T
+转置 datapath（K=4 多行 + K=8 cumulative 单行均 8/8）；多行×大 K 的 compute 是正交的已知难题（继承自
+ADR-026），不阻塞 SMI_DS_T 本身的忠实性结论。
+
 ### Stage-A' ✅ DONE（2026-06-05，K=SMC_NUM=8 全 gather + cumulative）
 - `ManualMatmulQDsTK8Operator`（matmul_q_dst_k8）：M=1、**K=8**——激活 8 元素向量**列对齐存全 8 个 SMC**
   （每 SMC 1 元素 a[s]）→ `apply_smi_ds_t` gather 8×1 → 转置 1×8 → 恢复 8 元素行写回 SMC_0 bank0（**2 词**）→
