@@ -133,6 +133,41 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
    `smc_id_en=N-1`（`[seq559/566]` 全 SMC 收同一行；与 N-1 缺省一致，无冲突，台账 D-04）。
 3. 与 ADR-026 Stage-2b/2c（M>4 多行 / 大 K 多 tile）的次序：SMI_DS_T 先行还是并行？（纯工程排期，交 user/主 agent。）
 
+## 实施进展（Stage-A）
+
+### Increment 1 ✅ DONE（2026-06-05，commit `de0ace5`）
+- `SmiDsTUnit`（`sim/smc_simulator/units/smi_ds_t_unit.py`）：SMI 中心跨-SMC 转置核，忠实表596-598。
+  接口 `reset/gather(smc_id,row)/is_ready/transpose()/transpose_tile(纯)`；`transpose()` gather 未到齐抛错。
+- 7 可证伪单测（`tests/unit/test_smi_ds_t.py`）全过：门 1（transpose_numeric + no-op 对偶）/ 门 4
+  （param_smc_num_scalable）/ 门 5 unit 级（ordering）/ 门 2 unit 级（is_cross_smc）。全量 pytest 114 pass。
+
+### Increment 2/3 设计（待实施，可冷启续上）
+**缩放实例（最低 compute 风险，复用 matmul_q 已验通路）**：M=4、**K=4**、gather 跨 SMC_0..K-1（=4 个 SMC）、
+广播到全 8 SMC。激活 X[4,4] **列对齐存**（非转置间插）：SMC_s（s=0..3）持列 s = `[X[0,s]..X[3,s]]`（其 UR 行）。
+SMI_DS_T gather 4×4 → 转置 4×4 → 恢复行 X[m,:]（K=4 一词）→ SHIFTUP 广播 → 各 SMC `dot(X[m,:],W[:,s])`。
+**compute 与 matmul_q 完全一致（K=4 单 addtree 词、无 cumulative）**，唯一新增 = 跨-SMC 转置前端。
+（注：Stage-A gather 跨 K=4 个 SMC 而非全 8，是缩放选择；SmiDsTUnit 已对任意 smc_num 测过。更忠实的
+K=SMC_NUM=8 实例需 cumulative addtree 2 词，留 Stage-A'。）
+
+**运行时集成（cluster 真跨-SMC gather，非 inject-time 假转置）**：
+1. `cluster._smi_ds_t_transpose(cfg)`：run() 起始一次性 model-A 原子段——从各 SMC UR bank 读列对齐激活
+   （gather）→ `SmiDsTUnit.transpose` → 写行对齐激活回 SMC_0 激活 bank（供 ur-r0 广播读）。之后 sim 与 matmul_q 同。
+2. **config 经 sim_config.json 串入**：emitter 写 `smi_ds_t` 块（src bank/addr、dst bank/addr、gather_smc_cnt、lanes）；
+   `physical_runner._run_multi_smc` 读后在 `cluster.run` 前调 `_smi_ds_t_transpose`。需 BaseOperator → emitter 的
+   sim_config-extra 通道（查 emitter `_emit_multi_smc` 是否已有算子自定义 sim_config hook，无则加最小 hook）。
+3. `matmul_q_dst` 算子（`matmul_op.py`，subclass ManualMatmulQOperator）：`inject_data_per_smc` 列对齐存激活；
+   提供 `smi_ds_t` config；复用 matmul_q 的 get_dfg/get_golden/compute。注册 `main_verify.py` OPERATOR_MAP。
+4. `modules.yaml` 新 `SMI_DS_T` 条目（`simulation_only: true`，表598 字段 vld/intlv_*；CRI 宽度 NEEDS-USER-FACT-033-CRI）；
+   **须加 `ModuleSpec.simulation_only: bool = False`（hw_spec.py schema 变更 → 重过 hco）**；
+   加后必跑 matmul_q e2e + 全量 pytest 确认 emitter/solver 不把 SMI_DS_T 当可调度单元（死 module 验证）。
+
+**剩余 D6 门**：门 3 `test_matmul_via_smi_ds_t_datapath`（matmul_q_dst e2e 8/8 bit-perfect）；
+门 2/5 的 cluster 级（gather 真从多 SMC bank 读 + scatter 前 gather 全到齐）。
+
+**触点文件**：`sim/smc_simulator/system/cluster.py` / `sim/smc_simulator/tools/physical_runner.py` /
+`src/driver/emitter.py` / `verification_v2/ops/matmul_op.py` / `verification_v2/main_verify.py` / `hw_config/modules.yaml` / `src/api/hw_spec.py`。
+**routing**：modules.yaml 新条目 + hw_spec.py schema → 重过 hco 后再 commit。
+
 ## HCO 复核（agentId `a54596b1c3aec48eb`）
 **APPROVE-with-notes**。引擎判定（DS↔SMI_DS_T 两模块、matmul 用 SMI_DS_T）逐字钉死、supersede 范围（仅 DS/Stage-3，
 compute 机制保留）划得精准、代码现状声明属实（无返工）、SMI_DS_SG/SMI_DS_RD（V1.0 不支持）正确未引、D2 接口/参数/
