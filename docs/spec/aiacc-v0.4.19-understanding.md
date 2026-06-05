@@ -172,6 +172,7 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
 - **分歧性质**：🔴 设计选错引擎。成因＝ADR-026（06-01）时 user 只给了表585-588，SMI_DS_T（表596-598）在更完整的
   v0.4.19 才齐。好消息：无错误代码要拆（DS 从没实现）。
 - **建议**：写 ADR-033，supersede ADR-026 的 DS/Stage-3 部分，spec SMI_DS_T 五段 datapath；走 hco。
+  → ✅ **已落地**：[ADR-033](../adr/ADR-033-smi-ds-t-cross-smc-transpose-datapath.md)（hco APPROVE-with-notes，2026-06-05）。
 
 ### D-02 ⚪ PARAM_SMC_NUM：文档 32 / sim 缩放 8
 - **文档**：`PARAM_SMC_NUM=32`（真实流片）`[表53/51]`；SMI_DS_T 转置 Tile 尺寸、间插因子均以 SMC_NUM 参数化。
@@ -259,7 +260,9 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
 
 ## 后续动作清单（出自台账）
 
-1. **ADR-033**（D-01）：spec SMI_DS_T 五段 datapath，supersede ADR-026 DS/Stage-3，走 hco。← 本次任务直接后继。
+1. ~~**ADR-033**（D-01）：spec SMI_DS_T 五段 datapath，supersede ADR-026 DS/Stage-3，走 hco。~~ ✅ **已写 + hco
+   APPROVE-with-notes**（2026-06-05，[ADR-033](../adr/ADR-033-smi-ds-t-cross-smc-transpose-datapath.md)）。2 BLOCK 已收口
+   （SMT 边界裁定 / 完成握手升 NEEDS-USER-FACT-033-DSTDONE）。下一步 = Stage-A 实施（sim 中心转置核 + matmul_q 改走五段链）。
 2. ~~核对 D-04 SHIFTUP/SHIFTDN smc_id_en~~ ✅ 已核（2026-06-05，payload_factory:111 显式赋值不走 N-1，无误伤）。
 3. 核对 D-05 ADR-032 FP16MUL 广播/本地角色；D-09 8TO1 无累加对 multi-tile 的影响（读 ADR-032 实现）。
 4. 补 modules.yaml：D-12 STB smc_id_en + 命名错配；D-10 LOGIC inst_typ=4bit；spec_doc_align 加别名表。
