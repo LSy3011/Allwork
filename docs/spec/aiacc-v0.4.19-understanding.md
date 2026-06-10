@@ -127,6 +127,13 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
   3. 输出「送到用于 **SHIFTUP** 对应的 SMI_IQ（该 SMI_IQ 具 EXTRA_DATA）」`[seq1050]`。
 - **逐字总纲** `[seq1051]`：**「通过 UR read —— SHIFTDN —— SMI_DS_T —— SHIFTUP —— UR write 形成了数据整理的完整 datapath。」**
 - V1.0 仅「从 SMC 读、写到 SMC」；SMC↔DRAM 三种组合待 LSU 完善。
+- **SMI_DS_T 是一等指令驱动硬件单元**（2026-06-10 user 订正，台账 D-13）：和 UR/FPMUL 一样有指令输入
+  （`CRI`，表596）+ 微指令格式（表598）+ 输出寄存器 + 完成信号（`INST_DONE`）。位于「SMI 微架构和微指令」，
+  是 SMI_IQ 的同级单元。**微指令瘦**（仅 vld+intlv_*，无 smc_id_en/addr/dim）因转置维度由设计参数固定、
+  寻址由周边 UR_READ/SHIFTDN/SHIFTUP 指令外置 —— 它只转置 `CRD_SHIFTDN` 进来的 tile。**完整 datapath =
+  5 条协同指令的流水**，SMI_DS_T 是其中一个指令节点。⚠ [ADR-033](../adr/ADR-033-smi-ds-t-cross-smc-transpose-datapath.md)
+  Stage-A 把它建成 `simulation_only`（sim_config 驱动、绕开指令流）是 model-A 捷径；升为真指令驱动单元
+  见 [ADR-034](../adr/ADR-034-smi-ds-t-instruction-driven-unit.md)（milestone a）。
 
 ### A5. Tensor 存储模型
 
@@ -256,6 +263,18 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
 - **我们现状**：ADR-031 正是「除 RTOVR 外全单元统一 smc_id_en」。
 - **性质**：🟢 已对齐（文档强背书 ADR-031 方向）。但注意 D-04 的 SHIFTUP/SHIFTDN 语义差例外。
 
+### D-13 🔴 SMI_DS_T 应是指令驱动单元，非 simulation_only（2026-06-10 user 订正）
+- **文档**：SMI_DS_T 是一等指令驱动硬件单元（A4 补注）——`CRI` 指令输入（表596）+ 微指令格式（表598:
+  vld/intlv_*）+ `DATA_OUT`/`INST_DONE` 输出寄存器，和 UR/FPMUL 同构（各有 `CRU_*` 指令 + 微指令 + 输出）。
+  位于「SMI 微架构和微指令」，应由 SMI_IQ 指令流驱动，是 5 条协同指令 datapath 里的一个指令节点。
+- **我们现状**：[ADR-033](../adr/ADR-033-smi-ds-t-cross-smc-transpose-datapath.md) Stage-A 把它建成
+  `modules.yaml simulation_only: true` + `sim_config` 驱动 `cluster.apply_smi_ds_t`（run 前原子段，**绕开指令流**）——
+  model-A 捷径，不进 DFG/SMT/IQ，无 CRI 解码、无 INST_DONE 握手。
+- **性质**：🔴 忠实度缺口（model-A 终值 parity 对指令驱动/时序忠实性增信近零）。正是 ADR-033 标的 milestone (a)。
+- **建议**：写 [ADR-034](../adr/ADR-034-smi-ds-t-instruction-driven-unit.md) 升为指令驱动单元（去 simulation_only +
+  加 IQ_SMI_DS_T + DFG 节点 + sim 单元解码 CRI + SMT 依赖），走 hco。gated on NEEDS-USER-FACT-033-CRI/-DSTDONE
+  + IQ 驱动方式（3 个 RTL 缺口）。
+
 ---
 
 ## 后续动作清单（出自台账）
@@ -267,6 +286,8 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
 3. 核对 D-05 ADR-032 FP16MUL 广播/本地角色；D-09 8TO1 无累加对 multi-tile 的影响（读 ADR-032 实现）。
 4. 补 modules.yaml：D-12 STB smc_id_en + 命名错配；D-10 LOGIC inst_typ=4bit；spec_doc_align 加别名表。
 5. backlog：D-06 广播右矩阵、D-07 COND 时序忠实、D-08 PR 单元 + RtoVR 字段建模深度。
+6. **ADR-034**（D-13）：SMI_DS_T 升指令驱动单元（去 simulation_only + IQ + DFG + CRI 解码 + SMT 依赖），走 hco。
+   gated on 3 个 RTL 缺口（CRI 宽度 / IQ 驱动方式 / INST_DONE 回收）。← milestone (a)，2026-06-10 起草。
 
 > 升 Accepted 唯一路径＝VCS/RTL。本文所有「文档证据」忠实于 v0.4.19，但 v0.4.19 本身多处标「疑笔误/待完善」
 > （如 `UR_Mat_Tran_Inte` 命名冲突、表711 标题、转置间「差/插」混用），引用时以 [seq] 原文为准。
