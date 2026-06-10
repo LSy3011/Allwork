@@ -330,11 +330,15 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
         cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
                "gather_smc_cnt": K, "lanes": M}
 
+        SENTINEL = 0xDEADBEEFCAFEBABE   # 非零哨兵：apply 若被调会覆写之 → VLD=0 断言非平凡
         for vld, expect_fired in [(1, True), (0, False)]:
             fc = self._fake_cluster(spec)
             for s in range(K):
                 col = [X[m][s] for m in range(M)]
                 fc.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes(col)
+            # dst bank0 预置哨兵（非 0），使 VLD=0「未触发」可被「哨兵未被覆写」非平凡证伪
+            for m in range(M):
+                fc.kernels[0].ur_bank.storage[0][m] = SENTINEL
             hexpath = self._write_hex(spec, vld)
             SystemCluster.setup_smi_ds_t_trigger(fc, hexpath, cfg)
             for c in range(6):
@@ -343,14 +347,15 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
             self.assertEqual(fc.smi_ds_t_fired, expect_fired,
                              f"VLD={vld} 触发状态应={expect_fired}")
             if expect_fired:
+                # apply 被调 → 哨兵被覆写为转置后的行对齐数据
                 row0 = fp32_lanes_from_word(fc.kernels[0].ur_bank.storage[0][0], K)
                 for k in range(K):
                     self.assertAlmostEqual(row0[k], X[0][k], places=4,
                                            msg=f"VLD=1 转置后行对齐错 @lane{k}")
             else:
-                # vld=0：apply 未被调用 → bank0 仍为 0（未转置）
-                self.assertEqual(fc.kernels[0].ur_bank.storage[0][0], 0,
-                                 "VLD=0 不应触发转置（bank0 应保持 0）")
+                # vld=0：apply 未被调用 → 哨兵原样保留（非平凡：若误调 apply 会被覆写）
+                self.assertEqual(fc.kernels[0].ur_bank.storage[0][0], SENTINEL,
+                                 "VLD=0 不应触发转置（dst bank0 哨兵应原样保留）")
 
     def _spec(self):
         self._paths()
