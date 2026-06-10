@@ -457,8 +457,17 @@ class Auditor:
         all_matched = True
         # [REMOVED HARDCODED num_iterations]
 
+        # ADR-036 S1：structural_only 节点（如 ds_src_read 列对齐读）只作 SMT 排程锚点、
+        # **不进 emit/sim**（pipeline_runner emit 前已过滤）。Truth auditor 检查的是「emit 出的
+        # 指令是否在 sim log 逐拍对上」——structural 节点没 emit，审它必假阳（sim 无对应发射）。
+        # 故此处与 emit 过滤**同步**跳过，锁死「emit 过滤 = audit 过滤」不变量（hco a4f6b70 BLOCK 修复）。
+        structural_only_ids = {op.trace_id for op in (ops or [])
+                               if op.metadata.get("structural_only")}
+
         # 4. 逐个算子审计（智能分级：详情仅在失败时显示）
         for trace_id, info in theoretical_ops.items():
+            if trace_id in structural_only_ids:
+                continue
             if any(trace_id.startswith(x) for x in ["nop", "init", "hdr"]): continue
             
             t_base = info["t"]

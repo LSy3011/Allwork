@@ -70,7 +70,11 @@ class PipelineRunner:
              input_key = input_tensor_names[0]
              
         num_loop_iters = len(input_data[input_key]) // vector_lanes
-        physical_instrs = assembler.assemble(ops, II=II, num_iterations=num_loop_iters)
+        # ADR-036 S1：structural_only 节点（如 ds_src_read 列对齐读）只作 SMT 排程锚点，
+        # 不进 emit/sim —— S1/S2 期间真实数值由 model-A apply_smi_ds_t backdoor 提供。
+        # solve 已对全部 ops（含 structural）排程并设 global_t；此处仅从 emit/assemble 路径剔除。
+        emit_ops = [op for op in ops if not op.metadata.get("structural_only")]
+        physical_instrs = assembler.assemble(emit_ops, II=II, num_iterations=num_loop_iters)
  
         if is_multi_smc and hasattr(operator, "inject_data_per_smc"):
             operator.inject_data_per_smc(
@@ -110,7 +114,7 @@ class PipelineRunner:
         # ADR-020 v6: 多 SMC 路径必传 lir_stream (DFG 拓扑) 用于 per-SMC stagger
         packer.emit_from_instructions(
             physical_instrs, output_dir, program=emit_program, smc_num=smc_num_eff,
-            lir_stream=ops if is_multi_smc else None,
+            lir_stream=emit_ops if is_multi_smc else None,
         )
         self._patch_max_cycles(output_dir, safe_max_cycles)
 

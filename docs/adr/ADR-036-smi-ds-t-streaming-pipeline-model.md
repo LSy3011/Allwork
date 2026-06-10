@@ -108,6 +108,32 @@ RTOVR → 点积 → UR_write`,**全链固定 latency**。
 推翻 gather-gate+后门、保留转置数值+拓扑)。2 BLOCK(主张2 条件化 / 主张3 tile 对账)已落地。债务:无 VCS 前 sim 自洽对
 流式时序忠实度增信近零(同 ADR-021/023),验收 ② 未做不可升 Accepted,`still_holds: proposed` 维持。
 
+## S1 实现（2026-06-10，DFG+SMT 切片落地；hco a4f6b70 BLOCK→修复→APPROVE-with-notes）
+S1 验收 = **DFG+SMT**（非 e2e bit-perfect，后者 S3）。落地：
+- **D3 latency**：`pipeline_delays.yaml` 加 `SMI_DS_T: 16`（=PARAM_SMC_NUM*2，Q2「转置 latency=gather
+  完成点」；SHIFTDN/SHIFTUP 全局 unit lat 维持 1 不污染他算子）。hco 核实 16 数值正确 + 无双计/漏计。
+- **D1 5 段 DFG**：`_inject_smi_ds_t_transpose` 补首段 `ds_src_read`(UR_READ 列对齐)→ds_gather→ds_transpose
+  →shiftup→rtovr→ur_write。SMT 实证（`verification_v2/tools/s1_smt_check.py` 绕 sim）：II=2、
+  t[ds_transpose]=4 < min t[compute]=25（gap=21=16+datapath 尾链），5 段顺序 ✓。
+- **D4 验收 ①（e2e 不回归）**：3 算子（matmul_q_dst/matmul_q_dst_k8/fp16_matmul_q_dst）`--mode e2e` exit=0。
+
+### 实现不变量（hco BLOCK 修复，必须保持）
+**「emit 过滤 = audit 过滤」**：structural_only 节点（ds_src_read）既被 `pipeline_runner` emit 前过滤、
+也被 `auditor.audit_truth_alignment` 同步过滤。缺一即假阳——truth auditor 对没 emit 的节点查 sim log
+必 FAIL → `--mode e2e` exit=1（数值 bit-perfect 但假红）。回归护栏：`tests/unit/test_smi_ds_t.py::
+TestSmiDsTS1FiveStage`（源码不变量）+ `tests/integration/test_smi_ds_t_e2e.py`（e2e 退出码）。
+
+### 债务
+- **DEBT-036-STRUCTURAL-ANCHOR**：`ds_src_read` 标 `structural_only`（SMT 可见、sim 不可见），令「SMT 拓扑」
+  与「sim 实际执行」受控分叉——S1/S2 期真值由 model-A `apply_smi_ds_t` backdoor 供，故 SMT 排程对「真流式
+  列对齐读时序」忠实度增信近零（同 ADR-021/023 sim 自洽≠RTL）。**退出条件**：S3 删 model-A backdoor 时
+  同步删 flag、ds_src_read 转真 UR_READ 进 sim，VCS 验收 ② 兜底。
+- **DEBT-036-K8COMPUTE**：scenario-A 的 K=8/M=4 **bit-perfect compute 本轮未做**（user 2026-06-10 裁定推 S3）。
+  实测撞两道结构墙：① 2 词广播撞**单 SHIFTUP 单源**（sim 广播单元硬接 ur-r0，第二广播源不支持）→ SMT
+  全 II UNSAT；② 单广播+cumulative 需**逐行 reset** = DEBT-026 Stage-2。候选第三路 = local-per-SMC（改
+  `apply_smi_ds_t` scatter-to-all + 本地 2 词 addtree8to1 单发），需 sim 改 + 偏离文档 SHIFTUP-广播模型、
+  过 hco。`matmul_q_dst` 暂留 K=4 Stage-A（working 8/8）。K=8 真做 = S3（需 S2 流式单元 + K>4/M>1 compute 方案）。
+
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/
   para1236-1246（矩阵×矩阵 + 激活矩阵排序=SMI_DS_T）/ 表542-548（SHIFTUP/SHIFTDN）/ 表593-595（SMI_IQ）/ 表596-598（SMI_DS_T）

@@ -96,14 +96,20 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
     from ir.mir.mir_op import MIROp
 
     smc_num = 32
+    bank_depth = 256
     if spec is not None and hasattr(spec, "params"):
         smc_num = getattr(spec.params, "PARAM_SMC_NUM", 32)
+        bank_depth = getattr(spec.params, "PARAM_UR_BANK_DEPTH", 256)
     gather_cnt = int(cfg.get("gather_smc_cnt", smc_num))
+    src_bank = int(cfg.get("src_bank", 4))
+    src_addr = int(cfg.get("src_addr", 0))
     shiftdn_iq, smi_ds_t_iq = 34, 40
+    ur_read_iq = 30
     if spec is not None and hasattr(spec, "config"):
         reg = spec.config.get("iq_registry", {})
         shiftdn_iq = reg.get("SHIFTDN", 34)
         smi_ds_t_iq = reg.get("SMI_DS_T", 40)
+        ur_read_iq = reg.get("UR_READ", 30)
 
     a_read = next((o for o in ops
                    if o.op_type.upper() == "UR_READ"
@@ -115,10 +121,28 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
     # 单次 prologue 元数据（known-risk ①：转置一次产 M 行，非随 a_read 的 M-loop 复发）
     prologue = {"shape": [1], "inner_loops": 0, "outer_loops": 0,
                 "inner_inc": 0, "outer_inc": 0}
+    # ADR-036 S1：5 段 DFG 首段 = UR_read 列对齐（每 SMC_s 读本地 bank{src_bank} 的列 s）。
+    # 令 ds_gather 依赖它 → 完整链 ds_src_read(UR_READ)→ds_gather(SHIFTDN)→ds_transpose(SMI_DS_T)
+    # →shiftup_a_read(SHIFTUP scatter)→rt_a(RTOVR)→…→out(UR_WRITE)。数值仍走 apply_smi_ds_t
+    # (model-A)，本节点对 SMT 提供「列对齐读」依赖锚点，使排程把整条转置 datapath 串在 compute 之前。
+    # structural_only：S1 期间 model-A 的 apply_smi_ds_t backdoor 已在 run 前执行完整
+    # 「UR read—SHIFTDN gather—SMI_DS_T transpose—scatter」(cluster.py)，故本节点仅作 SMT
+    # 排程的「列对齐读」依赖锚点、**不进 emit/sim**（pipeline_runner emit 前按此 flag 过滤），
+    # 避免被 solver 重指派到真 ur-r 执行而覆盖 backdoor 转置结果。S3 删 model-A 后转为真流式读。
+    ds_src_read = MIROp(
+        op_type="UR_READ", logic_cycle=0, trace_id="ds_src_read",
+        metadata={
+            "depends_on": [], "iq_type": RT.UR_READ, "iq_id": ur_read_iq,
+            "meta_name": "ds_src", "role": "input", "stride": 0,
+            "logical_addr": src_bank * bank_depth + src_addr,
+            "structural_only": True,
+            "math": "smi_ds_t_src_read(col-aligned X[:,s] on SMC_s)", **prologue,
+        },
+    )
     ds_gather = MIROp(
         op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather",
         metadata={
-            "depends_on": [], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            "depends_on": ["ds_src_read"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
             "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 0,
             "math": "smi_ds_t_gather(cross-smc columns)", **prologue,
         },
@@ -137,7 +161,7 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
         deps.append("ds_transpose")
     a_read.metadata["depends_on"] = deps
 
-    return list(ops) + [ds_gather, ds_transpose]
+    return list(ops) + [ds_src_read, ds_gather, ds_transpose]
 
 
 class ManualMatmulParallelNOperator(BaseOperator):
@@ -355,7 +379,12 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
 
     缩放选择：gather 跨 K 个 SMC（=4），广播到全 8 SMC；更忠实的 K=SMC_NUM=8 实例需 cumulative
     addtree 2 词，留 Stage-A'。忠实度边界（model-A，hco caveat）：不验跨-SMC gather→transpose→scatter
-    时序（DEBT-033-DST-CTRL / NEEDS-USER-FACT-033-DSTDONE）。详见 ADR-033 D5 / 分歧台账 D-01。"""
+    时序（DEBT-033-DST-CTRL / NEEDS-USER-FACT-033-DSTDONE）。详见 ADR-033 D5 / 分歧台账 D-01。
+
+    ⚠ ADR-036 S1 scenario-A（K=8/M=4）的 bit-perfect compute 经实测撞死结构墙（见会话报告 +
+    DEBT-036-K8COMPUTE）：① 2 词广播撞单 SHIFTUP 单源(ur-r0 硬接)→SMT UNSAT；② 单广播+cumulative
+    需逐行 reset = DEBT-026 Stage-2。K=8 bit-perfect 留 S3（需 S2 流式单元 + K>4/M>1 compute 方案）。
+    本类暂留 K=4 Stage-A（working 8/8）；5 段 DFG + SMI_DS_T latency 已在共享注入器就位。"""
 
     SRC_BANK = 4   # 列对齐激活存放 bank（非转置间插）；bank0/1/5 已被 a/b/y 占
 

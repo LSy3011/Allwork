@@ -13,8 +13,12 @@ pipeline_delays:
   FPtoINT:             1    # 浮点转整数延迟
   INTtoFP:             1    # 整数转浮点延迟
   LOGIC:               1    # 逻辑运算延迟
-  SHIFTUP:             1    # 上移延迟
-  SHIFTDN:             1    # 下移延迟
+  SHIFTUP:             1    # 上移延迟（单 hop/单元延迟，非整链；广播链全长另计）
+  SHIFTDN:             1    # 下移延迟（单 hop/单元延迟，非整链）
+  SMI_DS_T:            16   # 激活矩阵排序(流式转置)级固定 latency = PARAM_SMC_NUM*2（para1194/1237
+                           #   一次广播读延迟，含一半气泡 B=2 填）。ADR-036 Q2 模型：转置 latency=gather
+                           #   完成点（para1039「前两指令完成读取后立即输出」→转置级近 0 额外延迟、主延迟在
+                           #   gather）。PARAM_SMC_NUM=8 实例→16。仍 proposed，升 Accepted 待 VCS 逐拍校准。
   INT8toFP16:          1    # INT8转FP16延迟
   VIN0:                0    # 向量输入流水线寄存器0
   VIN1:                0    # 向量输入流水线寄存器1

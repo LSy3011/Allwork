@@ -583,5 +583,47 @@ def struct_half(bits16: int) -> float:
     return struct.unpack("<e", struct.pack("<H", bits16 & 0xFFFF))[0]
 
 
+class TestSmiDsTS1FiveStage(unittest.TestCase):
+    """ADR-036 S1：5 段 DFG 首段 ds_src_read(structural_only) + 「emit 过滤 = audit 过滤」不变量。
+    锁死 hco a4f6b70 BLOCK 的回归点：structural_only 节点必须既被 emit 过滤、也被 truth auditor
+    过滤，否则 e2e Truth Audit 对没 emit 的节点假阳 → exit=1（假红）。"""
+
+    def _build_dst_dfg(self):
+        sys.path.append(str(_ROOT / "src"))
+        from api.hw_spec import HardwareSpec
+        from verification_v2.ops.matmul_op import ManualMatmulQDsTOperator
+        spec = HardwareSpec.load("hw_config")
+        return ManualMatmulQDsTOperator().get_dfg(spec=spec)
+
+    def test_five_stage_ds_src_read_structural(self):
+        ops = self._build_dst_dfg()
+        by_id = {o.trace_id: o for o in ops}
+        for nid in ("ds_src_read", "ds_gather", "ds_transpose"):
+            self.assertIn(nid, by_id, f"5 段缺节点 {nid}")
+        src = by_id["ds_src_read"]
+        self.assertEqual(src.op_type.upper(), "UR_READ")
+        self.assertTrue(src.metadata.get("structural_only"),
+                        "ds_src_read 必须标 structural_only（SMT 锚点、不进 emit/sim）")
+        self.assertIn("ds_src_read", by_id["ds_gather"].metadata.get("depends_on", []))
+        self.assertIn("ds_gather", by_id["ds_transpose"].metadata.get("depends_on", []))
+
+    def test_emit_filter_excludes_structural_only(self):
+        # 镜像 pipeline_runner.py emit 前过滤：structural_only 不进 emit/assemble
+        ops = self._build_dst_dfg()
+        emit_ids = {o.trace_id for o in ops if not o.metadata.get("structural_only")}
+        self.assertNotIn("ds_src_read", emit_ids, "structural_only 节点不该进 emit")
+        self.assertIn("ds_gather", emit_ids)
+        self.assertIn("ds_transpose", emit_ids)
+
+    def test_auditor_skips_structural_only(self):
+        # 不变量：auditor 必须与 emit 同步过滤 structural_only（否则假阳 → e2e exit=1）。
+        import inspect
+        sys.path.append(str(_ROOT / "src"))
+        from verification_v2.infra.auditor import Auditor
+        src = inspect.getsource(Auditor.audit_truth_alignment)
+        self.assertIn("structural_only", src,
+                      "auditor 必须过滤 structural_only（emit 过滤=audit 过滤不变量，hco a4f6b70）")
+
+
 if __name__ == "__main__":
     unittest.main()
