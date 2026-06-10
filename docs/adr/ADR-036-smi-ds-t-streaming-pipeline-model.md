@@ -56,13 +56,14 @@ K=8 / fp32 实例：PARAM_SMC_NUM=8、PARAM_UR_BYTE_CNT/ACTIVATION_BYTE_CNT=4 �
 - 单元语义 = **流式列对齐→行对齐重排**：每拍消费 1 片列对齐输入、产 1 片行对齐输出，固定 latency；
   内部 buffer = (PARAM_UR_BYTE_CNT/ACTIVATION_BYTE_CNT) 行 × 2*PARAM_SMC_NUM 列（systolic 重排，非攒齐 gate）。
 
-### D2. 整条 datapath = COND 屏障(SMI_DS_T→compute) + DLY 对齐线速流水(各段内部)（Q3 订正后）
-`UR_read(列对齐, B=2 双读) → SHIFTDN(线速回传 SMI) → SMI_DS_T(流式转置) → SHIFTUP(线速广播 EXTRA_DATA 队列) →
-[COND 屏障:下游等 INST_RDY] → RTOVR → 点积 → UR_write`。
-- **COND 屏障**(para988):SMI_DS_T 这条长延迟广播链先行,compute 段经 COND 等转置好的激活进 SHIFTUP 数据队列(INST_RDY)
-  再启动——**不是全程 DLY**(原 D2 错,已订正)。
-- 过屏障后 **compute 段内部** `LOOPS`=数据长度 + `DLY` 错位 + II=1 线速(表71-77 范式),SMT 的 `t[c]≥t[p]+lat`+II=1
-  适用于这段。**COND 屏障须在 sim/SMT 单独建模**(等待语义,非静态 DLY)。
+### D2. 整条 datapath = 固定 latency 静态排程(全 DLY,不建 COND)（Q3 再订正,user 定）
+`UR_read(列对齐, B=2 双读) → SHIFTDN(gather,定长) → SMI_DS_T(流式转置,定长) → SHIFTUP(广播,定长) →
+RTOVR → 点积 → UR_write`,**全链固定 latency**。
+- **不建 COND**(user)：COND 是给**延迟不定**(para988 的 DRAM 例)用的;SMI_DS_T 这条链全是**确定固定延迟**
+  (SHIFTDN N hops + 转置 + SHIFTUP N hops 都是定数),**编译器直接按总 latency 把 compute 排在 datapath 之后**即可。
+- SMT 的 `t[c]≥t[p]+lat` + II=1 **本就是这个静态排程**——只要把 SMI_DS_T datapath 各级固定 latency 入
+  `pipeline_delays.yaml`,compute 自然排在转置完成之后,**无需 COND 等待**。RTL 即便硬件用 COND,因延迟固定,出来拍数
+  与静态排程一致 → sim 仍逐拍对齐(latency 填对的前提下)。
 
 ### D3. 固定 latency 入 `pipeline_delays.yaml`
 - SMI_DS_T 转置级 latency（**Q2**：文档未给单一数，需从「读延迟 PARAM_SMC_NUM*2 + 转置重排」推或 RTL 定）。
@@ -91,11 +92,9 @@ K=8 / fp32 实例：PARAM_SMC_NUM=8、PARAM_UR_BYTE_CNT/ACTIVATION_BYTE_CNT=4 �
 - ~~**Q1**（中心 vs per-SMC）~~ **已定（文档）**：表596 接口（单 CRI/INST_DONE/CRD_SHIFTDN）+ para1030「将多个 SMC 数据
   读回 SMI」+ 表597 buffer 全局单份 → **SMI 中心单实例**（非 per-SMC）。sim 放 cluster 级一个；剩「如何与 per-SMC
   SHIFTUP/RTOVR 对齐」是工程细节。
-- **Q3 → 已定（para988，COND-gate + DLY-compute 混合）**：SMI_DS_T 长延迟广播链**用 COND**（para988「读广播数据的
-  SMI_IQ 先行，其他模块 COND 等数据整理进队列再同步执行」），**不是全程 DLY**。即:转置好的激活进 SHIFTUP 的 EXTRA_DATA
-  队列前,下游 compute 经 **COND 等 INST_RDY**（数据队列非空）→ 过屏障后 compute 段 DLY 对齐线速跑。**D2「全程 DLY」
-  订正为「COND 屏障(SMI_DS_T→compute)+ DLY(compute 内部)」混合**。⚠ 实现含义:sim 的 IQ 须建 COND 等待(INST_RDY_IN),
-  SMT 的 `t[c]≥t[p]+lat` 不直接建 COND wait,COND 屏障要单独建模。
+- **Q3 → 已定（user：不建 COND，固定 latency 静态排程）**：para988 的 COND 是给**延迟不定**（DRAM）用的;SMI_DS_T 链
+  全是**确定固定延迟**,编译器直接按总 latency 把 compute 排在 datapath 之后(SMT `t[c]≥t[p]+lat`+II=1 即此)。**sim/SMT
+  不建 COND 等待机制**,只需 SMI_DS_T datapath 各级固定 latency 填对(D3)。RTL 硬件即便用 COND,延迟固定 → 拍数一致。
 - **Q2（剩余真空白）**：SMI_DS_T 转置级**固定 latency**（第一片列对齐入→第一片行对齐出）几拍？para1039「前两个指令完成
   数据读取后**立即**开始输出」暗示转置级近 0 额外延迟、主延迟在 gather（PARAM_SMC_NUM*2）。**先按「转置 latency=gather
   完成点」建模,VCS 校准**；真单一数 gated on RTL。
