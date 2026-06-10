@@ -263,11 +263,18 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
     trace_file = case_path / "sim_trace.log"
     trace_file.touch()
 
-    # ADR-033 Stage-A：SMI_DS_T 跨-SMC 转置 datapath（model-A 原子段，run 前一次性执行）。
-    # 列对齐激活已 poison_memory 到各 SMC bank；gather→transpose→scatter 恢复行对齐到 SMC_0。
+    # ADR-034 Stage-I 2b：SMI_DS_T 转置改由其指令的 VLD 在 run 中触发（cluster 级单实例），
+    # 替 ADR-033 Stage-A 的 run-前无条件 apply。数值核仍 model-A（apply_smi_ds_t 复用转置核），
+    # 但触发时机由 emit→hex→decode 的 VLD 驱动 → vld=0 破坏微指令则 e2e FAIL（指令驱动可证伪）。
+    # 列对齐激活已 poison_memory 到各 SMC bank。
     smi_ds_t_cfg = config.get("smi_ds_t")
     if smi_ds_t_cfg:
-        cluster.apply_smi_ds_t(smi_ds_t_cfg)
+        smi_hex = next((str(case_path / h) for n, h in iq_init.items()
+                        if n.replace("-", "_").startswith("smi_ds_t")), None)
+        if smi_hex:
+            cluster.setup_smi_ds_t_trigger(smi_hex, smi_ds_t_cfg)   # 指令驱动（2b）
+        else:
+            cluster.apply_smi_ds_t(smi_ds_t_cfg)                    # fallback：无指令流 → 旧 model-A 原子段
 
     try:
         max_cycles = config.get("max_cycles", 1000)

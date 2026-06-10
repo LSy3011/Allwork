@@ -86,6 +86,11 @@ class SystemCluster:
         self.cycle_count = 0
         self.logger = logging.getLogger("SystemCluster")
 
+        # ADR-034 Stage-I 2b：SMI_DS_T 指令驱动触发（cluster 级单实例）
+        self.smi_ds_t_iq = None
+        self.smi_ds_t_cfg = None
+        self.smi_ds_t_fired = False
+
     def _propagate_chain_inputs(self):
         """
         ADR-019 D5：跨 SMC chain wire 互联（在 kernel.step() 之前注入上游 chain output）
@@ -169,7 +174,47 @@ class SystemCluster:
             f"[SMI_DS_T] gather {gather_cnt} SMC × {lanes} lanes → transpose → "
             f"scatter {lanes} rows × {nword} words to SMC_0 bank{dst_bank}@{dst_addr}")
 
+    def setup_smi_ds_t_trigger(self, hex_path: str, cfg: dict):
+        """ADR-034 Stage-I 2b：装载 SMI_DS_T 指令流，转置改由其指令的 VLD 在 run 中触发
+        （cluster 级单实例，known-risk ②：SMI 非 per-SMC，全局单次非每 kernel）。
+
+        替 run-前无条件 `apply_smi_ds_t`：数值核仍 model-A（apply_smi_ds_t 复用 SmiDsTUnit 转置
+        核 + gather），但**触发时机**由 DFG 的 SMI_DS_T op 经 emit→hex→decode 的 VLD 驱动。
+        vld=0（破坏微指令）→ 不触发 → a_read 读未转置 bank0 → e2e FAIL（指令驱动可证伪）。"""
+        from smc_simulator.control.iq_unit import IQUnit
+        from smc_simulator.core.decoder import InstructionDecoder
+        # 从 HardwareSpec.modules（与 emitter 同一 SSoT = hw_config/modules.yaml）建解码器：
+        # spec_loader.get_unit("SMI_DS_T") 返 None（无 specs/units/smi_ds_t.yaml）→ payload_width=0
+        # → VLD 偏移错位（读 bit40 而非 bit45）→ 永不触发。用 modules 的 5bit code_fields 校准。
+        module = None
+        if self.kernels:
+            hw_spec = getattr(next(iter(self.kernels.values())), "hw_spec", None)
+            module = hw_spec.modules.get("SMI_DS_T") if hw_spec else None
+        decoder = InstructionDecoder(module) if module else None
+        iq = IQUnit('smi_ds_t', decoder=decoder, en_inc=False)
+        iq.load_hex(hex_path)
+        self.smi_ds_t_iq = iq
+        self.smi_ds_t_cfg = dict(cfg)
+        self.smi_ds_t_fired = False
+
+    def _tick_smi_ds_t_trigger(self):
+        """在 kernels step 之前 evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) 即触发一次转置，
+        写 SMC_0 bank0 先于本拍 a_read 读（调度保证 t[transpose] < t[a_read]）。"""
+        iq = self.smi_ds_t_iq
+        if iq is None or self.smi_ds_t_fired:
+            return
+        iq.evaluate({}, cycle=self.cycle_count)
+        if getattr(iq, "exec_active", False):
+            self.apply_smi_ds_t(self.smi_ds_t_cfg)
+            self.smi_ds_t_fired = True
+            self.logger.info(
+                f"[SMI_DS_T] instruction-driven transpose fired at cycle {self.cycle_count}")
+        iq.tick()
+
     def step(self):
+        # 0. ADR-034 2b: SMI_DS_T 指令驱动触发（kernels step 前，bank0 写先于 a_read 读）
+        self._tick_smi_ds_t_trigger()
+
         # 1. ADR-019 D5: 跨 SMC chain 注入（上游 chain output → 本 kernel chain_inputs）
         self._propagate_chain_inputs()
 

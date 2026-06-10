@@ -279,5 +279,84 @@ class TestSmiDsTInstructionDriven(unittest.TestCase):
         self.assertNotEqual(cap, cap2)
 
 
+class TestSmiDsTInstructionTrigger(unittest.TestCase):
+    """ADR-034 Stage-I 2b：转置由 SMI_DS_T 指令的 VLD 触发（cluster 级单实例），
+    替 run-前无条件 apply。反证：vld=0 → 不触发 → bank0 未转置（指令驱动可证伪）。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "sim", _ROOT / "verification_v2"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _fake_cluster(self, spec, num_kernels=8, num_banks=8, bank_size=16):
+        import types
+        import logging
+        from smc_simulator.system.cluster import SystemCluster
+        ker = {}
+        for i in range(num_kernels):
+            ub = types.SimpleNamespace(storage=[[0] * bank_size for _ in range(num_banks)])
+            ker[i] = types.SimpleNamespace(ur_bank=ub, hw_spec=spec)
+        fc = types.SimpleNamespace(kernels=ker, logger=logging.getLogger("test_2b"),
+                                   smi_ds_t_iq=None, smi_ds_t_cfg=None,
+                                   smi_ds_t_fired=False, cycle_count=0)
+        fc.apply_smi_ds_t = lambda cfg: SystemCluster.apply_smi_ds_t(fc, cfg)
+        return fc
+
+    def _write_hex(self, spec, vld):
+        """单帧 SMI_DS_T 微指令（VALID payload=1，header VLD 由参数控）。"""
+        import tempfile
+        from driver.packer import BitPacker
+        cap = BitPacker.pack_capsule(
+            spec, "SMI_DS_T",
+            {"VALID": 1, "intlv_en": 0, "intlv_grp": 0, "intlv_in": 0, "intlv_out": 0},
+            is_body=True, VLD=vld)
+        fh = tempfile.NamedTemporaryFile("w", suffix=".hex", delete=False)
+        fh.write(f"{cap:012x}\n")
+        fh.close()
+        return fh.name
+
+    def test_instruction_driven_vld_gates_transpose(self):
+        """VLD=1 → 触发 + bank0 得行对齐转置；VLD=0 → 不触发 + bank0 不变（apply 未被调）。"""
+        self._paths()
+        from smc_simulator.system.cluster import SystemCluster
+        from smc_simulator.units.smi_ds_t_unit import (
+            word_from_fp32_lanes, fp32_lanes_from_word,
+        )
+        spec = self._spec()
+        K, M = 4, 4
+        X = [[float(m * 10 + k + 1) for k in range(K)] for m in range(M)]
+        cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+               "gather_smc_cnt": K, "lanes": M}
+
+        for vld, expect_fired in [(1, True), (0, False)]:
+            fc = self._fake_cluster(spec)
+            for s in range(K):
+                col = [X[m][s] for m in range(M)]
+                fc.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes(col)
+            hexpath = self._write_hex(spec, vld)
+            SystemCluster.setup_smi_ds_t_trigger(fc, hexpath, cfg)
+            for c in range(6):
+                fc.cycle_count = c
+                SystemCluster._tick_smi_ds_t_trigger(fc)
+            self.assertEqual(fc.smi_ds_t_fired, expect_fired,
+                             f"VLD={vld} 触发状态应={expect_fired}")
+            if expect_fired:
+                row0 = fp32_lanes_from_word(fc.kernels[0].ur_bank.storage[0][0], K)
+                for k in range(K):
+                    self.assertAlmostEqual(row0[k], X[0][k], places=4,
+                                           msg=f"VLD=1 转置后行对齐错 @lane{k}")
+            else:
+                # vld=0：apply 未被调用 → bank0 仍为 0（未转置）
+                self.assertEqual(fc.kernels[0].ur_bank.storage[0][0], 0,
+                                 "VLD=0 不应触发转置（bank0 应保持 0）")
+
+    def _spec(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        return HardwareSpec.load("hw_config")
+
+
 if __name__ == "__main__":
     unittest.main()

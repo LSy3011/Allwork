@@ -205,6 +205,29 @@ ADR-033 Stage-A/A' 的**转置数值正确性 + datapath 拓扑结论保留有�
   此时 emit 命名需对齐（`get_iq_name` whitelist 加 SMI_DS_T → "smi_ds_t" 才能 load_program 匹配；
   现 "smi-ds-t-0" 被 skip 是 2a 的有意设计）。known-risk ②（cluster 级单次触发非每 kernel）/ ③ 在 2b 处理。
 
+### Increment 2b ✅ DONE（2026-06-10）—— sim 指令触发（验「指令驱动数值」）
+- **触发机制（cluster 级单实例，解 known-risk ②）**：`SystemCluster.setup_smi_ds_t_trigger` + `_tick_smi_ds_t_trigger`
+  （`cluster.py`）——cluster 持**一个** SMI_DS_T IQ（非 per-kernel），在 `step()` 最前（kernels step 前）
+  evaluate；其指令 VLD 帧 `exec_active` 首次为真即触发 `apply_smi_ds_t` 一次（`smi_ds_t_fired` guard 防重复），
+  写 SMC_0 bank0 先于本拍 a_read 读。`physical_runner._run_multi_smc` 改：**删 run-前无条件 apply**，
+  从 iq_init 找 `smi_ds_t` 指令流 hex → `setup_smi_ds_t_trigger`（无流则 fallback 旧原子段）。
+- **解码器 SSoT（解 known-risk ③）**：`spec_loader.get_unit("SMI_DS_T")` 返 None（无 `specs/units/smi_ds_t.yaml`）
+  → payload_width=0 → VLD 偏移读 bit40 而非 bit45 → 永不触发。**改从 `kernels[0].hw_spec.modules["SMI_DS_T"]`
+  （与 emitter 同一 SSoT=hw_config/modules.yaml）建 `InstructionDecoder`** → payload_width=5、VLD@bit45 正确。
+  **不新建 `hw_config/specs/units/smi_ds_t.yaml`**（避免 hw_config 触点 + SSoT 分裂）。
+- **数值核**：仍 model-A（`apply_smi_ds_t` 复用 `SmiDsTUnit` 转置核 + gather）；2b 只把**触发**从 run-前无条件
+  改为指令 VLD 驱动。指令-驱动数值贯通：a_read 在转置触发后读 bank0（emit INIT-stagger 保 t[transpose]=1 <
+  t[a_read]=2 的相对序 → 转置必先于 a_read 读，K=4/K=8 实测成立）。
+- **验收**：matmul_q_dst / matmul_q_dst_k8 经指令触发 e2e **8/8 bit-perfect**；全量 pytest 122 pass
+  （+1 反证单测 `test_instruction_driven_vld_gates_transpose`：VLD=1→触发+bank0 行对齐；**VLD=0→不触发+bank0 保 0**，
+  证明转置真由指令 VLD 门控、非 run-前 hook）+ 5 算子 e2e 8/8。
+- **债务**：① 转置指令在流中按 `num_iterations`(M) 重复 emit（assembler 不读 `inner_loops`，按全局迭代数）——
+  `smi_ds_t_fired` guard 只 apply 一次、首触后停止驱动该 IQ，故**冗余无害**，但 emit 流非「单次转置」忠实
+  （DEBT-034-LOOPS-REDUNDANT，真修需 assembler 支持 per-IQ 迭代数）。② 触发时机（cycle 3 起）依赖 INIT-stagger
+  相对序，非逐拍 RTL 时序（仍 model-A，DEBT-034-TRIGGER-TIMING）。③ 升 Accepted 待 VCS（still_holds: proposed）。
+- **未做（Stage-II）**：真 step-driven 数据流（SHIFTDN 链 drain→CRD_SHIFTDN→SMI_DS_T tick 出 DATA_OUT/INST_DONE，
+  D5 Stage-II）+ interleave 4 并发 + 真 latency k，gated on NEEDS-USER-FACT-034-CRI/-IQDRIVE/-DSTDONE + VCS。
+
 ## HCO 复核（agentId `a65bb21037896d94e`）
 **APPROVE-with-notes**。核心主张（SMI_DS_T 是指令驱动单元、应进指令流非 simulation_only）**成立**：表596（CRI+DATA_OUT+INST_DONE）
 / 表598（微指令）/ 表597（PARAM_INST_NUM=4）与 UR/FPMUL 同构，位 SMI 微架构层。Stage-I/II 切分诚实，Stage-I 只用
