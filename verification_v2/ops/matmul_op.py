@@ -1145,3 +1145,42 @@ class ManualFp16MatmulParallelNOperator(ManualFp16MatmulQOperator):
                 prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)  # 权重列 c per-SMC
 
     # get_dfg 继承 ManualFp16MatmulQOperator（单 SMC 内 DFG + SHIFTUP 广播）；多 SMC emit 复制。
+
+
+class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
+    """ADR-035：SMI_DS_T 跨-SMC 转置落到**文档钦定的 FP16 matmul 路径**（fp16_matmul_n + 转置前端）。
+
+    镜像 `ManualMatmulQDsTK8Operator`（FP32 K=8），但 compute 走 **FP16MUL（32 乘/指令）+ FP32ADDTREE8TO1**
+    （表33：FP16 矩阵乘法单元 1024，无 FP32 matmul 单元）。激活 K=8 **列对齐存全 8 SMC**（每 SMC 持 1 个
+    **FP16** 元素 a[s]）→ `SMI_DS_T` gather 8×1 → 转置 1×8 → 恢复 8 元素行对齐写回 SMC_0 bank0
+    （**FP16 8 元素 = 1 个 128b 词**，vs FP32 = 2 词）→ SHIFTUP 广播 → 每 SMC dot8(a, W[:,c]) 4 列。
+
+    转置精度泛化（ADR-035 D2）：`smi_ds_t_config` 携 `element_bits=16` → cluster 选 fp16 codec
+    （8 lane × 16-bit）。byte 转置 ≡ element 转置（lanes=1 每元素不跨词边界，BLOCK-1 不变式）。
+    转置只搬不算 → golden 与 fp16_matmul_n 同（继承 get_golden / prepare_input）。"""
+
+    SRC_BANK = 6   # 列对齐 FP16 激活存放 bank（避让 a=0 / b0-3=1-4 / y=5；hco NOTE-3）
+
+    def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
+        # gather 全 K=8 个 SMC（每 SMC lanes=1 个 FP16 元素）→ 转置 1×8 → 写回 SMC_0 bank0（FP16 1 词）
+        return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+                "gather_smc_cnt": self.K, "lanes": 1, "element_bits": 16, "word_lanes": 8}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]                                      # K=8 FP16 激活向量
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        src_logical = self.SRC_BANK * bank_depth
+        for c in range(self.COLS):
+            b_addr = self.get_bank_addr(f"b{c}", spec)
+            for k, prog in enumerate(programs):
+                prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)   # 权重列 c per-SMC
+        for k, prog in enumerate(programs):
+            if k < self.K:
+                prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float16), stride=1)  # SMC_k 持 a[k]
+            # 不注入 bank0：SMI_DS_T 转置后写回行对齐激活（供 SHIFTUP 广播读）
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        # fp16_matmul_n 的 SMC 内 DFG（FP16MUL 满 32 乘 + SHIFTUP 广播）+ SMI_DS_T 转置前端注入
+        ops = super().get_dfg(spec)
+        return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)

@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -42,6 +42,8 @@ OPERATOR_MAP = {
     "fp16_matmul_q": ManualFp16MatmulQOperator,
     # ADR-032 S3：FP16 matmul 8-SMC N 维广播（满 32 乘/SMC，partitioned 输出）
     "fp16_matmul_n": ManualFp16MatmulParallelNOperator,
+    # ADR-035：SMI_DS_T 跨-SMC 转置落到 FP16 matmul 路径（fp16_matmul_n + 转置前端）
+    "fp16_matmul_q_dst": ManualFp16MatmulQDsTOperator,
 }
 
 CATEGORIES = {

@@ -147,32 +147,34 @@ class SystemCluster:
         COND 就绪同步（DEBT-033-DST-CTRL / NEEDS-USER-FACT-033-DSTDONE）；只保证终值数值正确 +
         gather-before-scatter 序约束（SmiDsTUnit.transpose() gather 未到齐即抛错）。
         """
-        from smc_simulator.units.smi_ds_t_unit import (
-            SmiDsTUnit, fp32_lanes_from_word, word_from_fp32_lanes,
-        )
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit, _lane_codec
         gather_cnt = int(cfg["gather_smc_cnt"])
         lanes = int(cfg["lanes"])
         src_bank, src_addr = int(cfg["src_bank"]), int(cfg["src_addr"])
         dst_bank, dst_addr = int(cfg["dst_bank"]), int(cfg["dst_addr"])
-        word_lanes = int(cfg.get("word_lanes", 4))   # 每 128-bit 词的 fp32 数（fp32=4）
+        # ADR-035 D2：element_bits 选 codec；word_lanes 由其推导（128b 词 / 元素位宽）
+        element_bits = int(cfg.get("element_bits", 32))
+        word_lanes = int(cfg.get("word_lanes", 128 // element_bits))
+        lanes_from_word, word_from_lanes = _lane_codec(element_bits)
         if gather_cnt > len(self.kernels):
             raise ValueError(f"SMI_DS_T gather_smc_cnt={gather_cnt} > num_kernels={len(self.kernels)}")
 
-        unit = SmiDsTUnit(smc_num=gather_cnt, lanes=lanes)
+        unit = SmiDsTUnit(smc_num=gather_cnt, lanes=lanes,
+                          word_lanes=word_lanes, element_bits=element_bits)
         # gather：逐 SMC 读列对齐激活（SHIFTDN gather 的 model-A 数值等价）
         for s in range(gather_cnt):
             word = self.kernels[s].ur_bank.storage[src_bank][src_addr]
-            unit.gather(s, fp32_lanes_from_word(word, lanes))
+            unit.gather(s, lanes_from_word(word, lanes))
         # transpose：gather 全到齐才出（未到齐抛错 = gather-before-scatter 硬约束）
         rows = unit.transpose()        # rows[m] = 行对齐激活 X[m,:]（gather_cnt 个元素）
         # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP scatter 的 model-A 数值等价）。
-        # 行宽 gather_cnt 可 > word_lanes（如 K=8 = 2 词）→ 每行拆 ceil(K/word_lanes) 个连续词。
+        # 行宽 gather_cnt 可 > word_lanes（如 fp32 K=8 = 2 词）→ 每行拆 ceil(K/word_lanes) 个连续词。
         nword = (gather_cnt + word_lanes - 1) // word_lanes
         for m in range(lanes):
             for w in range(nword):
                 chunk = rows[m][w * word_lanes:(w + 1) * word_lanes]
                 self.kernels[0].ur_bank.storage[dst_bank][dst_addr + m * nword + w] = \
-                    word_from_fp32_lanes(chunk)
+                    word_from_lanes(chunk)
         self.logger.info(
             f"[SMI_DS_T] gather {gather_cnt} SMC × {lanes} lanes → transpose → "
             f"scatter {lanes} rows × {nword} words to SMC_0 bank{dst_bank}@{dst_addr}")
@@ -201,9 +203,12 @@ class SystemCluster:
         iq.load_hex(hex_path)
         self.smi_ds_t_iq = iq
         self.smi_ds_t_cfg = dict(cfg)
+        # ADR-035 D2：element_bits 选 fp16/fp32 codec；word_lanes 由其推导（128b 词 / 元素位宽）
+        element_bits = int(cfg.get("element_bits", 32))
+        word_lanes = int(cfg.get("word_lanes", 128 // element_bits))
         self.smi_ds_t_unit = SmiDsTUnit(
             smc_num=int(cfg["gather_smc_cnt"]), lanes=int(cfg["lanes"]),
-            word_lanes=int(cfg.get("word_lanes", 4)))
+            word_lanes=word_lanes, element_bits=element_bits)
         self.smi_ds_t_started = False
         self.smi_ds_t_done = False
         self.smi_ds_t_fired = False
@@ -214,7 +219,6 @@ class SystemCluster:
           UR 行 latch 进单元 CRD_SHIFTDN，execute() 转置（gather-before-scatter gate）。
         - 已触发未完成：每拍 emit_step() 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0；INST_DONE 即完成。
         调度保证 t[transpose] < t[a_read]，scatter 逐词写先于 a_read 逐行读。"""
-        from smc_simulator.units.smi_ds_t_unit import fp32_lanes_from_word
         unit = self.smi_ds_t_unit
         if unit is None or self.smi_ds_t_done:
             return
@@ -225,10 +229,11 @@ class SystemCluster:
             if not getattr(iq, "exec_active", False):
                 iq.tick()
                 return
-            # CRD_SHIFTDN：gather 各 SMC 列对齐 UR 行（model-A：SHIFTDN-delivered Tile = 读各 SMC SRC_BANK）
+            # CRD_SHIFTDN：gather 各 SMC 列对齐 UR 行（model-A：SHIFTDN-delivered Tile = 读各 SMC SRC_BANK）。
+            # codec 随精度（element_bits）：fp16 16-bit lane / fp32 32-bit lane（ADR-035 D2）。
             sb, sa = int(cfg["src_bank"]), int(cfg["src_addr"])
             gc, ln = int(cfg["gather_smc_cnt"]), int(cfg["lanes"])
-            cols = [fp32_lanes_from_word(self.kernels[s].ur_bank.storage[sb][sa], ln)
+            cols = [unit._lanes_from_word(self.kernels[s].ur_bank.storage[sb][sa], ln)
                     for s in range(gc)]
             unit.load_tile(cols)
             unit.execute()                 # 转置 → DATA_OUT 队列（未到齐抛错）

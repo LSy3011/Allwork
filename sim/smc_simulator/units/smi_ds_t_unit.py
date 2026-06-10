@@ -37,6 +37,35 @@ def word_from_fp32_lanes(vals: Sequence[float]) -> int:
     return w
 
 
+# ── ADR-035 D2：FP16 codec（8 lane × 16-bit / 128b 词，元素字节连续打包）──────────
+def fp16_lanes_from_word(word: int, lanes: int) -> List[float]:
+    """128-bit UR 词 → lanes 个 fp16（lane l 在 bit [l*16:l*16+16]，IEEE754 half）。
+    每元素 2 byte 连续占 1 lane（byte 转置 ≡ element 转置的前提，ADR-035 BLOCK-1 不变式）。"""
+    out = []
+    for l in range(lanes):
+        bits = (word >> (l * 16)) & 0xFFFF
+        out.append(struct.unpack("<e", struct.pack("<H", bits))[0])
+    return out
+
+
+def word_from_fp16_lanes(vals: Sequence[float]) -> int:
+    """lanes 个 fp16 → 128-bit UR 词（lane l 在 bit [l*16]，IEEE754 half）。"""
+    w = 0
+    for l, v in enumerate(vals):
+        bits = struct.unpack("<H", struct.pack("<e", float(v)))[0]
+        w |= (bits & 0xFFFF) << (l * 16)
+    return w
+
+
+def _lane_codec(element_bits: int):
+    """按 element_bits 选 (lanes_from_word, word_from_lanes) codec（ADR-035 D2）。"""
+    if element_bits == 16:
+        return fp16_lanes_from_word, word_from_fp16_lanes
+    if element_bits == 32:
+        return fp32_lanes_from_word, word_from_fp32_lanes
+    raise ValueError(f"unsupported element_bits={element_bits}（仅 16/32）")
+
+
 class SmiDsTUnit:
     """SMI 中心跨-SMC 转置单元（非每-SMC，无 SMC_ID）。
 
@@ -45,18 +74,26 @@ class SmiDsTUnit:
     transpose() 在 gather 未到齐时抛错（gate: gather-before-scatter ordering）。
     """
 
-    def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4):
+    def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4, element_bits: int = 32):
         """smc_num = PARAM_IN_LINE_NUM = PARAM_SMC_NUM；
         lanes = PARAM_IN_LINE_BYTE_CNT / ELEMENT_BYTE_NUM（fp32: 16/4 = 4，即每 UR 行的元素数）；
-        word_lanes = 每个 128-bit DATA_OUT 词的 fp32 数（fp32=4）——表596 DATA_OUT=128b，
-        一个转置行（smc_num 元素）拆 ceil(smc_num/word_lanes) 个词发出（para959）。"""
+        element_bits = 元素位宽（fp32=32 / fp16=16，ADR-035 D2 codec dispatch）；
+        word_lanes = 每个 128-bit DATA_OUT 词的元素数（= 128//element_bits：fp32=4 / fp16=8）——
+        表596 DATA_OUT=128b，一个转置行（smc_num 元素）拆 ceil(smc_num/word_lanes) 个词发出（para959）。"""
         if smc_num < 1:
             raise ValueError(f"smc_num must be >= 1, got {smc_num}")
         if lanes < 1:
             raise ValueError(f"lanes must be >= 1, got {lanes}")
+        # ADR-035 BLOCK-2：word_lanes 与 element_bits 不得矛盾（128b 词 / 元素位宽）
+        if word_lanes != 128 // element_bits:
+            raise ValueError(
+                f"word_lanes={word_lanes} 与 element_bits={element_bits} 矛盾"
+                f"（须 word_lanes == 128//element_bits == {128 // element_bits}）")
         self.smc_num = smc_num
         self.lanes = lanes
         self.word_lanes = word_lanes
+        self.element_bits = element_bits
+        self._lanes_from_word, self._word_from_lanes = _lane_codec(element_bits)
         # ADR-034 S2-D1：表596 接口寄存器（替 apply_smi_ds_t backdoor 的真 step-driven 实体）
         self.data_out = 0          # 表596 DATA_OUT(128b)：当前发出的转置行词
         self.data_out_vld = 0      # 表596 DATA_OUT_VLD：本拍 DATA_OUT 有效
@@ -90,7 +127,7 @@ class SmiDsTUnit:
         for m in range(self.lanes):
             for w in range(nword):
                 chunk = rows[m][w * self.word_lanes:(w + 1) * self.word_lanes]
-                self._emit_queue.append((m * nword + w, word_from_fp32_lanes(chunk)))
+                self._emit_queue.append((m * nword + w, self._word_from_lanes(chunk)))
         self.inst_done = 0
         return len(self._emit_queue)
 

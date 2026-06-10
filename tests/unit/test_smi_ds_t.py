@@ -452,5 +452,83 @@ class TestSmiDsTStepDriven(unittest.TestCase):
         self.assertEqual(u.inst_done, 1)
 
 
+class TestSmiDsTFp16(unittest.TestCase):
+    """ADR-035：SMI_DS_T 数据路径 FP16 泛化（8 lane × 16-bit codec + element_bits）。
+    含 hco BLOCK-1（byte≡element 不变式）/ BLOCK-2（codec 参数一致）门。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "sim"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def test_fp16_word_codec_roundtrip(self):
+        """8 lane × 16-bit 往返一致（含负数 + 跨 byte 错位非对称值）；反证：fp32 codec 解 fp16 词错。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import (
+            word_from_fp16_lanes, fp16_lanes_from_word, fp32_lanes_from_word)
+        import numpy as np
+        # 跨 byte 错位非对称值（half 精度可表示）：相邻 lane 位模式不同，验不串字节
+        vals = [np.float16(v) for v in (1.0, -2.5, 3.140625, 100.0, -0.5, 2.0, 7.5, -16.0)]
+        w = word_from_fp16_lanes(vals)
+        back = fp16_lanes_from_word(w, 8)
+        for a, b in zip(vals, back):
+            self.assertAlmostEqual(float(a), float(b), places=3)
+        # 反证：用 fp32 codec（4 lane × 32-bit）解 fp16 词 → lane 数/值都错
+        wrong = fp32_lanes_from_word(w, 4)
+        self.assertEqual(len(wrong), 4)                       # fp32 只解 4 lane（≠ 8）
+        self.assertNotAlmostEqual(float(wrong[0]), float(vals[0]), places=2)
+
+    def test_smi_ds_t_fp16_no_split_invariant(self):
+        """hco BLOCK-1 不变式：lanes=1 时每 fp16 元素 2 byte 连续占 1 lane、8 元素恰 1 词 16 byte
+        不跨 128b 边界（byte 转置 ≡ element 转置的前提）。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import word_from_fp16_lanes
+        import numpy as np
+        vals = [np.float16(s + 1) for s in range(8)]
+        w = word_from_fp16_lanes(vals)
+        self.assertLess(w, 1 << 128, "8 fp16 元素须恰占 1 个 128b 词，不跨边界")
+        # 每元素占据独立 16-bit lane（lane l 在 bit[l*16]），互不重叠
+        for l in range(8):
+            lane_bits = (w >> (l * 16)) & 0xFFFF
+            self.assertEqual(struct_half(lane_bits), float(vals[l]))
+
+    def test_smi_ds_t_codec_param_consistency(self):
+        """hco BLOCK-2：element_bits 与 word_lanes 矛盾 → 构造器 assert 抛错。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit
+        with self.assertRaises(ValueError):
+            SmiDsTUnit(smc_num=8, lanes=1, word_lanes=4, element_bits=16)   # 16→须 word_lanes=8
+        with self.assertRaises(ValueError):
+            SmiDsTUnit(smc_num=4, lanes=4, word_lanes=8, element_bits=32)   # 32→须 word_lanes=4
+        # 一致值 OK
+        SmiDsTUnit(smc_num=8, lanes=1, word_lanes=8, element_bits=16)
+        SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32)
+
+    def test_smi_ds_t_fp16_transpose(self):
+        """element_bits=16：gather 8 SMC × 1 fp16 → 转置 1×8 → DATA_OUT 1 词 8 lane = 行对齐激活。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit, fp16_lanes_from_word
+        import numpy as np
+        a = [np.float16((s + 1) * 1.5) for s in range(8)]      # 非对称值
+        u = SmiDsTUnit(smc_num=8, lanes=1, word_lanes=8, element_bits=16)
+        cols = [[a[s]] for s in range(8)]                      # 每 SMC 持 1 fp16 元素
+        u.load_tile(cols)
+        nword = u.execute()
+        self.assertEqual(nword, 1, "FP16 8 元素恰 1 词（vs FP32 2 词）")
+        off, word = u.emit_step()
+        row = fp16_lanes_from_word(word, 8)
+        for s in range(8):
+            self.assertAlmostEqual(float(row[s]), float(a[s]), places=3,
+                                   msg=f"行对齐 lane{s} 应=a[{s}]")
+        self.assertEqual(u.inst_done, 1)
+
+
+def struct_half(bits16: int) -> float:
+    import struct
+    return struct.unpack("<e", struct.pack("<H", bits16 & 0xFFFF))[0]
+
+
 if __name__ == "__main__":
     unittest.main()
