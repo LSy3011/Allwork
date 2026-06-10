@@ -151,13 +151,69 @@ ADR-033 Stage-A/A' 的**转置数值正确性 + datapath 拓扑结论保留有�
 - **缩放 ≠ 真时序**：Stage-I 仍 latency=1 model-A 近似，不验 4 并发 interleave 真时序；升 Accepted 待 VCS
   （still_holds: proposed）。
 
-## Open questions / NEEDS-USER-FACT（gated on RTL）
-1. **NEEDS-USER-FACT-034-CRI**（承接 033-CRI）：CRI 宽度（`*`）；表598 的 5 字段是 CRI 完整 payload 吗？
-   4 并发（PARAM_INST_NUM=4）如何区分指令槽（intlv_grp 仅 1bit 分 2 组，无 inst_id）？
-2. **NEEDS-USER-FACT-034-IQDRIVE**：SMI_DS_T 的 CRI 由哪个 SMI_IQ 驱动？其 EN_LOOPS/EXTRA_DATA/COND/DLY 配置？
-   （文档只说**输出**去 SHIFTUP 的 EXTRA_DATA IQ`[seq1050]`，未说 CRI 来源 IQ。）
-3. **NEEDS-USER-FACT-034-DSTDONE**（承接 033-DSTDONE）：INST_DONE 回收路径——不在 [seq1003] 的 5 个
-   outstanding SMI_IQ 列表内，接哪个 SMI-IS？
+## Open questions —— 2026-06-10 doc 复核：3 个 NEEDS-USER-FACT **全部 doc-resolved**（非 RTL gap）
+
+> user 订正「缺少哪个微指令，文档中都是有具体的微指令」属实。复跑 `spec_doc_align.py` + 逐表精读 v0.4.19
+> 表593-598 + para876-970，3 个原标「gated on RTL」的缺口**实为文档已定**，仅**逐拍时序**才是 VCS-gated。
+> 原 NEEDS-USER-FACT 过度保守，订正如下：
+
+1. ~~**034-CRI**~~ **✅ DOC-RESOLVED**：**CRI = 表595「SMI_IQ 微指令格式」(VLD/JUMP/EMBED/EMBED_END/LOOPS/
+   COND/DLY/INC/INC_EMBED/**CODE**) 的 INST 输出**（表593 `INST={CODE...}`）。其中 **CODE 字段 = 表598 的 5bit
+   SMI_DS_T 专属 payload**（vld+intlv_*）。**emitter 现有 ISA_V5 header(41) + 5bit body 已是此结构**——
+   header=SMI_IQ 框架、body=CODE。表598 5 字段**就是**完整 SMI_DS_T payload（无隐藏 inst_id）。
+   **4 并发区分**（para961）：靠 `intlv_grp`(1bit 分 2 组) + **每两指令前后 2 拍启动、数据间插读取**；
+   inst_id 是 **SMI_IQ 级**（表593 INST_ID=6bit / CRD_I 的 inst_id），不在 SMI_DS_T 微指令内。
+2. ~~**034-IQDRIVE**~~ **✅ DOC-RESOLVED**：CRI 由**自身专属 SMI_IQ** 驱动（para894「一般 SMI_IQ 控一模块」）；
+   **输出**去「SHIFTUP 对应、具 EXTRA_DATA 的 SMI_IQ」(para969)；EN_LOOPS/COND/DLY 是标准 SMI_IQ 参数（表594）。
+   **datapath 同步 = COND**（para916：广播/数据整理类长延迟/不定延迟用 COND——「让读广播数据的 SMI_IQ 先行，
+   其他模块用 COND 等数据整理完毕进队再同步执行」），正是 SMI_DS_T→SHIFTUP 的就绪同步机制。
+3. ~~**034-DSTDONE**~~ **✅ DOC-CLARIFIED**：INST_DONE（表596）= 直接完成输出信号；SMI_DS_T **自管 4 outstanding**
+   （表597 PARAM_INST_NUM=4 + para961 内部间插），**不**走 5-CRD-outstanding 路径——para920-925 的 5 个
+   OUTSTANDING SMI_IQ 接 CRD_STB/STBAXI/LDB/LDBAXI/**CRD_DS**（per-SMC DS 表585-588，非 SMI_DS_T）。
+   原「不在 5 outstanding 列表内」**确认且被解释**：SMI_DS_T 自管完成、下游用 COND 等 DATA_OUT_VLD/INST_DONE。
+
+**仍 VCS-gated（逐拍时序，非微指令定义）**：① 4 并发「每两指令前后 2 拍启动」的精确 stagger；② COND 就绪延迟；
+③ INST_DONE/DATA_OUT_VLD 的逐拍 valid 时序。**设计已 doc-full，时序忠实待 VCS**（still_holds: proposed 不变）。
+
+## 文档全表落地（v0.4.19，SMI_DS_T 完整规格）
+- **表596 接口**：`CRD_SHIFTDN(129 in) / DATA_OUT(128 out) / DATA_OUT_VLD(1) / CRI(* in) / INST_DONE(1)`。
+- **表597 参数**：`PARAM_IN_LINE_BYTE_CNT=PARAM_UR_BYTE_CNT / PARAM_IN_LINE_NUM=PARAM_SMC_NUM / PARAM_INST_NUM=4`。
+- **表598 微指令**（5bit）：`vld/intlv_en/intlv_grp/intlv_in/intlv_out`——**与 hw_config/modules.yaml 一致**。
+- **功能**（para954-962）：每组取数指令对所有 SMC UR 读 1 行(PARAM_UR_BYTE_CNT 字节)×PARAM_SMC_NUM 行经 SHIFTDN
+  传回 SMI；一个 SMI_DS_T 指令把 Tile 转置为 PARAM_UR_BYTE_CNT 行 × PARAM_SMC_NUM 列发出（一行 PARAM_SMC_NUM
+  拆多个 PARAM_UR_BYTE_CNT 发）；4 并发、间插读/间插或顺序输出、收发不反压；输出→SHIFTUP EXTRA_DATA IQ。
+
+## Stage-II 设计（doc-grounded，2026-06-10 起草，待 hco）
+> Stage-I（Inc1/2a/2b）已让 SMI_DS_T 进指令流 + 指令 VLD 触发（数值 model-A）。Stage-II 把**逐拍数据流 + 4 并发
+> interleave + COND 同步 + INST_DONE outstanding** 落到 sim，**设计全部 doc-grounded（上表）**，时序忠实待 VCS。
+- **S2-D1 真 step-driven 数据流**：SMI_DS_T 成 cluster.step() 一等 tick 实体——SHIFTDN 链末端 drain 到其
+  `CRD_SHIFTDN`（129b）；单元在 step 中消费、转置、出 `DATA_OUT`(128)/`DATA_OUT_VLD` → SHIFTUP；替 2b 的
+  `apply_smi_ds_t` model-A 原子段（承接 ADR-033 `test_gather_before_scatter_ordering`）。
+- **S2-D2 4 并发 interleave**（表597 PARAM_INST_NUM=4 + para961-962）：内部 4 指令槽，每两指令前后 2 拍启动、
+  间插读取；前两指令读完即开始间插/顺序输出。`intlv_en/intlv_grp/intlv_in/intlv_out` 控间插行为。
+- **S2-D3 下游就绪同步**（para916，hco N-2）：下游 SHIFTUP SMI_IQ 等 SMI_DS_T 输出就绪，替 Stage-I 的
+  「INIT-stagger 相对序近似」（DEBT-034-TRIGGER-TIMING 闭合）。**就绪源文档允许两读法、勿写死单一通路**：
+  (a) **COND**-on-INST_RDY（para916「其他模块用 COND 等数据整理完毕」）；(b) **EXTRA_DATA 队列非空**
+  （SMI_DS_T 输出送「具 EXTRA_DATA 的 SHIFTUP SMI_IQ」para969，表593 INST_RDY 对附加数据队列 IQ 的拉高条件）。
+  逐拍取哪个待 VCS。
+- **S2-D4 INST_DONE 内部 outstanding**：单元自管 ≤4 outstanding（表597 PARAM_INST_NUM=4，非 5-CRD 路径）；
+  INST_DONE 出。**回收路径 = doc-未直证外推（hco N-1）**：文档明确 STB/LDB/DS 的 outstanding 走 CRD 下行回
+  OUTSTANDING≠0 SMI_IQ，但 **SMI_DS_T 的 INST_DONE 接哪个 SMI_IQ 的 CRD_I、是否需专属 OUTSTANDING≠0 IQ 文档留白**
+  → gated on NEEDS-USER-FACT-034-DSTDONE。S2-D4「驱动 SMI_IQ 据此发新指令」是合理外推非 doc 直证。
+- **S2-D5 真 latency k**：SMT 的 SMI_DS_T latency 从 Stage-I model-A=1 改为 doc 时序导出（含 2 拍间插启动间隔 +
+  转置 + 输出延迟），闭合 DEBT-034-LOOPS-REDUNDANT 的「单次转置忠实」（assembler 支持 per-IQ 迭代/inst 数）。
+- **验收门（待定）**：逐拍 DATA_OUT_VLD 时序断言 / 4 并发 interleave 顺序断言 / 下游就绪门控（COND 或
+  EXTRA_DATA 队列）可证伪 / e2e 仍 8/8。**升 Accepted 仍待 VCS 对齐逐拍**（设计 doc-full ≠ 时序 RTL-verified）。
+- **hco N-3（header 可选字段）**：表594 对 IQ_SMI_DS_T 的 EN_LOOPS/EN_COND/EN_DLY/EN_INC enable 位 + BITS_CODE
+  文档 V1.0 列留空 → IQ_SMI_DS_T 的 header 字段配置取**最小可行、待 RTL/逐拍确认**，勿当 doc-confirmed。
+
+### HCO 复核（doc 解析 + Stage-II 设计，agentId `ace9c99d339deb4ea`）
+**APPROVE-with-notes**。5 条 doc 解析主张全 ACCEPT（逐句对原文表585-598 + SMI 功能段）：① CRI=表595 header+CODE(表598)
+✓ ② 4 并发=intlv_grp+2拍 stagger、inst_id 在 SMI_IQ 级 ✓ ③ **CRD_DS=per-SMC DS(表585-588)≠SMI_DS_T，无 D-01 混淆** ✓
+④ COND 同步家族正确（就绪源 COND/EXTRA_DATA 二读法）✓ ⑤ **转置维度未写反**（PARAM_SMC_NUM 行×PARAM_UR_BYTE_CNT
+列 → 转 PARAM_UR_BYTE_CNT 行×PARAM_SMC_NUM 列）✓。无 BLOCK。3 NOTE 已并入 S2-D3/D4 + N-3。建议补 doc-契约回归测试
+（`test_smi_ds_t_microinst_matches_doc_table598`：固化表598 5 字段、专杀未来把 DS 表587 的 inst_id/smc_id_en 串进
+SMI_DS_T 的 D-01 回归）。`still_holds: proposed` 保持（设计 doc-full ≠ 时序 RTL-verified）。
 
 ## 实施进展（Stage-I）
 

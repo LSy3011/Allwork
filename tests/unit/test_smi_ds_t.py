@@ -203,6 +203,27 @@ class TestSmiDsTModuleSpec(unittest.TestCase):
         self.assertFalse(spec.modules["SHIFTUP"].simulation_only)
         self.assertFalse(spec.modules["FP32ADDTREE5TO1"].simulation_only)
 
+    def test_smi_ds_t_microinst_matches_doc_table598(self):
+        """hco 建议（doc-契约回归）：固化 v0.4.19 表598 = SMI_DS_T 上行微指令恰 5 字段
+        (vld/intlv_en/intlv_grp/intlv_in/intlv_out)、各 1bit、code_bits=5。**专杀 D-01 混淆回归**：
+        SMI_DS_T(SMI 中心，表596-598) 与 DS(per-SMC，表585-588) 是两模块，DS 表587 有 inst_id/smc_id_en/
+        op_type/t_dim*_cnt——这些**绝不应**串进 SMI_DS_T。"""
+        sys.path.append(str(_ROOT / "src"))
+        from api.hw_spec import HardwareSpec
+        spec = HardwareSpec.load("hw_config")
+        m = spec.modules["SMI_DS_T"]
+        self.assertEqual(m.code_bits, 5)
+        names = [f.name.lower() for f in m.code_fields]
+        self.assertEqual(names, ["valid", "intlv_en", "intlv_grp", "intlv_in", "intlv_out"],
+                         "SMI_DS_T 微指令须恰为表598 的 5 字段（vld 在 modules.yaml 名 VALID）")
+        for f in m.code_fields:
+            self.assertEqual(f.bits, 1, f"表598 字段 {f.name} 应 1bit")
+        # D-01 防混淆：DS(表587) 专属字段不得出现在 SMI_DS_T
+        forbidden = {"inst_id", "smc_id_en", "op_type", "data_type",
+                     "t_dim0_cnt", "t_dim1_cnt", "r_in_cnt", "r_out_cnt"}
+        self.assertEqual(set(names) & forbidden, set(),
+                         "SMI_DS_T 串入了 DS(表587) 字段 → D-01 模块混淆回归")
+
 
 class TestSmiDsTInstructionDriven(unittest.TestCase):
     """ADR-034 Stage-I 2a：SMI_DS_T 升 DFG 指令节点的「结构」验证
