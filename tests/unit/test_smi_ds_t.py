@@ -177,21 +177,29 @@ class TestSmiDsTClusterApply(unittest.TestCase):
 
 
 class TestSmiDsTModuleSpec(unittest.TestCase):
-    """hco note 3：守门——SMI_DS_T 是 simulation_only 且无任何 IQ 引用（防后人误配 IQ 拖进调度）。"""
+    """ADR-034 D7：SMI_DS_T 升指令驱动单元后的配置链守门（hco BLOCK：防 system_core.yaml 漏改）。"""
 
-    def test_smi_ds_t_is_simulation_only_no_iq(self):
+    def test_smi_ds_t_iq_binding(self):
+        """hco 专杀 D2 配置链漏改：get_iq_ids 非空、base id 不撞、res_to_iqs != [0]（防回退 FPADD slot）。"""
         sys.path.append(str(_ROOT / "src"))
         from api.hw_spec import HardwareSpec
         spec = HardwareSpec.load("hw_config")
         self.assertIn("SMI_DS_T", spec.modules)
         m = spec.modules["SMI_DS_T"]
-        self.assertTrue(m.simulation_only, "SMI_DS_T 必须 simulation_only=True（不进 SMT 调度）")
+        # ADR-034 D1：去 simulation_only（指令驱动真单元）
+        self.assertFalse(getattr(m, "simulation_only", False),
+                         "SMI_DS_T 升指令驱动单元后不应 simulation_only")
         self.assertEqual(m.code_bits, 5)
-        # 无任何 IQ 引用 SMI_DS_T（否则会被拖进可调度单元 → 死 module 反模式）
-        for iq_name, iq in spec.iqs.items():
-            self.assertNotEqual(getattr(iq, "module", None), "SMI_DS_T",
-                                f"IQ {iq_name} 不得引用 simulation_only 的 SMI_DS_T")
-        # 现存 18 个 compute/datapath module 仍 simulation_only=False（schema 向后兼容）
+        # D2 配置链：get_iq_ids 必返非空（漏 system_core.yaml unit_instances/iq_registry → 返 []）
+        iq_ids = spec.get_iq_ids("SMI_DS_T")
+        self.assertEqual(iq_ids, [40], f"SMI_DS_T iq id 应 = [40]，实得 {iq_ids}")
+        # base id 不与密集区冲突
+        for taken in (29, 30, 34, 35):   # SHIFTUP/UR_READ/SHIFTDN/UR_WRITE
+            self.assertNotIn(taken, iq_ids, f"SMI_DS_T base id 撞 {taken}")
+        # 有专属 IQ 引用（IQ_SMI_DS_T）
+        iq_modules = [getattr(iq, "module", None) for iq in spec.iqs.values()]
+        self.assertIn("SMI_DS_T", iq_modules, "缺 IQ_SMI_DS_T（iq_config.yaml）")
+        # 现存单元仍 simulation_only=False（schema 向后兼容）
         self.assertFalse(spec.modules["SHIFTUP"].simulation_only)
         self.assertFalse(spec.modules["FP32ADDTREE5TO1"].simulation_only)
 

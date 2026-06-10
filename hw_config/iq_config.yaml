@@ -93,3 +93,10 @@ iq_config:
     EN_LOOPS: true
     BITS_LOOPS: 10
     BITS_CODE: 129 # vld(1) + data(128) — 严格按硬件 spec 表 547
+
+  # ADR-034: SMI_DS_T 跨-SMC 转置单元的驱动 IQ（base id 40，system_core.yaml）
+  IQ_SMI_DS_T:
+    module: SMI_DS_T
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 5 # 表598: vld+intlv_en+intlv_grp+intlv_in+intlv_out 各 1bit（Stage-I 单指令 payload；CRI 框架宽 gated NEEDS-USER-FACT-034-CRI）

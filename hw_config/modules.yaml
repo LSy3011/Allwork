@@ -272,15 +272,14 @@ modules:
       - {name: broadcast, bits: 1}
       - {name: smc_id_en, bits: 5}
 
-  # ADR-033 D2：SMI_DS_T（Data Shuffle_Transpose）跨-SMC 转置中心模块（v0.4.19 表596-598）。
+  # ADR-034 D1：SMI_DS_T（Data Shuffle_Transpose）跨-SMC 转置中心模块（v0.4.19 表596-598）。
+  # **指令驱动硬件单元**（ADR-034 升级，去 ADR-033 Stage-A 的 simulation_only）：CRI 指令 + 表598 微指令
+  # + INST_DONE，和 UR/FPMUL 同构。由 IQ_SMI_DS_T 驱动（base id 40，system_core.yaml）。
   # 与 DS（表585-588，每-SMC、挂 STB↔LDB、单 SMC 内 UR→UR）是两个不同模块（分歧台账 D-01）。
-  # simulation_only：sim 端 model-A 数据变换（cluster.apply_smi_ds_t：UR read—SHIFTDN gather—
-  # SMI_DS_T transpose—SHIFTUP scatter—UR write），不进 SMT/不配 IQ/RTOVR sel（避免死 module）。
-  # CRI 指令逐字段位宽未定（表596 CRI 宽度=*）→ NEEDS-USER-FACT-033-CRI，code_fields 仅列表598 已知字段。
+  # CRI 指令逐字段位宽未定（表596 CRI 宽度=*）→ NEEDS-USER-FACT-034-CRI，code_fields 仅列表598 已知字段。
   SMI_DS_T:
     type: cross_smc_transpose
     latency: 1
-    simulation_only: true
     inputs: [CRD_SHIFTDN, CRI]       # 表596：输入数据来自 SHIFTDN gather（129b）+ CRI 指令
     outputs: [DATA_OUT]              # 表596：输出 → SHIFTUP scatter（128b）
     code_bits: 5  # 表598：vld+intlv_en+intlv_grp+intlv_in+intlv_out 各 1bit
