@@ -224,14 +224,17 @@ SMI_DS_T 的 D-01 回归）。`still_holds: proposed` 保持（设计 doc-full �
   `_tick_smi_ds_t_trigger` 重构——VLD 触发 → gather 各 SMC 列对齐 UR 行 latch 进 CRD_SHIFTDN → execute 转置 →
   **每拍 emit_step 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0**（替 2b 的 `apply_smi_ds_t` 一次性 storage-to-storage
   backdoor）。数据**真经单元 DATA_OUT 寄存器逐词流出**（standalone 验：4 行 4 拍 spread + DATA_OUT_VLD 每拍 + INST_DONE 末拍）。
-- **验收**：matmul_q_dst/_k8 e2e **8/8 bit-perfect**（逐拍 scatter 不破时序——调度 t[transpose]<t[a_read] +
-  scatter 逐词写先于 a_read 逐行读）；全量 pytest 126 pass（+3 S2-D1 单测：`test_data_out_emitted_word_by_word_with_inst_done`
+- **验收**：matmul_q_dst/_k8 e2e **8/8 bit-perfect**；全量 pytest 126 pass（+3 S2-D1 单测：`test_data_out_emitted_word_by_word_with_inst_done`
   / `test_execute_gates_on_gather_complete` / `test_multiword_row_split_k8`）+ 5 算子 e2e 8/8。
 - **诚实边界（仍 model-A / VCS-gated）**：① **gather 仍读各 SMC SRC_BANK**（SHIFTDN 链物理 drain 到 CRD_SHIFTDN
   是 chain-shift 模型、N 拍串行 drain 未建——SHIFTDN unit 是单值链移非 N 列并行 gather，真 drain 待 S2 后续/VCS）；
   ② **逐拍 emit 间隔=1 拍**（非 doc para961 的 4 并发 2 拍 stagger，那是 S2-D2 interleave）；③ scatter 起拍仍靠
   INIT-stagger 相对序（DEBT-034-TRIGGER-TIMING 未闭合，S2-D3 COND 才闭）。**S2-D1 交付 = 真单元 + 表596 接口 +
   DATA_OUT 逐词流 + gather gate + INST_DONE 信号**（结构忠实），逐拍时序忠实仍 S2-D2/D3 + VCS。
+- **⚠ 时序耦合（evaluator a7afb80 量化）**：当前 8/8 是 **scatter 逐词写(1 词/拍) 与 a_read 逐行读(1 行/拍)
+  同速率 → 同拍 0-容差对齐**的产物，**非「写一定先于读」**。反证：把 emit 间隔从 1 拍拉到 2 拍 → word0 落对、
+  word1+ 读到 stale → FAIL。即此 datapath 对任何改变 emit/read 相对速率的改动都脆——这正是 DEBT-034-TRIGGER-TIMING
+  的数值体现，**S2-D3 COND 同步闭合前不要动 emit/read 速率**。
 - **apply_smi_ds_t 保留**：作 fallback（无指令流时）+ 既有 unit 测试（TestSmiDsTClusterApply）数值核，未删。
 
 ## 实施进展（Stage-I）
