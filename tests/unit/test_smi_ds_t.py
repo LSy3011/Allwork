@@ -323,6 +323,7 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
                                    smi_ds_t_iq=None, smi_ds_t_cfg=None,
                                    smi_ds_t_fired=False, cycle_count=0)
         fc.apply_smi_ds_t = lambda cfg: SystemCluster.apply_smi_ds_t(fc, cfg)
+        fc._audit_smi_ds_t = lambda *a, **k: None   # S2-D1b：测试不关心 datapath 日志
         return fc
 
     def _write_hex(self, spec, vld):
@@ -377,6 +378,49 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
                 # vld=0：apply 未被调用 → 哨兵原样保留（非平凡：若误调 apply 会被覆写）
                 self.assertEqual(fc.kernels[0].ur_bank.storage[0][0], SENTINEL,
                                  "VLD=0 不应触发转置（dst bank0 哨兵应原样保留）")
+
+    def test_smi_ds_t_audit_log_shape(self):
+        """ADR-034 S2-D1b（hco 守门）：SMI_DS_T datapath UR 端点事件归属正确——
+        gather=UR-READ bank4 / scatter=UR-WRITE bank0，带 Port+SMC_ID，**不冒名 Unit:SMI_DS_T**
+        （表596 SMI_DS_T 无 UR 端口，VCS diff 须按真访存单元对齐）。"""
+        self._paths()
+        import io
+        import contextlib
+        from smc_simulator.system.cluster import SystemCluster
+        from smc_simulator.units.smi_ds_t_unit import word_from_fp32_lanes
+        spec = self._spec()
+        K, M = 4, 4
+        X = [[float(m * 10 + k + 1) for k in range(K)] for m in range(M)]
+        cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+               "gather_smc_cnt": K, "lanes": M}
+        fc = self._fake_cluster(spec)
+        fc._audit_smi_ds_t = lambda *a: SystemCluster._audit_smi_ds_t(fc, *a)   # 用真 audit
+        for s in range(K):
+            fc.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes([X[m][s] for m in range(M)])
+        hexpath = self._write_hex(spec, 1)
+        SystemCluster.setup_smi_ds_t_trigger(fc, hexpath, cfg)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            for c in range(6):
+                fc.cycle_count = c
+                SystemCluster._tick_smi_ds_t_trigger(fc)
+        lines = [l for l in buf.getvalue().splitlines() if "[AUDIT-DATA]" in l]
+        gather = [l for l in lines if "Tag:DST-GATHER" in l]
+        scatter = [l for l in lines if "Tag:DST-SCATTER" in l]
+        self.assertEqual(len(gather), K, "每 gather SMC 一条 UR-READ")
+        self.assertEqual(len(scatter), M, "每转置行一条 UR-WRITE")
+        for l in gather:
+            self.assertIn("Unit:UR-READ", l)
+            self.assertIn("Bank:4", l)
+            self.assertIn("Port:", l)
+            self.assertIn("SMC_ID:", l)
+        for l in scatter:
+            self.assertIn("Unit:UR-WRITE", l)
+            self.assertIn("Bank:0", l)
+            self.assertIn("Port:", l)
+        # hco BLOCK：UR 端点绝不冒名 Unit:SMI_DS_T（表596 无 UR 端口）
+        self.assertFalse(any("Unit:SMI_DS_T" in l for l in lines),
+                         "UR 端点不应冒名 Unit:SMI_DS_T（VCS diff 按真访存单元对齐）")
 
     def _spec(self):
         self._paths()

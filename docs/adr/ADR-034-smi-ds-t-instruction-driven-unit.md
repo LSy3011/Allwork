@@ -237,6 +237,33 @@ SMI_DS_T 的 D-01 回归）。`still_holds: proposed` 保持（设计 doc-full �
   的数值体现，**S2-D3 COND 同步闭合前不要动 emit/read 速率**。
 - **apply_smi_ds_t 保留**：作 fallback（无指令流时）+ 既有 unit 测试（TestSmiDsTClusterApply）数值核，未删。
 
+### Increment S2-D1b ✅ DONE（2026-06-10，hco a681b91 REJECT→订正→re-review）—— gather/scatter UR 端点可观测性（sim-VCS diff）
+- **动机（user）**：现 SMI_DS_T 的 gather（读 bank4）/ scatter（写 bank0）是 cluster 后门直读/直写 storage——
+  **sim log 里既无 bank4 读、也无 bank0 写**（96 条 UR-WRITE 全是 bank5 输出）。导致「bank0 初始空却被 a_read 读出
+  数据」在 log 上无法溯源，**无法与 VCS 波形逐事件 diff**。
+- **做法**：`cluster.py` `_audit_smi_ds_t` 把两个 **UR 端点**打成 `AUDIT-DATA`（格式同 `ur_bank.py`，带 `Port`）：
+  - `Unit:UR-READ Tag:DST-GATHER Port:0 Bank:{src} Addr V0` —— 每 SMC 一条；
+  - `Unit:UR-WRITE Tag:DST-SCATTER Port:0 Bank:{dst} Addr V0` —— 每行一条；
+  - 转置内部用**非 AUDIT-DATA** marker（`logger.info ... TRANSPOSE shape`，diff 脚本天然过滤，不冒充数据事件）。
+- **hco 订正（REJECT→fix）**：原标 `Unit:SMI_DS_T` **错**——表596 SMI_DS_T 仅 `CRD_SHIFTDN` 输入、**无 UR 端口**；
+  bank4 读在 RTL = **SMC_s 的 UR-read（占其 R 端口）**、bank0 写 = **SMC_0 的 UR-write（占 W 端口 + 参与 bank 冲突）**。
+  把它们冒名 SMI_DS_T 会让 VCS diff 的 Unit/Port mismatch、并掩盖 UR 端口占用与 ADR-008 bank 冲突归属。**已改为
+  UR-READ/UR-WRITE 正确归属**（Tag=DST-GATHER/DST-SCATTER 区分 compute UR；Port=model-A 占位，RTL 端口由调度定）。
+- **效果**：log 现含 bank0 写（Cyc3 `UR-WRITE DST-SCATTER bank0@0 = X[0,:]`）**先于** a_read 读（Cyc4 `bank0@0 = X[0,:]`），
+  **写-读因果在 log 可见**，可与 VCS diff。数据流不变（仍走 SmiDsTUnit DATA_OUT，8/8 不破，pytest 131 pass）。
+- **可 diff 边界（hco 收紧）**：✅ **可 diff** = UR 端点（bank4 读 / bank0 写）的**存在性 + SMC_ID + bank/addr/value**。
+  ❌ **不可 diff** =（a）**绝对 Cyc**（model-A 占位）；（b）**搬运链事件数/时序**：SHIFTDN N 拍串行 drain + SHIFTUP +
+  interleave 2 拍 stagger（表598 intlv_*/para961）**全未建模**（debt），sim 把 gather 压成一把读 gc 条；（c）**写-读相对序**
+  本身是 model-A artifact（emit 间隔 1→2 拍即破，DEBT-034-TRIGGER-TIMING），非 RTL 结构契约。
+  - ⚠ **hco re-review note**：(c) 的具体表现——model-A 下 scatter 逐词写 bank0 与真 a_read 读 bank0 会**同拍同 bank
+    R+W**（如 Cyc4 SMC_0 `DST-SCATTER bank0@1` 写 + `READ bank0@0` 读）。这是 model-A artifact，**真 RTL 不允许
+    （ADR-008 同 bank 同 cycle R-W 全禁）**。VCS diff harness **必须把 DST-* 端点事件豁免出 ADR-008 冲突核算**，勿拿这个
+    伪 R+W 画面误判 RTL 违反 bank 冲突。
+  - **Port 字段语义**：必须与 `Unit` 联合解读——`UR-READ.Port=R 端口`、`UR-WRITE.Port=W 端口`（物理不同资源）。
+    DST-GATHER/DST-SCATTER 均标 `Port:0` 但分指 R0/W0；diff 按 `(Unit, Port)` 元组对齐，勿按裸 `Port:0` 聚合。
+- **守门**：`test_smi_ds_t_audit_log_shape`（hco 建议）固化 log 契约——UR 端点 Unit∈{UR-READ,UR-WRITE}+带 Port+SMC_ID、
+  TRANSPOSE 不进 AUDIT-DATA、bank0 写 Cyc < a_read 读 Cyc。
+
 ## 实施进展（Stage-I）
 
 ### Increment 1 ✅ DONE（2026-06-10，commit `571f48b`）—— 配置链（hco D2 BLOCK）

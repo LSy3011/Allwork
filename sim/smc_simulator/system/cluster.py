@@ -213,12 +213,23 @@ class SystemCluster:
         self.smi_ds_t_done = False
         self.smi_ds_t_fired = False
 
+    def _audit_smi_ds_t(self, unit: str, tag: str, smc_id: int, port: int,
+                        bank: int, addr: int, val: int):
+        """ADR-034 S2-D1b（hco a681b91 订正）：把 SMI_DS_T datapath 的 **UR 端点**（gather 源读 / scatter 目的写）
+        打成 AUDIT-DATA，**Unit 归属 = 实际访存单元 UR-READ/UR-WRITE**（表596：SMI_DS_T 仅 CRD_SHIFTDN 输入、
+        无 UR 端口；bank4 读 = SMC_s 的 UR-read 占其 R 端口、bank0 写 = SMC_0 的 UR-write 占 W 端口+参与 bank 冲突）。
+        Tag 标 DST-GATHER/DST-SCATTER 区分于 compute UR 访存；Port 为 model-A 占位（RTL 端口由调度定）。
+        SHIFTDN/SHIFTUP 搬运段未建模（debt），故只发 UR 端点事件。使 sim log 可与 VCS **UR 端点逐事件 diff**。"""
+        print(f">>> [AUDIT-DATA] SMC_ID:{smc_id} Cyc:{self.cycle_count} Unit:{unit} "
+              f"Tag:{tag} Port:{port} Bank:{bank} Addr:{addr} V0:{val & ((1 << 128) - 1):032x}", flush=True)
+
     def _tick_smi_ds_t_trigger(self):
         """S2-D1 真 step-driven：kernels step 前驱动 SMI_DS_T 单元。
         - 未触发：evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) → 经 SHIFTDN gather 各 SMC 列对齐
           UR 行 latch 进单元 CRD_SHIFTDN，execute() 转置（gather-before-scatter gate）。
         - 已触发未完成：每拍 emit_step() 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0；INST_DONE 即完成。
-        调度保证 t[transpose] < t[a_read]，scatter 逐词写先于 a_read 逐行读。"""
+        调度保证 t[transpose] < t[a_read]，scatter 逐词写先于 a_read 逐行读。
+        S2-D1b：gather/scatter 端点 emit AUDIT-DATA 事件（sim-VCS diff 可观测）。"""
         unit = self.smi_ds_t_unit
         if unit is None or self.smi_ds_t_done:
             return
@@ -233,10 +244,16 @@ class SystemCluster:
             # codec 随精度（element_bits）：fp16 16-bit lane / fp32 32-bit lane（ADR-035 D2）。
             sb, sa = int(cfg["src_bank"]), int(cfg["src_addr"])
             gc, ln = int(cfg["gather_smc_cnt"]), int(cfg["lanes"])
-            cols = [unit._lanes_from_word(self.kernels[s].ur_bank.storage[sb][sa], ln)
-                    for s in range(gc)]
+            cols = []
+            for s in range(gc):
+                word = self.kernels[s].ur_bank.storage[sb][sa]
+                # S2-D1b（hco）：bank4 读 = SMC_s 的 UR-read（占其 R 端口）；SHIFTDN 下行搬运未建模(debt)
+                self._audit_smi_ds_t("UR-READ", "DST-GATHER", s, 0, sb, sa, word)
+                cols.append(unit._lanes_from_word(word, ln))
             unit.load_tile(cols)
             unit.execute()                 # 转置 → DATA_OUT 队列（未到齐抛错）
+            # 转置内部无对外可观测信号（表596 仅 DATA_OUT/INST_DONE）→ 非数据 marker（不进 AUDIT-DATA，diff 脚本天然过滤）
+            self.logger.info(f"[SMI_DS_T] Cyc{self.cycle_count} TRANSPOSE shape {gc}x{ln}")
             self.smi_ds_t_started = True
             self.smi_ds_t_fired = True
             iq.tick()
@@ -248,6 +265,8 @@ class SystemCluster:
             off, word = emit
             db, da = int(cfg["dst_bank"]), int(cfg["dst_addr"])
             self.kernels[0].ur_bank.storage[db][da + off] = word
+            # S2-D1b（hco）：bank0 写 = SMC_0 的 UR-write（占 W 端口、参与 bank 冲突）；SHIFTUP 上游搬运未建模(debt)
+            self._audit_smi_ds_t("UR-WRITE", "DST-SCATTER", 0, 0, db, da + off, word)
         if unit.inst_done:
             self.smi_ds_t_done = True
             self.logger.info(f"[SMI_DS_T] INST_DONE at cycle {self.cycle_count}")
