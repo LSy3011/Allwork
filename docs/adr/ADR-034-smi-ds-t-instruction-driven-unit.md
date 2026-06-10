@@ -181,6 +181,30 @@ ADR-033 Stage-A/A' 的**转置数值正确性 + datapath 拓扑结论保留有�
   应 cluster 级触发一次，非每 kernel）；③ iq_name 解析链对 id 40 的处理未验。
 - **D5 Stage-I caveat**：Increment 2 可拆 2a（DFG 节点 + emit + SMT，sim 数值暂留 run-前，验「结构」）+ 2b（sim 指令触发，验「指令驱动数值」）。
 
+### Increment 2a ✅ DONE（2026-06-10）—— DFG 指令节点 + emit + SMT 依赖边（验「结构」）
+- **DFG**（`matmul_op.py` 新增 `_inject_smi_ds_t_transpose` + `ManualMatmulQDsTOperator.get_dfg` override
+  + `ManualMatmulQDsTK8Operator.get_dfg` 追加）：注入 `ds_gather(SHIFTDN,iq34) → ds_transpose(SMI_DS_T,iq40)`
+  两节点，令 `a_read` 依赖 `ds_transpose`。**复用现有 broadcast `shiftup_a_read` 作 scatter**（不另建第二
+  SHIFTUP，避开 sim 单 shiftup 实例 + multi-broadcast 限制）。transpose-path 单次 fire（`inner_loops=0`，
+  解 known-risk ① M-loop 错配）。
+- **SMT**：`UCodeSynthesizer.solve_with_units` II=1 SAT，调度 `ds_gather(t=0) < ds_transpose(t=1) <
+  a_read(t=2) < shiftup_a_read(t=3)`——调度器看见 **gather→transpose→scatter** 依赖边（D4 / ADR-033 B-BLOCK-1 (a)）。
+  res_to_iqs 自动映射 SMI_DS_T→[40]、SHIFTDN→[34]，无回退 slot 0。
+- **emit**：`iq_smi-ds-t-0.hex` 真产出（`get_iq_name(40,"SMI_DS_T")="smi_ds_t-0"`，emitter bucket → hex）；
+  5bit 窄微指令 body 端序经 BitPacker 验证（VALID@bit0、VLD header@bit45、总宽 46bit）。
+- **sim（2a 边界，D5 Stage-I caveat）**：数值仍 100% 由 `cluster.apply_smi_ds_t`（run-前 model-A）提供——
+  `smi-ds-t-0` 经 `load_program` 无同名 IQ → **静默 skip**（不扰动）；`ds_gather`(SHIFTDN) 单次 fire +
+  smc_id_en 门控、不写 compute 输入 bank0 → 经实测不扰动。**SMT 依赖边（结构）与 sim 终值（model-A）是
+  两条独立验证**，step-driven 真数据流（SHIFTDN drain→CRD_SHIFTDN→SMI_DS_T tick）是 **2b/Stage-II**。
+- **验收**：matmul_q_dst / matmul_q_dst_k8 经指令流 e2e **8/8 bit-perfect**（数值不变，cycle 69→71 = prologue 2 拍）；
+  matmul_q（无 SMI_DS_T 节点）不受影响（死 module 反向检查）；全量 pytest 121 pass（+3 D7 结构性单测）+ 5 算子 e2e 8/8。
+- **D7 门覆盖**：`test_smi_ds_t_in_dfg_between_shiftdn_shiftup`（拓扑）/ `test_smt_sees_gather_transpose_scatter_dep`
+  （SMT 依赖边）/ `test_smi_ds_t_emitted_microinst_bit_layer`（emit 比特层 + 反证）已落 `tests/unit/test_smi_ds_t.py`。
+  `test_matmul_via_instruction_driven_smi_ds_t`（e2e 反证 vld=0→FAIL）留 2b（需 sim 真消费 SMI_DS_T 指令才有意义）。
+- **未做（2b）**：sim 端加 `smi_ds_t` IQ + 解码器 + 由 vld 触发 SmiDsTUnit 转置核（替 apply_smi_ds_t），
+  此时 emit 命名需对齐（`get_iq_name` whitelist 加 SMI_DS_T → "smi_ds_t" 才能 load_program 匹配；
+  现 "smi-ds-t-0" 被 skip 是 2a 的有意设计）。known-risk ②（cluster 级单次触发非每 kernel）/ ③ 在 2b 处理。
+
 ## HCO 复核（agentId `a65bb21037896d94e`）
 **APPROVE-with-notes**。核心主张（SMI_DS_T 是指令驱动单元、应进指令流非 simulation_only）**成立**：表596（CRI+DATA_OUT+INST_DONE）
 / 表598（微指令）/ 表597（PARAM_INST_NUM=4）与 UR/FPMUL 同构，位 SMI 微架构层。Stage-I/II 切分诚实，Stage-I 只用

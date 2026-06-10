@@ -80,6 +80,66 @@ def _inject_shiftup_broadcast(ops: List[Any], broadcast_names: set, spec: Any) -
     return new_ops
 
 
+def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -> List[Any]:
+    """ADR-034 D3/D4 Stage-I 2a：把跨-SMC 转置前缀作 DFG 真节点注入——
+    `ds_gather(SHIFTDN) → ds_transpose(SMI_DS_T) → [现有 broadcast SHIFTUP 作 scatter] → a_read`。
+
+    令 broadcast 激活读 `a_read` 依赖 `ds_transpose`，于是 SMT 看见 **scatter(广播 SHIFTUP)
+    在 transpose 之后、transpose 在 gather 之后** 的依赖边（ADR-033 B-BLOCK-1 (a) 路径）。
+    复用现有 `shiftup_a_read`（广播）作 scatter，**不另建第二个 SHIFTUP**（避开 sim 单 shiftup
+    实例 + multi-broadcast 限制）。
+
+    **2a 边界（hco D5 caveat）**：sim 数值仍由 `cluster.apply_smi_ds_t`（run 前 model-A）提供——
+    `ds_transpose`(iq40) 经 `get_iq_name`→"smi_ds_t-0"，sim 无同名 IQ → `load_program` 跳过（不扰动）；
+    `ds_gather`(SHIFTDN) 单次 fire、smc_id_en 门控 gather_cnt，不写 compute 输入 bank0。本注入只验「结构」
+    （DFG 拓扑 + SMT 依赖边 + emit 表598 微指令进流），step-driven 真数据流是 2b/Stage-II。"""
+    from ir.mir.mir_op import MIROp
+
+    smc_num = 32
+    if spec is not None and hasattr(spec, "params"):
+        smc_num = getattr(spec.params, "PARAM_SMC_NUM", 32)
+    gather_cnt = int(cfg.get("gather_smc_cnt", smc_num))
+    shiftdn_iq, smi_ds_t_iq = 34, 40
+    if spec is not None and hasattr(spec, "config"):
+        reg = spec.config.get("iq_registry", {})
+        shiftdn_iq = reg.get("SHIFTDN", 34)
+        smi_ds_t_iq = reg.get("SMI_DS_T", 40)
+
+    a_read = next((o for o in ops
+                   if o.op_type.upper() == "UR_READ"
+                   and o.metadata.get("meta_name") == "a"
+                   and o.metadata.get("role") == "input"), None)
+    if a_read is None:
+        return ops
+
+    # 单次 prologue 元数据（known-risk ①：转置一次产 M 行，非随 a_read 的 M-loop 复发）
+    prologue = {"shape": [1], "inner_loops": 0, "outer_loops": 0,
+                "inner_inc": 0, "outer_inc": 0}
+    ds_gather = MIROp(
+        op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather",
+        metadata={
+            "depends_on": [], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 0,
+            "math": "smi_ds_t_gather(cross-smc columns)", **prologue,
+        },
+    )
+    ds_transpose = MIROp(
+        op_type="SMI_DS_T", logic_cycle=0, trace_id="ds_transpose",
+        metadata={
+            "depends_on": ["ds_gather"], "iq_type": RT.SMI_DS_T, "iq_id": smi_ds_t_iq,
+            "VALID": 1, "intlv_en": 0, "intlv_grp": 0, "intlv_in": 0, "intlv_out": 0,
+            "math": "smi_ds_t_transpose(gather_cnt x lanes)", **prologue,
+        },
+    )
+    # scatter-after-transpose：现有 broadcast shiftup 消费 a_read → 令 a_read 依赖转置
+    deps = list(a_read.metadata.get("depends_on", []))
+    if "ds_transpose" not in deps:
+        deps.append("ds_transpose")
+    a_read.metadata["depends_on"] = deps
+
+    return list(ops) + [ds_gather, ds_transpose]
+
+
 class ManualMatmulParallelNOperator(BaseOperator):
     """ADR-025：8-SMC N 维 matmul（output-stationary）。
     广播激活向量 a（SHIFTUP，单源）+ 每 SMC 与本地权重列 b_n 点积
@@ -305,6 +365,12 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
                 "dst_bank": 0, "dst_addr": 0,
                 "gather_smc_cnt": self.K, "lanes": self.M}
 
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        # ADR-034 Stage-I 2a：在 matmul_q 计算 DFG 前注入 SMI_DS_T 转置指令节点
+        # （ds_gather→ds_transpose→现有 broadcast SHIFTUP scatter）。数值仍走 apply_smi_ds_t。
+        ops = super().get_dfg(spec)
+        return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
+
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
                             vector_lanes: int, spec: Any = None):
         a = input_data["a"]
@@ -396,6 +462,8 @@ class ManualMatmulQDsTK8Operator(ManualMatmulParallelNOperator):
             op.metadata.update({"shape": [self.K], "inner_loops": inner_loops, "outer_loops": 0,
                                 "inner_inc": 1, "outer_inc": 0})
         ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
+        # ADR-034 Stage-I 2a：注入 SMI_DS_T 转置指令节点（K8 全 gather 8 SMC）
+        ops = _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
         return ops
 
 

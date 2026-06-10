@@ -204,5 +204,80 @@ class TestSmiDsTModuleSpec(unittest.TestCase):
         self.assertFalse(spec.modules["FP32ADDTREE5TO1"].simulation_only)
 
 
+class TestSmiDsTInstructionDriven(unittest.TestCase):
+    """ADR-034 Stage-I 2a：SMI_DS_T 升 DFG 指令节点的「结构」验证
+    （DFG 拓扑 + SMT 依赖边 + emit 5bit 窄微指令比特层）。数值仍由 apply_smi_ds_t（model-A）提供。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "sim", _ROOT / "verification_v2"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _spec(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        return HardwareSpec.load("hw_config")
+
+    def _dfg(self):
+        self._paths()
+        from verification_v2.ops.matmul_op import ManualMatmulQDsTOperator
+        spec = self._spec()
+        return ManualMatmulQDsTOperator().get_dfg(spec=spec), spec
+
+    def test_smi_ds_t_in_dfg_between_shiftdn_shiftup(self):
+        """拓扑：SMI_DS_T 输入边来自 SHIFTDN(gather)，下游经 a_read 到达 broadcast SHIFTUP(scatter)。"""
+        ops, _ = self._dfg()
+        by_id = {o.trace_id: o for o in ops}
+        ds_t = next((o for o in ops if o.op_type.upper() == "SMI_DS_T"), None)
+        self.assertIsNotNone(ds_t, "DFG 缺 SMI_DS_T 节点")
+        # 输入边来自 SHIFTDN
+        deps = ds_t.metadata.get("depends_on", [])
+        self.assertTrue(any(by_id[d].op_type.upper() == "SHIFTDN" for d in deps),
+                        f"SMI_DS_T 输入边非 SHIFTDN: {deps}")
+        # 下游：a_read 依赖 ds_transpose；broadcast SHIFTUP(scatter) 依赖 a_read
+        a_read = next(o for o in ops if o.op_type.upper() == "UR_READ"
+                      and o.metadata.get("meta_name") == "a")
+        self.assertIn(ds_t.trace_id, a_read.metadata.get("depends_on", []),
+                      "a_read 应依赖 ds_transpose（scatter-after-transpose）")
+        shiftup = next((o for o in ops if o.op_type.upper() == "SHIFTUP"), None)
+        self.assertIsNotNone(shiftup, "缺 broadcast SHIFTUP（作 scatter）")
+        self.assertIn(a_read.trace_id, shiftup.metadata.get("depends_on", []))
+
+    def test_smt_sees_gather_transpose_scatter_dep(self):
+        """SMT 依赖边（专杀 model-A 静默乱序）：t[scatter] > t[transpose] > t[gather]。"""
+        self._paths()
+        from synthesis.ucode_solver import UCodeSynthesizer
+        ops, spec = self._dfg()
+        result = UCodeSynthesizer(spec).solve_with_units(ops, MII=1, MAX_II=64)
+        self.assertTrue(result, "Synthesis failed（新依赖边破坏 SAT？）")
+        sched = result["schedule"]
+        gather = next(o for o in ops if o.op_type.upper() == "SHIFTDN")
+        transpose = next(o for o in ops if o.op_type.upper() == "SMI_DS_T")
+        scatter = next(o for o in ops if o.op_type.upper() == "SHIFTUP")
+        self.assertLess(sched[gather.trace_id], sched[transpose.trace_id],
+                        "gather(SHIFTDN) 应早于 transpose(SMI_DS_T)")
+        self.assertLess(sched[transpose.trace_id], sched[scatter.trace_id],
+                        "transpose(SMI_DS_T) 应早于 scatter(SHIFTUP)")
+
+    def test_smi_ds_t_emitted_microinst_bit_layer(self):
+        """emit 比特层（D7：5bit 窄微指令端序/对齐，端序路径未必测过）：
+        VALID@bit0、VLD header@bit45、总宽 46bit。反证：intlv_en=1 → body bit1 置位。"""
+        self._paths()
+        from driver.packer import BitPacker
+        spec = self._spec()
+        payload0 = {"VALID": 1, "intlv_en": 0, "intlv_grp": 0, "intlv_in": 0, "intlv_out": 0}
+        cap = BitPacker.pack_capsule(spec, "SMI_DS_T", payload0, is_body=True, VLD=1)
+        self.assertEqual(cap & 0b11111, 0b00001, "body 5bit：VALID@bit0 应为 1，其余 0")
+        self.assertEqual((cap >> 45) & 1, 1, "header VLD(bit40) 经 body_bits=5 左移到 bit45")
+        self.assertEqual(BitPacker.get_unit_bits(spec, "SMI_DS_T"), 46, "总宽 = 41 header + 5 body")
+        # 反证：intlv_en 置位 → body bit1
+        payload1 = dict(payload0, intlv_en=1)
+        cap2 = BitPacker.pack_capsule(spec, "SMI_DS_T", payload1, is_body=True, VLD=1)
+        self.assertEqual(cap2 & 0b11111, 0b00011, "intlv_en@bit1 应改变 body")
+        self.assertNotEqual(cap, cap2)
+
+
 if __name__ == "__main__":
     unittest.main()
