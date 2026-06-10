@@ -85,8 +85,10 @@ builds_on: ADR-032, ADR-033, ADR-034, ADR-025
 - `test_fp16_word_codec_roundtrip`：`word_from_fp16_lanes`/`fp16_lanes_from_word` 8 lane × 16-bit 往返一致
   （含负数 + **跨 byte 错位非对称值**如 0x3C00/0x4000 相邻，hco 建议——验不串字节）；**反证**：用 fp32 codec
   （4 lane）解 fp16 词 → lane 数/值错。
-- `test_smi_ds_t_fp16_no_split_invariant`（**hco BLOCK-1 不变式门**）：lanes=1 时每 fp16 元素 2 byte 连续占 1
-  完整 lane、8 元素恰 1 词 16 byte 不跨 128b 边界（byte 转置 ≡ element 转置的前提，专杀未来 lanes>1 静默踩雷）。
+- `test_smi_ds_t_fp16_no_split_invariant`（**hco BLOCK-1 / sim element-packing 不变式门**）：每 fp16 元素占独立
+  2-byte 对齐 lane、抠掉任一 lane 仅清零该元素其余不变（无重叠/串字节）。**evaluator caveat 订正**：sim 纯 element
+  粒度（`transpose_tile` 不做 byte shuffle），此门**只锁 sim 打包正确、不验 RTL byte 转置**；真实 byte-shuffle
+  （及 lanes>1 的 byte≡element 等价）VCS-gated（DEBT-035-GRANULARITY / NEEDS-USER-FACT-035-MULTILANE）。
 - `test_smi_ds_t_fp16_transpose`：SmiDsTUnit(element_bits=16) gather 8 SMC × 1 fp16 → 转置 1×8 →
   DATA_OUT 1 词 8 lane = 行对齐激活（非对称值杜绝对称巧合）。
 - `test_smi_ds_t_codec_param_consistency`（**hco BLOCK-2 门**）：`SmiDsTUnit(element_bits=16, word_lanes=4)`

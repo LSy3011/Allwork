@@ -481,18 +481,27 @@ class TestSmiDsTFp16(unittest.TestCase):
         self.assertNotAlmostEqual(float(wrong[0]), float(vals[0]), places=2)
 
     def test_smi_ds_t_fp16_no_split_invariant(self):
-        """hco BLOCK-1 不变式：lanes=1 时每 fp16 元素 2 byte 连续占 1 lane、8 元素恰 1 词 16 byte
-        不跨 128b 边界（byte 转置 ≡ element 转置的前提）。"""
+        """hco BLOCK-1（**sim element-packing 不变式**——非 RTL byte-shuffle，后者 VCS-gated）：
+        每 fp16 元素占独立 2-byte 对齐 lane、相邻元素不串字节。**专杀 codec 把元素拆/叠的回归**
+        （evaluator caveat：sim 纯 element 粒度，不验 RTL byte 转置；本门只锁 sim 打包正确）。"""
         self._paths()
-        from smc_simulator.units.smi_ds_t_unit import word_from_fp16_lanes
+        from smc_simulator.units.smi_ds_t_unit import word_from_fp16_lanes, fp16_lanes_from_word
         import numpy as np
         vals = [np.float16(s + 1) for s in range(8)]
         w = word_from_fp16_lanes(vals)
-        self.assertLess(w, 1 << 128, "8 fp16 元素须恰占 1 个 128b 词，不跨边界")
-        # 每元素占据独立 16-bit lane（lane l 在 bit[l*16]），互不重叠
+        # 8 元素 = 16 byte = 1 个 128b 词（每元素 2-byte 对齐，结构常量记录不变式）
+        self.assertEqual(8 * 16, 128)
+        # 非平凡：抠掉任一 lane 的 16-bit → 仅该元素清零、其余 7 lane 解码不变（证无重叠/串字节）
         for l in range(8):
-            lane_bits = (w >> (l * 16)) & 0xFFFF
-            self.assertEqual(struct_half(lane_bits), float(vals[l]))
+            lane = (w >> (l * 16)) & 0xFFFF
+            self.assertEqual(struct_half(lane), float(vals[l]))
+            w_masked = w & ~(0xFFFF << (l * 16))
+            rest = fp16_lanes_from_word(w_masked, 8)
+            self.assertEqual(float(rest[l]), 0.0, f"抠 lane{l} 应清零该元素")
+            for j in range(8):
+                if j != l:
+                    self.assertAlmostEqual(float(rest[j]), float(vals[j]), places=3,
+                                           msg=f"抠 lane{l} 不应影响 lane{j}（无串字节）")
 
     def test_smi_ds_t_codec_param_consistency(self):
         """hco BLOCK-2：element_bits 与 word_lanes 矛盾 → 构造器 assert 抛错。"""
