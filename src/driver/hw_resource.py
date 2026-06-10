@@ -22,6 +22,7 @@ class ResourceType(Enum):
     FP32ADDTREE8TO1 = "FP32ADDTREE8TO1"
     SHIFTUP = "SHIFTUP"
     SHIFTDN = "SHIFTDN"
+    SMI_DS_T = "SMI_DS_T"   # ADR-034: 跨-SMC 转置（SMI 中心单实例，指令驱动）
 
 class PortSlot(IntEnum):
     """

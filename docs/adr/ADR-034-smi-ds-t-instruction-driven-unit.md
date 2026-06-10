@@ -159,6 +159,28 @@ ADR-033 Stage-A/A' 的**转置数值正确性 + datapath 拓扑结论保留有�
 3. **NEEDS-USER-FACT-034-DSTDONE**（承接 033-DSTDONE）：INST_DONE 回收路径——不在 [seq1003] 的 5 个
    outstanding SMI_IQ 列表内，接哪个 SMI-IS？
 
+## 实施进展（Stage-I）
+
+### Increment 1 ✅ DONE（2026-06-10，commit `571f48b`）—— 配置链（hco D2 BLOCK）
+- modules.yaml 去 `simulation_only`；三处 IQ 配置：iq_config `IQ_SMI_DS_T`（BITS_CODE=5）+ unit_instances `SMI_DS_T:1`
+  + iq_registry `SMI_DS_T:40`。`get_iq_ids("SMI_DS_T")=[40]`（漏改则返 `[]` 回退 slot 0 撞 FPADD）。
+- ⚠ **SSoT 修正**：hw_spec.py:163 master 文件存在时 `system_core` 取 `aiacc_v2.4_master.yaml` 嵌入版，
+  `specs/system/system_core.yaml` 是 **fallback（被忽略）**。hco 原指 system_core.yaml 实为 fallback；真 SSoT 是 master。两处都改（master live + fallback 同步）。
+- `test_smi_ds_t_iq_binding` 守门（替原 simulation_only 测试）。回归：5 算子 e2e 8/8 + 全量 pytest 118 pass。
+- 现状：SMI_DS_T 已注册为指令驱动真单元，但**尚无 op 引用它**（算子仍走 sim_config apply_smi_ds_t 捷径）。
+
+### Increment 2 设计（待实施，已侦查可行性）—— DFG 节点 + emit + SMT + sim 触发
+- `ResourceType.SMI_DS_T` 已加（hw_resource.py，commit 见 Increment 1.5）。**SMT 侧已侦查可行**：`res_to_iqs`
+  从 `iq_registry.keys()` 建（ucode_solver.py:36）→ SMI_DS_T 自动得 `[40]`；`_get_resource_type("SMI_DS_T")="SMI_DS_T"`；
+  latency `delays.get("SMI_DS_T",1)=1`。故 SMI_DS_T op 进 DFG 后 SMT 应能调度到 iq 40、无冲突。
+- **待做**：(1) 算子 get_dfg 加 SMI_DS_T op（a_read depends_on 它，转置先于广播读 bank0）；
+  (2) emit 验证表598 微指令进流（payload_factory 从 modules.yaml code_fields 建；需核 iq_id 40 → iq_name → resolve_iq_type 链）；
+  (3) sim 指令触发（cluster 检测 SMI_DS_T IQ fire → 触发 model-A 转置，替 run-前 apply_smi_ds_t）。
+- **已知风险**（Increment 2 主要难点）：① **单次触发的 SMI_DS_T op vs a_read 的 M-loop 结构错配**（SMI_DS_T 转置一次产 M 行、a_read 循环 M 次读）——
+  需作 prologue 或 inner_inc=0 idempotent；② **SMI 中心单实例在 N-kernel model-A sim 的触发**（SMI_DS_T 非 per-SMC，
+  应 cluster 级触发一次，非每 kernel）；③ iq_name 解析链对 id 40 的处理未验。
+- **D5 Stage-I caveat**：Increment 2 可拆 2a（DFG 节点 + emit + SMT，sim 数值暂留 run-前，验「结构」）+ 2b（sim 指令触发，验「指令驱动数值」）。
+
 ## HCO 复核（agentId `a65bb21037896d94e`）
 **APPROVE-with-notes**。核心主张（SMI_DS_T 是指令驱动单元、应进指令流非 simulation_only）**成立**：表596（CRI+DATA_OUT+INST_DONE）
 / 表598（微指令）/ 表597（PARAM_INST_NUM=4）与 UR/FPMUL 同构，位 SMI 微架构层。Stage-I/II 切分诚实，Stage-I 只用
