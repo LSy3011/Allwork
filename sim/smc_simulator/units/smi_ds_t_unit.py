@@ -74,12 +74,15 @@ class SmiDsTUnit:
     transpose() 在 gather 未到齐时抛错（gate: gather-before-scatter ordering）。
     """
 
-    def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4, element_bits: int = 32):
+    def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4, element_bits: int = 32,
+                 latency: int = 0):
         """smc_num = PARAM_IN_LINE_NUM = PARAM_SMC_NUM；
         lanes = PARAM_IN_LINE_BYTE_CNT / ELEMENT_BYTE_NUM（fp32: 16/4 = 4，即每 UR 行的元素数）；
         element_bits = 元素位宽（fp32=32 / fp16=16，ADR-035 D2 codec dispatch）；
         word_lanes = 每个 128-bit DATA_OUT 词的元素数（= 128//element_bits：fp32=4 / fp16=8）——
-        表596 DATA_OUT=128b，一个转置行（smc_num 元素）拆 ceil(smc_num/word_lanes) 个词发出（para959）。"""
+        表596 DATA_OUT=128b，一个转置行（smc_num 元素）拆 ceil(smc_num/word_lanes) 个词发出（para959）。
+        latency = ADR-036 S2 流式接口：转置触发到第一个 DATA_OUT 词的固定延迟拍数（取
+        pipeline_delays.yaml 的 SMI_DS_T；0 = 现状即时，Phase B 设 PARAM_SMC_NUM*2=16）。"""
         if smc_num < 1:
             raise ValueError(f"smc_num must be >= 1, got {smc_num}")
         if lanes < 1:
@@ -93,6 +96,7 @@ class SmiDsTUnit:
         self.lanes = lanes
         self.word_lanes = word_lanes
         self.element_bits = element_bits
+        self.latency = max(0, int(latency))
         self._lanes_from_word, self._word_from_lanes = _lane_codec(element_bits)
         # ADR-034 S2-D1：表596 接口寄存器（替 apply_smi_ds_t backdoor 的真 step-driven 实体）
         self.data_out = 0          # 表596 DATA_OUT(128b)：当前发出的转置行词
@@ -106,6 +110,10 @@ class SmiDsTUnit:
         self._out: Optional[List[List]] = None
         # DATA_OUT 发送队列：[(dst_word_offset, word_value)]
         self._emit_queue: List = []
+        # ADR-036 S2 流式接口状态：转置后行词 FIFO + 固定 latency 倒计时
+        self._out_words: List = []     # 转置产出的 (off, word) 待发队列（经 latency 后逐拍出）
+        self._latency_ctr = -1         # -1 = 空闲未触发；>=0 = latency 倒计时中
+        self._stream_started = False   # 本条指令的转置已触发
         self.data_out = 0
         self.data_out_vld = 0
         self.inst_done = 0
@@ -148,6 +156,56 @@ class SmiDsTUnit:
     def busy(self) -> bool:
         """是否还有 DATA_OUT 待发（scatter 进行中）。"""
         return bool(self._emit_queue)
+
+    # ── ADR-036 S2：流式 stepped 单元接口（evaluate/tick/get_outputs，固定 latency pipeline）──
+    #   对标 units/fp32addtree8to1_unit.py 的 evaluate→tick→get_outputs 约定。语义：转置是
+    #   burst（输入整 tile→transpose_tile 纯核，无 gather-gate）→ 行词装 FIFO，经 `latency` 拍
+    #   固定延迟后**每拍发 1 个 DATA_OUT 词**（线速行片输出）。真 SHIFTDN 逐拍 drain 列片 = DEBT-S4，
+    #   本阶段输入整 tile 提供、由 latency pipeline 建模时序（S4 VCS 校准精确拍数）。
+    def evaluate(self, inputs: dict, cycle: int = 0):
+        """流式驱动：inputs={'valid':bool, 'tile':columns}。valid 触发时转置整 tile（无 gate）→
+        装填行词 FIFO + 启动 latency 倒计时。非触发拍无副作用（幂等，已触发则忽略重复 valid）。"""
+        if self._stream_started or not inputs.get("valid"):
+            return
+        tile = inputs.get("tile")
+        if tile is None:
+            return
+        rows = self.transpose_tile(tile)          # 纯转置核，无 is_ready/raise gate
+        nword = (self.smc_num + self.word_lanes - 1) // self.word_lanes
+        self._out_words = []
+        for m in range(self.lanes):
+            for w in range(nword):
+                chunk = rows[m][w * self.word_lanes:(w + 1) * self.word_lanes]
+                self._out_words.append((m * nword + w, self._word_from_lanes(chunk)))
+        self._latency_ctr = self.latency          # 固定延迟倒计时（0=下拍即出）
+        self._stream_started = True
+        self.inst_done = 0
+
+    def tick(self):
+        """推移固定 latency pipeline：倒计时未到→DATA_OUT_VLD=0（气泡）；到点后每拍 pop 1 词→
+        DATA_OUT/DATA_OUT_VLD；FIFO 空→INST_DONE。返回本拍发的 (off,word) 或 None。"""
+        if not self._stream_started:
+            self.data_out_vld = 0
+            return None
+        if self._latency_ctr > 0:                 # 仍在固定延迟窗口内（气泡，无输出）
+            self._latency_ctr -= 1
+            self.data_out_vld = 0
+            return None
+        if not self._out_words:                   # 已发完
+            self.data_out_vld = 0
+            self.inst_done = 1
+            return None
+        off, word = self._out_words.pop(0)        # 线速：每拍发 1 行词
+        self.data_out = word
+        self.data_out_vld = 1
+        if not self._out_words:
+            self.inst_done = 1
+        return off, word
+
+    def get_outputs(self) -> dict:
+        """表596 接口寄存器快照（供 cluster 读 DATA_OUT → scatter）。"""
+        return {"DATA_OUT": self.data_out, "DATA_OUT_VLD": self.data_out_vld,
+                "INST_DONE": self.inst_done}
 
     def gather(self, smc_id: int, row: Sequence):
         """SHIFTDN gather：收一个 SMC 的一行 UR 数据（lanes 个元素）。"""

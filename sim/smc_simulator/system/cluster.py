@@ -184,9 +184,11 @@ class SystemCluster:
         （cluster 级单实例，known-risk ②：SMI 非 per-SMC，全局单次非每 kernel）。
 
         - **2b 触发**：转置由 SMI_DS_T 指令 VLD 触发（替 run-前无条件 apply）。
-        - **S2-D1 真 step-driven**：建一等 `SmiDsTUnit`（表596 接口寄存器 CRD_SHIFTDN/DATA_OUT/
-          DATA_OUT_VLD/INST_DONE），数据经 `load_tile(CRD_SHIFTDN)→execute(转置)→emit_step(DATA_OUT
-          逐词)` 流过单元，**替 apply_smi_ds_t 的 storage-to-storage backdoor**。
+        - **ADR-036 S2 流式 step-driven**：建一等 `SmiDsTUnit`（表596 接口寄存器 DATA_OUT/
+          DATA_OUT_VLD/INST_DONE），数据经 `evaluate({valid,tile})→tick()（固定 latency pipeline，
+          每拍发 1 行词 DATA_OUT）` 流过单元，**替 apply_smi_ds_t 的 storage-to-storage backdoor**。
+          latency 取 `hw_spec.delays["SMI_DS_T"]`(=16)，与 SMT 的 a_read=t[transpose]+latency 双侧单源
+          耦合（hco ac50587 实证：任何解耦 → e2e exit=1 loud-fail，非静默错）。
         vld=0（破坏微指令）→ 不触发 → a_read 读未转置 bank0 → e2e FAIL（指令驱动可证伪）。"""
         from smc_simulator.control.iq_unit import IQUnit
         from smc_simulator.core.decoder import InstructionDecoder
@@ -206,9 +208,14 @@ class SystemCluster:
         # ADR-035 D2：element_bits 选 fp16/fp32 codec；word_lanes 由其推导（128b 词 / 元素位宽）
         element_bits = int(cfg.get("element_bits", 32))
         word_lanes = int(cfg.get("word_lanes", 128 // element_bits))
+        # ADR-036 S2：固定 latency（转置触发→第一行词）取 pipeline_delays.yaml 的 SMI_DS_T（=16），
+        # 与 SMT 排程的 a_read=t[transpose]+SMI_DS_T_lat 对齐（scatter 写 bank0 先于 a_read 读）。
+        smi_lat = int(module.get("latency", 0)) if isinstance(module, dict) else 0
+        if hw_spec is not None and hasattr(hw_spec, "delays"):
+            smi_lat = int(hw_spec.delays.get("SMI_DS_T", smi_lat))
         self.smi_ds_t_unit = SmiDsTUnit(
             smc_num=int(cfg["gather_smc_cnt"]), lanes=int(cfg["lanes"]),
-            word_lanes=word_lanes, element_bits=element_bits)
+            word_lanes=word_lanes, element_bits=element_bits, latency=smi_lat)
         self.smi_ds_t_started = False
         self.smi_ds_t_done = False
         self.smi_ds_t_fired = False
@@ -250,17 +257,19 @@ class SystemCluster:
                 # S2-D1b（hco）：bank4 读 = SMC_s 的 UR-read（占其 R 端口）；SHIFTDN 下行搬运未建模(debt)
                 self._audit_smi_ds_t("UR-READ", "DST-GATHER", s, 0, sb, sa, word)
                 cols.append(unit._lanes_from_word(word, ln))
-            unit.load_tile(cols)
-            unit.execute()                 # 转置 → DATA_OUT 队列（未到齐抛错）
+            # ADR-036 S2：流式触发（evaluate，无 gather-gate），转置行词经固定 latency pipeline 逐拍出。
+            unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)
             # 转置内部无对外可观测信号（表596 仅 DATA_OUT/INST_DONE）→ 非数据 marker（不进 AUDIT-DATA，diff 脚本天然过滤）
-            self.logger.info(f"[SMI_DS_T] Cyc{self.cycle_count} TRANSPOSE shape {gc}x{ln}")
+            self.logger.info(
+                f"[SMI_DS_T] Cyc{self.cycle_count} TRANSPOSE shape {gc}x{ln} (streaming lat={unit.latency})")
             self.smi_ds_t_started = True
             self.smi_ds_t_fired = True
             iq.tick()
             self.logger.info(
                 f"[SMI_DS_T] instruction-driven transpose started at cycle {self.cycle_count}")
-        # scatter：每拍发一个 DATA_OUT 词 → 写 SMC_0 bank0（DATA_OUT_VLD 驱动）
-        emit = unit.emit_step()
+        # scatter：tick 固定 latency pipeline；DATA_OUT_VLD 拍发一个 DATA_OUT 词 → 写 SMC_0 bank0。
+        # latency 窗口内 tick() 返 None（气泡，不写），到点后每拍发一行词（线速）。
+        emit = unit.tick()
         if emit is not None:
             off, word = emit
             db, da = int(cfg["dst_bank"]), int(cfg["dst_addr"])

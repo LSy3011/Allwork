@@ -363,9 +363,11 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
                 fc.kernels[0].ur_bank.storage[0][m] = SENTINEL
             hexpath = self._write_hex(spec, vld)
             SystemCluster.setup_smi_ds_t_trigger(fc, hexpath, cfg)
-            for c in range(6):
+            for c in range(40):   # ADR-036 S2：latency=16 pipeline → scatter 推后；跑到 INST_DONE
                 fc.cycle_count = c
                 SystemCluster._tick_smi_ds_t_trigger(fc)
+                if fc.smi_ds_t_done:
+                    break
             self.assertEqual(fc.smi_ds_t_fired, expect_fired,
                              f"VLD={vld} 触发状态应={expect_fired}")
             if expect_fired:
@@ -401,9 +403,11 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
         SystemCluster.setup_smi_ds_t_trigger(fc, hexpath, cfg)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            for c in range(6):
+            for c in range(40):   # ADR-036 S2：latency=16 pipeline → scatter 推后；跑到 INST_DONE
                 fc.cycle_count = c
                 SystemCluster._tick_smi_ds_t_trigger(fc)
+                if fc.smi_ds_t_done:
+                    break
         lines = [l for l in buf.getvalue().splitlines() if "[AUDIT-DATA]" in l]
         gather = [l for l in lines if "Tag:DST-GATHER" in l]
         scatter = [l for l in lines if "Tag:DST-SCATTER" in l]
@@ -421,6 +425,21 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
         # hco BLOCK：UR 端点绝不冒名 Unit:SMI_DS_T（表596 无 UR 端口）
         self.assertFalse(any("Unit:SMI_DS_T" in l for l in lines),
                          "UR 端点不应冒名 Unit:SMI_DS_T（VCS diff 按真访存单元对齐）")
+
+    def test_latency_single_sourced_from_yaml(self):
+        """ADR-036 S2（hco ac50587 守门）：cluster 给 SmiDsTUnit 的 latency **必须取自**
+        hw_spec.delays["SMI_DS_T"]（= pipeline_delays.yaml），与 SMT 排程双侧单源耦合——
+        不得硬编码。否则 cluster/SMT latency 解耦 → scatter 拍 ≠ a_read 拍 → e2e 静默漂
+        （hco 实证解耦 → e2e exit=1）。锁此不变量防未来硬编码。"""
+        self._paths()
+        from smc_simulator.system.cluster import SystemCluster
+        spec = self._spec()
+        cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+               "gather_smc_cnt": 4, "lanes": 4}
+        fc = self._fake_cluster(spec)
+        SystemCluster.setup_smi_ds_t_trigger(fc, self._write_hex(spec, 1), cfg)
+        self.assertEqual(fc.smi_ds_t_unit.latency, int(spec.delays["SMI_DS_T"]),
+                         "cluster 的 SMI_DS_T latency 必须 == pipeline_delays.yaml 值（单源，非硬编码）")
 
     def _spec(self):
         self._paths()
@@ -581,6 +600,61 @@ class TestSmiDsTFp16(unittest.TestCase):
 def struct_half(bits16: int) -> float:
     import struct
     return struct.unpack("<e", struct.pack("<H", bits16 & 0xFFFF))[0]
+
+
+class TestSmiDsTS2Streaming(unittest.TestCase):
+    """ADR-036 S2：流式 stepped 接口（evaluate/tick/get_outputs + 固定 latency pipeline，去 gather-gate）。"""
+
+    def _tile(self, K=4, M=4):
+        # X[m][s]；列对齐 tile[s] = 列 s = [X[0,s]..X[M-1,s]]
+        X = [[float(10 * m + s + 1) for s in range(K)] for m in range(M)]
+        tile = [[X[m][s] for m in range(M)] for s in range(K)]
+        return X, tile
+
+    def test_streaming_transpose_no_gate(self):
+        # evaluate(整 tile) → tick 逐拍出行对齐词；转置数值正确（无 is_ready/raise gate）
+        X, tile = self._tile()
+        u = SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32, latency=0)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)
+        out = []
+        for _ in range(8):
+            r = u.tick()
+            if r is not None:
+                off, word = r
+                out.append((off, [round(x, 1) for x in u._lanes_from_word(word, 4)]))
+            if u.inst_done and not u._out_words:
+                break
+        self.assertEqual(len(out), 4, "4 行各一词")
+        for m in range(4):
+            self.assertEqual(out[m][0], m)
+            self.assertEqual(out[m][1], [round(X[m][s], 1) for s in range(4)],
+                             f"行 {m} 转置错")
+        self.assertEqual(u.get_outputs()["INST_DONE"], 1)
+
+    def test_fixed_latency_bubble_then_linerate(self):
+        # latency=N：触发后 N 拍气泡(DATA_OUT_VLD=0)，再每拍 1 词线速
+        _, tile = self._tile()
+        N = 16
+        u = SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32, latency=N)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)
+        first_word_tick = None
+        for c in range(N + 8):
+            r = u.tick()
+            if r is not None and first_word_tick is None:
+                first_word_tick = c            # 第几次 tick 出第一个词（0-based）
+                break
+            else:
+                self.assertEqual(u.get_outputs()["DATA_OUT_VLD"], 0, f"tick {c} 应是气泡")
+        self.assertEqual(first_word_tick, N, f"第一个 DATA_OUT 应在第 {N} 次 tick（0-based）出")
+
+    def test_evaluate_idempotent_until_done(self):
+        # 已触发后重复 valid 不重置（幂等）；transpose_tile 纯核可独立验证（既有 test_transpose_numeric）
+        _, tile = self._tile()
+        u = SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32, latency=0)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)
+        n0 = len(u._out_words)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=1)   # 重复触发应被忽略
+        self.assertEqual(len(u._out_words), n0, "已触发后重复 valid 不应重装 FIFO")
 
 
 class TestSmiDsTS1FiveStage(unittest.TestCase):

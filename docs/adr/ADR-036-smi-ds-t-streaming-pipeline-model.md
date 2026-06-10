@@ -134,6 +134,31 @@ TestSmiDsTS1FiveStage`（源码不变量）+ `tests/integration/test_smi_ds_t_e2
   `apply_smi_ds_t` scatter-to-all + 本地 2 词 addtree8to1 单发），需 sim 改 + 偏离文档 SHIFTUP-广播模型、
   过 hco。`matmul_q_dst` 暂留 K=4 Stage-A（working 8/8）。K=8 真做 = S3（需 S2 流式单元 + K>4/M>1 compute 方案）。
 
+## S2 实现（2026-06-10，流式 stepped 单元 + 固定 latency pipeline；hco ac50587 APPROVE-with-notes）
+S2（user 裁定「全流式+时序现在做」）：仿真器 SMI_DS_T 从 gather-gate 改为流式 stepped 单元。落地（3 文件）：
+- **D1 流式接口**（`sim/smc_simulator/units/smi_ds_t_unit.py`）：新增 `evaluate({valid,tile})`/`tick()`/
+  `get_outputs()`（对标 fp32addtree8to1_unit）。evaluate 用 `transpose_tile` 纯核（**无 is_ready/raise gate**）转置 →
+  行词 FIFO + 启动 latency 倒计时；tick 在 latency 窗口内发气泡(DATA_OUT_VLD=0)、到点后每拍发 1 行词（线速）。
+- **D2/D3 固定 latency**（`system/cluster.py`）：`_tick_smi_ds_t_trigger` 改 `evaluate`+`tick` 驱动；latency 取
+  `hw_spec.delays["SMI_DS_T"]`(=16)，**与 SMT 的 a_read=t[transpose]+latency 双侧单源耦合**（同读一份 yaml）。
+  实测：DST-GATHER@Cyc6 → DST-SCATTER@Cyc22-25（=6+16）；e2e 仍 bit-perfect（cluster.step 内 `_tick`(scatter)
+  先于 kernel.step(a_read) 同拍 → 写先于读）。
+- **gate 旁路**：live 路径已不走 gather-gate；物理方法（gather/is_ready/transpose-raise/load_tile/execute/
+  emit_step）保留给 `apply_smi_ds_t` fallback，**S3 随 backdoor 删**。
+
+### hco 实证（ac50587，独立复跑 + 反证）
+3 算子 e2e exit=0 + scatter 拍偏移=latency 已独立复跑；**hco 亲手解耦反证**（cluster latency≠SMT latency）→ e2e
+exit=1 + truth auditor 逐拍报 a_read stale → **任何 latency 漂移 loud-fail，非静默错**（脆弱性担忧消除）。
+
+### S2 忠实度边界 / 债务
+- **输入仍 burst、仅输出 latency-pipeline**：evaluate 一次性收整 tile（非 D1「每拍 1 列片入」），输出侧才真逐拍。
+  对终值无影响（bit-perfect），真 SHIFTDN 逐拍 drain 列片 = **DEBT-S4-SHIFTDN-DRAIN**（gated on VCS，无 VCS 不可校准）。
+- **DST-SCATTER 同拍 R+W 对 arbiter 不可见**（既存 DEBT，非 S2 引入）：scatter 直写 `kernels[0].ur_bank.storage`
+  绕 per-kernel arbiter，故 Cyc22 SMC_0 bank0 的 scatter(W)+a_read(R) 同拍不报冲突。**S3 退出条件**：删 backdoor、
+  ds_src_read 转真 UR_READ 进 sim 后，此同拍 R+W 进 arbiter 视野 → **必须确认 DLY 把 a_read 排在 scatter 之后不同拍**，
+  否则暴真 bank 冲突。
+- latency=16 仍是 Q2「先按 gather 完成点建模」假设；逐拍与 RTL 一致 = 验收 ②，**待 S4 VCS**。`still_holds: proposed` 维持。
+
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/
   para1236-1246（矩阵×矩阵 + 激活矩阵排序=SMI_DS_T）/ 表542-548（SHIFTUP/SHIFTDN）/ 表593-595（SMI_IQ）/ 表596-598（SMI_DS_T）
