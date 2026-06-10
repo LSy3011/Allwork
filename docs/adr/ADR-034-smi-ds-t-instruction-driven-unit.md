@@ -215,6 +215,25 @@ ADR-033 Stage-A/A' 的**转置数值正确性 + datapath 拓扑结论保留有�
 （`test_smi_ds_t_microinst_matches_doc_table598`：固化表598 5 字段、专杀未来把 DS 表587 的 inst_id/smc_id_en 串进
 SMI_DS_T 的 D-01 回归）。`still_holds: proposed` 保持（设计 doc-full ≠ 时序 RTL-verified）。
 
+### Increment S2-D1 ✅ DONE（2026-06-10）—— 真 step-driven 数据流（表596 接口，替 apply backdoor）
+- **SmiDsTUnit 升一等 step-driven 单元**（`sim/.../units/smi_ds_t_unit.py`）：加表596 接口寄存器
+  `DATA_OUT(128)/DATA_OUT_VLD/INST_DONE` + 方法 `load_tile(CRD_SHIFTDN gather)→execute(转置+建 DATA_OUT 队列，
+  gather-before-scatter gate)→emit_step(逐词发 DATA_OUT，末词 INST_DONE)`。一行 smc_num 元素拆 ceil/word_lanes
+  个 128b 词（para959）。
+- **cluster 持一等单元 + 逐拍驱动**（`cluster.py`）：`setup_smi_ds_t_trigger` 建 `self.smi_ds_t_unit`；
+  `_tick_smi_ds_t_trigger` 重构——VLD 触发 → gather 各 SMC 列对齐 UR 行 latch 进 CRD_SHIFTDN → execute 转置 →
+  **每拍 emit_step 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0**（替 2b 的 `apply_smi_ds_t` 一次性 storage-to-storage
+  backdoor）。数据**真经单元 DATA_OUT 寄存器逐词流出**（standalone 验：4 行 4 拍 spread + DATA_OUT_VLD 每拍 + INST_DONE 末拍）。
+- **验收**：matmul_q_dst/_k8 e2e **8/8 bit-perfect**（逐拍 scatter 不破时序——调度 t[transpose]<t[a_read] +
+  scatter 逐词写先于 a_read 逐行读）；全量 pytest 126 pass（+3 S2-D1 单测：`test_data_out_emitted_word_by_word_with_inst_done`
+  / `test_execute_gates_on_gather_complete` / `test_multiword_row_split_k8`）+ 5 算子 e2e 8/8。
+- **诚实边界（仍 model-A / VCS-gated）**：① **gather 仍读各 SMC SRC_BANK**（SHIFTDN 链物理 drain 到 CRD_SHIFTDN
+  是 chain-shift 模型、N 拍串行 drain 未建——SHIFTDN unit 是单值链移非 N 列并行 gather，真 drain 待 S2 后续/VCS）；
+  ② **逐拍 emit 间隔=1 拍**（非 doc para961 的 4 并发 2 拍 stagger，那是 S2-D2 interleave）；③ scatter 起拍仍靠
+  INIT-stagger 相对序（DEBT-034-TRIGGER-TIMING 未闭合，S2-D3 COND 才闭）。**S2-D1 交付 = 真单元 + 表596 接口 +
+  DATA_OUT 逐词流 + gather gate + INST_DONE 信号**（结构忠实），逐拍时序忠实仍 S2-D2/D3 + VCS。
+- **apply_smi_ds_t 保留**：作 fallback（无指令流时）+ 既有 unit 测试（TestSmiDsTClusterApply）数值核，未删。
+
 ## 实施进展（Stage-I）
 
 ### Increment 1 ✅ DONE（2026-06-10，commit `571f48b`）—— 配置链（hco D2 BLOCK）

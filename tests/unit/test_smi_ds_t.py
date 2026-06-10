@@ -384,5 +384,73 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
         return HardwareSpec.load("hw_config")
 
 
+class TestSmiDsTStepDriven(unittest.TestCase):
+    """ADR-034 S2-D1：SMI_DS_T 真 step-driven 数据流——表596 接口寄存器
+    (CRD_SHIFTDN→execute 转置→DATA_OUT 逐词 emit + DATA_OUT_VLD + INST_DONE)，替 apply backdoor。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "sim"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def test_data_out_emitted_word_by_word_with_inst_done(self):
+        """DATA_OUT 逐词发出、DATA_OUT_VLD 每拍拉高、末词后 INST_DONE；数据经 DATA_OUT 流出（非 backdoor）。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit, fp32_lanes_from_word
+        K, M = 4, 4
+        X = [[float(m * 10 + k + 1) for k in range(K)] for m in range(M)]
+        u = SmiDsTUnit(smc_num=K, lanes=M, word_lanes=4)
+        cols = [[X[m][s] for m in range(M)] for s in range(K)]   # 列对齐：col s
+        u.load_tile(cols)
+        nword = u.execute()
+        self.assertEqual(nword, M, "M 行 × 1 词/行")
+        emitted = []
+        for c in range(M):
+            self.assertEqual(u.inst_done, 0, f"末词前 INST_DONE 不应拉高 @cyc{c}")
+            e = u.emit_step()
+            self.assertIsNotNone(e)
+            self.assertEqual(u.data_out_vld, 1, f"DATA_OUT_VLD 应每拍拉高 @cyc{c}")
+            off, word = e
+            emitted.append((off, fp32_lanes_from_word(word, K)))
+        self.assertEqual(u.inst_done, 1, "末词后 INST_DONE 应拉高")
+        # 队空再 emit → None + DATA_OUT_VLD 落
+        self.assertIsNone(u.emit_step())
+        self.assertEqual(u.data_out_vld, 0)
+        # row m == X[m]（转置正确、经 DATA_OUT 流出）
+        for m in range(M):
+            self.assertEqual(emitted[m][0], m, "DATA_OUT 写偏移应顺序 0..M-1")
+            for k in range(K):
+                self.assertAlmostEqual(emitted[m][1][k], X[m][k], places=4)
+
+    def test_execute_gates_on_gather_complete(self):
+        """gather 未到齐 execute() 抛错（gather-before-scatter，表596 语义；专杀 model-A 静默乱序）。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit
+        u = SmiDsTUnit(smc_num=4, lanes=4)
+        u.gather(0, [1, 2, 3, 4])
+        u.gather(1, [5, 6, 7, 8])          # 只 2/4
+        with self.assertRaises(RuntimeError):
+            u.execute()
+
+    def test_multiword_row_split_k8(self):
+        """K=8 lanes=1：一行 8 元素拆 2 个 128b DATA_OUT 词（para959 一行 PARAM_SMC_NUM 拆多 PARAM_UR_BYTE_CNT）。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit, fp32_lanes_from_word
+        a = [float(s + 1) * 1.5 for s in range(8)]
+        u = SmiDsTUnit(smc_num=8, lanes=1, word_lanes=4)
+        cols = [[a[s]] for s in range(8)]   # 每 SMC 持 1 元素
+        u.load_tile(cols)
+        nword = u.execute()
+        self.assertEqual(nword, 2, "1 行 × ceil(8/4)=2 词")
+        w0 = fp32_lanes_from_word(u.emit_step()[1], 4)
+        w1 = fp32_lanes_from_word(u.emit_step()[1], 4)
+        for k in range(4):
+            self.assertAlmostEqual(w0[k], a[k], places=4)
+            self.assertAlmostEqual(w1[k], a[4 + k], places=4)
+        self.assertEqual(u.inst_done, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -86,10 +86,13 @@ class SystemCluster:
         self.cycle_count = 0
         self.logger = logging.getLogger("SystemCluster")
 
-        # ADR-034 Stage-I 2b：SMI_DS_T 指令驱动触发（cluster 级单实例）
+        # ADR-034 Stage-I 2b/S2-D1：SMI_DS_T 指令驱动 + 真 step-driven 单元（cluster 级单实例）
         self.smi_ds_t_iq = None
         self.smi_ds_t_cfg = None
-        self.smi_ds_t_fired = False
+        self.smi_ds_t_unit = None      # S2-D1：表596 接口真单元（替 apply_smi_ds_t backdoor）
+        self.smi_ds_t_started = False  # gather+transpose 已触发（= 2b 的 fired）
+        self.smi_ds_t_done = False     # INST_DONE：DATA_OUT 全部 scatter 完
+        self.smi_ds_t_fired = False    # 兼容别名（= started）
 
     def _propagate_chain_inputs(self):
         """
@@ -175,14 +178,17 @@ class SystemCluster:
             f"scatter {lanes} rows × {nword} words to SMC_0 bank{dst_bank}@{dst_addr}")
 
     def setup_smi_ds_t_trigger(self, hex_path: str, cfg: dict):
-        """ADR-034 Stage-I 2b：装载 SMI_DS_T 指令流，转置改由其指令的 VLD 在 run 中触发
+        """ADR-034 Stage-I 2b + S2-D1：装载 SMI_DS_T 指令流 + 建真 step-driven 单元
         （cluster 级单实例，known-risk ②：SMI 非 per-SMC，全局单次非每 kernel）。
 
-        替 run-前无条件 `apply_smi_ds_t`：数值核仍 model-A（apply_smi_ds_t 复用 SmiDsTUnit 转置
-        核 + gather），但**触发时机**由 DFG 的 SMI_DS_T op 经 emit→hex→decode 的 VLD 驱动。
+        - **2b 触发**：转置由 SMI_DS_T 指令 VLD 触发（替 run-前无条件 apply）。
+        - **S2-D1 真 step-driven**：建一等 `SmiDsTUnit`（表596 接口寄存器 CRD_SHIFTDN/DATA_OUT/
+          DATA_OUT_VLD/INST_DONE），数据经 `load_tile(CRD_SHIFTDN)→execute(转置)→emit_step(DATA_OUT
+          逐词)` 流过单元，**替 apply_smi_ds_t 的 storage-to-storage backdoor**。
         vld=0（破坏微指令）→ 不触发 → a_read 读未转置 bank0 → e2e FAIL（指令驱动可证伪）。"""
         from smc_simulator.control.iq_unit import IQUnit
         from smc_simulator.core.decoder import InstructionDecoder
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit
         # 从 HardwareSpec.modules（与 emitter 同一 SSoT = hw_config/modules.yaml）建解码器：
         # spec_loader.get_unit("SMI_DS_T") 返 None（无 specs/units/smi_ds_t.yaml）→ payload_width=0
         # → VLD 偏移错位（读 bit40 而非 bit45）→ 永不触发。用 modules 的 5bit code_fields 校准。
@@ -195,21 +201,51 @@ class SystemCluster:
         iq.load_hex(hex_path)
         self.smi_ds_t_iq = iq
         self.smi_ds_t_cfg = dict(cfg)
+        self.smi_ds_t_unit = SmiDsTUnit(
+            smc_num=int(cfg["gather_smc_cnt"]), lanes=int(cfg["lanes"]),
+            word_lanes=int(cfg.get("word_lanes", 4)))
+        self.smi_ds_t_started = False
+        self.smi_ds_t_done = False
         self.smi_ds_t_fired = False
 
     def _tick_smi_ds_t_trigger(self):
-        """在 kernels step 之前 evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) 即触发一次转置，
-        写 SMC_0 bank0 先于本拍 a_read 读（调度保证 t[transpose] < t[a_read]）。"""
-        iq = self.smi_ds_t_iq
-        if iq is None or self.smi_ds_t_fired:
+        """S2-D1 真 step-driven：kernels step 前驱动 SMI_DS_T 单元。
+        - 未触发：evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) → 经 SHIFTDN gather 各 SMC 列对齐
+          UR 行 latch 进单元 CRD_SHIFTDN，execute() 转置（gather-before-scatter gate）。
+        - 已触发未完成：每拍 emit_step() 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0；INST_DONE 即完成。
+        调度保证 t[transpose] < t[a_read]，scatter 逐词写先于 a_read 逐行读。"""
+        from smc_simulator.units.smi_ds_t_unit import fp32_lanes_from_word
+        unit = self.smi_ds_t_unit
+        if unit is None or self.smi_ds_t_done:
             return
-        iq.evaluate({}, cycle=self.cycle_count)
-        if getattr(iq, "exec_active", False):
-            self.apply_smi_ds_t(self.smi_ds_t_cfg)
+        cfg = self.smi_ds_t_cfg
+        if not self.smi_ds_t_started:
+            iq = self.smi_ds_t_iq
+            iq.evaluate({}, cycle=self.cycle_count)
+            if not getattr(iq, "exec_active", False):
+                iq.tick()
+                return
+            # CRD_SHIFTDN：gather 各 SMC 列对齐 UR 行（model-A：SHIFTDN-delivered Tile = 读各 SMC SRC_BANK）
+            sb, sa = int(cfg["src_bank"]), int(cfg["src_addr"])
+            gc, ln = int(cfg["gather_smc_cnt"]), int(cfg["lanes"])
+            cols = [fp32_lanes_from_word(self.kernels[s].ur_bank.storage[sb][sa], ln)
+                    for s in range(gc)]
+            unit.load_tile(cols)
+            unit.execute()                 # 转置 → DATA_OUT 队列（未到齐抛错）
+            self.smi_ds_t_started = True
             self.smi_ds_t_fired = True
+            iq.tick()
             self.logger.info(
-                f"[SMI_DS_T] instruction-driven transpose fired at cycle {self.cycle_count}")
-        iq.tick()
+                f"[SMI_DS_T] instruction-driven transpose started at cycle {self.cycle_count}")
+        # scatter：每拍发一个 DATA_OUT 词 → 写 SMC_0 bank0（DATA_OUT_VLD 驱动）
+        emit = unit.emit_step()
+        if emit is not None:
+            off, word = emit
+            db, da = int(cfg["dst_bank"]), int(cfg["dst_addr"])
+            self.kernels[0].ur_bank.storage[db][da + off] = word
+        if unit.inst_done:
+            self.smi_ds_t_done = True
+            self.logger.info(f"[SMI_DS_T] INST_DONE at cycle {self.cycle_count}")
 
     def step(self):
         # 0. ADR-034 2b: SMI_DS_T 指令驱动触发（kernels step 前，bank0 写先于 a_read 读）

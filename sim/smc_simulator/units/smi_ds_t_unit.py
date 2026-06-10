@@ -45,21 +45,72 @@ class SmiDsTUnit:
     transpose() 在 gather 未到齐时抛错（gate: gather-before-scatter ordering）。
     """
 
-    def __init__(self, smc_num: int, lanes: int = 4):
+    def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4):
         """smc_num = PARAM_IN_LINE_NUM = PARAM_SMC_NUM；
-        lanes = PARAM_IN_LINE_BYTE_CNT / ELEMENT_BYTE_NUM（fp32: 16/4 = 4，即每 UR 行的元素数）。"""
+        lanes = PARAM_IN_LINE_BYTE_CNT / ELEMENT_BYTE_NUM（fp32: 16/4 = 4，即每 UR 行的元素数）；
+        word_lanes = 每个 128-bit DATA_OUT 词的 fp32 数（fp32=4）——表596 DATA_OUT=128b，
+        一个转置行（smc_num 元素）拆 ceil(smc_num/word_lanes) 个词发出（para959）。"""
         if smc_num < 1:
             raise ValueError(f"smc_num must be >= 1, got {smc_num}")
         if lanes < 1:
             raise ValueError(f"lanes must be >= 1, got {lanes}")
         self.smc_num = smc_num
         self.lanes = lanes
+        self.word_lanes = word_lanes
+        # ADR-034 S2-D1：表596 接口寄存器（替 apply_smi_ds_t backdoor 的真 step-driven 实体）
+        self.data_out = 0          # 表596 DATA_OUT(128b)：当前发出的转置行词
+        self.data_out_vld = 0      # 表596 DATA_OUT_VLD：本拍 DATA_OUT 有效
+        self.inst_done = 0         # 表596 INST_DONE：一条指令的全部输出发完
         self.reset()
 
     def reset(self):
-        # gather 缓冲：_buf[smc_id] = 该 SMC 的 UR 行（lanes 个元素）；None = 尚未 gather
+        # gather 缓冲（CRD_SHIFTDN）：_buf[smc_id] = 该 SMC 的 UR 行（lanes 个元素）；None = 尚未 gather
         self._buf: List[Optional[List]] = [None] * self.smc_num
         self._out: Optional[List[List]] = None
+        # DATA_OUT 发送队列：[(dst_word_offset, word_value)]
+        self._emit_queue: List = []
+        self.data_out = 0
+        self.data_out_vld = 0
+        self.inst_done = 0
+
+    # ── ADR-034 S2-D1：真 step-driven 数据流（表596 接口）──────────────────────
+    def load_tile(self, columns: Sequence[Sequence]):
+        """CRD_SHIFTDN：latch 经 SHIFTDN gather 传回的 Tile（columns[smc] = 该 SMC 的 UR 行 lanes 元素）。
+        逐 SMC 走 gather()（行宽 / 越界校验 = gather gate）。"""
+        self.reset()
+        for s, row in enumerate(columns):
+            self.gather(s, row)
+
+    def execute(self) -> int:
+        """gather 到齐 → 转置 → 构建 DATA_OUT 发送队列（一行 smc_num 元素拆 ceil/word_lanes 个 128b 词）。
+        未到齐抛 RuntimeError（gather-before-scatter gate，表596 语义）。返回待发 word 数。"""
+        rows = self.transpose()    # 内部 is_ready gate：未到齐抛错
+        nword = (self.smc_num + self.word_lanes - 1) // self.word_lanes
+        self._emit_queue = []
+        for m in range(self.lanes):
+            for w in range(nword):
+                chunk = rows[m][w * self.word_lanes:(w + 1) * self.word_lanes]
+                self._emit_queue.append((m * nword + w, word_from_fp32_lanes(chunk)))
+        self.inst_done = 0
+        return len(self._emit_queue)
+
+    def emit_step(self):
+        """发一个 DATA_OUT 词（表596 DATA_OUT/DATA_OUT_VLD 拉高）；队空则 INST_DONE 拉高。
+        返回 (dst_word_offset, word_value) 或 None（已发完）。"""
+        if not self._emit_queue:
+            self.data_out_vld = 0
+            self.inst_done = 1
+            return None
+        off, word = self._emit_queue.pop(0)
+        self.data_out = word
+        self.data_out_vld = 1
+        if not self._emit_queue:
+            self.inst_done = 1
+        return off, word
+
+    def busy(self) -> bool:
+        """是否还有 DATA_OUT 待发（scatter 进行中）。"""
+        return bool(self._emit_queue)
 
     def gather(self, smc_id: int, row: Sequence):
         """SHIFTDN gather：收一个 SMC 的一行 UR 数据（lanes 个元素）。"""
