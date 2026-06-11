@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -34,6 +34,8 @@ OPERATOR_MAP = {
     "matmul_q_dst": ManualMatmulQDsTOperator,
     # ADR-033 Stage-A'：SMI_DS_T K=SMC_NUM=8 全 gather + cumulative addtree（更忠实）
     "matmul_q_dst_k8": ManualMatmulQDsTK8Operator,
+    # ADR-036 S3：scenario-A K=8 + M 满载（2 级循环 + accumulate 逐行 reset）
+    "matmul_q_dst_full": ManualMatmulQDsTFullOperator,
     # ADR-026 Stage-2a：Matmul_Q cols_per_smc=4 密集打包（local-buffer 修法）
     "matmul_q2": ManualMatmulQ2Operator,
     # ADR-032 S1：FP16 推理 matmul 最小通路（FP16MUL + FP32ADDTREE8TO1，单 SMC K=8）

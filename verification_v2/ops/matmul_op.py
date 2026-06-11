@@ -496,6 +496,109 @@ class ManualMatmulQDsTK8Operator(ManualMatmulParallelNOperator):
         return ops
 
 
+class ManualMatmulQDsTFullOperator(ManualMatmulQDsTK8Operator):
+    """ADR-036 S3：scenario-A K=8、M>4（破 matmul_q 的 pipeline-depth M≤4 hack）。
+
+    **多通道结构**（照 ManualMatmulOperator，user 2026-06-11 裁定）：M 行 → addtree 的 **M 个独立
+    lane（S0..S{M-1}）**，每 lane 连续 cumulative 累加该行的 K-dot（acc=1），**acc=0 只是初始 dr_d=0**
+    （addtree 8 lane 各自 old_i，互不串扰——无「逐行 reset」那回事）。K=8=2 tile = 内循环 cumulative。
+
+    本 increment 先**隔离验 compute**：激活 X[m,:8] 直注各 SMC bank0（绕转置/广播）、每 SMC 与本地
+    权重列 W[:,s] 点积 → Q[m,s]。SMI_DS_T 转置前端 + 广播-to-all 下一步接。M≤8（addtree lane 数）。"""
+
+    M = 4          # 4 行 = 4 通道（addtree S0..S3，破 M≤4 的真正含义：通道而非 pipeline 巧合）
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.M * self.K).astype(np.float32)        # X[M,K] flat
+        b = rng.uniform(1.0, 5.0, (smc_num, self.K)).astype(np.float32)      # W[:,s] 每 SMC 8 元素
+        return {"a": a, "b": b}
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"]; b = input_data["b"]
+        smc_num = b.shape[0]
+        X = a.reshape(self.M, self.K)
+        W = b[:, :self.K]
+        # Q[s, m] = dot(X[m,:], W[s,:])；M 行落 addtree 4 lane（D0 dense [Q0..Q3]）
+        golden = np.zeros((smc_num, self.M), dtype=np.float32)
+        for s in range(smc_num):
+            for m in range(self.M):
+                golden[s, m] = np.dot(X[m], W[s]).astype(np.float32)
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]; b = input_data["b"]
+        X = a.reshape(self.M, self.K).astype(np.float32)        # [M, K=8]
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        for s, prog in enumerate(programs):
+            # 激活 X[m,:8] 直注各 SMC bank0 words[2m,2m+1]（隔离验 compute；转置/广播下一步）
+            for m in range(self.M):
+                prog.inject_vector(0 * bank_depth + 2 * m, X[m].copy(), stride=1)
+            # 权重 W[:,s] = 8 元素 = 2 词 → bank1 words[0,1]
+            prog.inject_vector(1 * bank_depth + 0, b[s].copy(), stride=1)
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        temp_banks = [2, 3, 4, 6]   # 4 通道暂存（避 FPMUL/RTOVR 对齐冲突，同 ManualMatmulOperator）
+        temp_reads = []
+        # M 通道：channel m = 行 m。a_m 读 X[m,tile]（bank0 base=2m, 内循环 2 tile）、
+        # b_m 读 W[tile]（bank1 base=0, 同列共享）→ FPMUL → temp → addtree S{m} lane m。
+        for m in range(self.M):
+            a_m = b.make_op("UR_READ", f"a{m}_read", RT.UR_READ, [],
+                            meta_name=f"a{m}", logical_addr=0 * 256 + 2 * m, stride=1,
+                            role="input", iq_id=30 + (m % 2) * 2)
+            b_m = b.make_op("UR_READ", f"b{m}_read", RT.UR_READ, [],
+                            meta_name=f"b{m}", logical_addr=1 * 256 + 0, stride=1,
+                            role="input", iq_id=31 + (m % 2) * 2)
+            rt_a = b.make_op("RTOVR", f"rt_a{m}_FPMUL_S0", PS.FPMUL_S0, [a_m])
+            rt_b = b.make_op("RTOVR", f"rt_b{m}_FPMUL_S1", PS.FPMUL_S1, [b_m])
+            mul = b.make_op("FPMUL", f"inl_mul{m}", RT.FPMUL, [rt_a, rt_b], iq_id=3)
+            write_ps = getattr(PS, f"UR_W{m}_S")
+            rt_write = b.make_op("RTOVR", f"rt_mul{m}_{write_ps.name}", write_ps, [mul], sel=3)
+            twrite_addr = temp_banks[m] * 256 + 0
+            b.make_op("UR_WRITE", f"temp_write{m}", RT.UR_WRITE, [rt_write],
+                      logical_addr=twrite_addr, stride=1, role="intermediate", iq_id=36 + (m % 3))
+            tr = b.make_op("UR_READ", f"temp_read{m}", RT.UR_READ, [f"temp_write{m}"],
+                           logical_addr=twrite_addr, stride=1, role="intermediate", iq_id=30 + m)
+            temp_reads.append(tr)
+        # addtree M 通道：lane m = Σ_tile reduce(X[m,tile]·W[tile])（cumulative 跨 2 tile）
+        rt_sums = []
+        for m in range(self.M):
+            rt_sums.append(b.make_op("RTOVR", f"rt_temp_read{m}_FP32ADDTREE5TO1_S{m}",
+                                     getattr(PS, f"FP32ADDTREE5TO1_S{m}"), [temp_reads[m]]))
+        y_sum = b.make_op("FP32ADDTREE5TO1", "y_0", RT.FP32ADDTREE5TO1, rt_sums,
+                          cumulative=True, reduction_per_channel=4, iq_id=26,
+                          loop_carried_depends_on={"y_0": 4})
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # 单层内循环 = K/4=2 tile（cumulative 跨 tile 累加）。M 行 = addtree 4 lane（非迭代维），
+        # 故无外循环。输出 = 1 个 4-lane 词 [Q0,Q1,Q2,Q3]（M 行 dense 落 D0 lane）。
+        inner = self.K // 4 - 1   # =1（2 tile）
+        for op in ops:
+            op.metadata.update({"shape": [self.K // 4], "inner_loops": inner, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+        # 输出 stride=0：2 tile 内原地，cumulative 终值 = Q（addtree 4 lane）
+        out = next(o for o in ops if o.trace_id == "out_obj_0")
+        out.metadata.update({"inner_inc": 0, "outer_inc": 0, "stride": 0})
+        # 本 increment 隔离验 compute：激活直注各 SMC bank0（无广播/转置前端）
+        return ops
+
+
 class ManualMatmulQ2Operator(BaseOperator):
     """ADR-026 Stage-2a：Matmul_Q cols_per_smc=4（密集 4/词打包，解 DEBT-026-PACK）。
 
