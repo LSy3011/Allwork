@@ -1316,3 +1316,92 @@ class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
         # fp16_matmul_n 的 SMC 内 DFG（FP16MUL 满 32 乘 + SHIFTUP 广播）+ SMI_DS_T 转置前端注入
         ops = super().get_dfg(spec)
         return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
+
+
+class ManualFp16MatmulFullOperator(ManualFp16MatmulParallelNOperator):
+    """ADR-036 scenario-A 的 **FP16 流式实现**：M=H>1 行矩阵激活 × K=8，8-SMC N 维广播。
+
+    **走文档钦定的 matmul 路径 + 文档钦定的「逐行广播」流式形态**（ADR-035：无 FP32 matmul 单元；
+    ADR-036 D4 / para1239：矩阵激活转成行对齐后**逐行广播**，M 行走流水时间维而非端口空间维）。
+
+    复用 `fp16_matmul_n` 的 SMC 内 DFG（1 FP16MUL → 8 D → COLS=4 条 ADDTREE8TO1 链 → 4 列点积），
+    外加 **M 行外循环**：广播激活 `a_read`（ur-r0，SHIFTUP 单源）逐迭代 +1 词读 X[m,:]、每拍
+    `_broadcast_shiftup_fanout` 把第 m 行同拍 fan-out 全 SMC、compute 复发产 Q[m,0..3]、输出 +1 词；
+    本地权重列 inner_inc=0 复读不变。K=8 一拍 8→1 reduce，**无 cumulative**。
+
+    **与空间堆叠（4 行塞 S0-S3）的本质区别**：那是端口空间维（撞 IQ_UR_READ count=4 → M≤3 假限）；
+    本算子 M 走时间维（流水复发），**M 任意 → 真破 FP32 matmul_q 的 M≤4 pipeline-depth hack**。
+
+    本 increment（A）**隔离验流式 compute**：M 激活行注 SMC_0 bank0 的 M 个词（SHIFTUP 广播源），
+    绕 SMI_DS_T 转置前端（Increment B 接，mirror fp16_matmul_q_dst）。输出 per-SMC M 词、word m =
+    第 m 行的 [Q0..Q3]（COLS=4 lane）。golden (smc_num, M*4) 对齐 readback word 序。
+
+    ⚠ **当前 flaky（阻塞于 DEBT-032-RESIDENT-TIMING，2026-06-11 根因已定位）**：继承 fp16_matmul_n
+    的 pre-existing 脆弱性——广播激活 pin 到 ur-r0，但 II loop 的 prologue 伪读也排在 ur-r0，在
+    SHIFTUP 捕获前覆盖 port0 输出锁存器 → 广播 0 → 全 SMC 全 0。好排程（暖 cache/特定 seed）下 8/8
+    bit-perfect、坏排程下 0/8。控制实验证此 flaky 是 pre-existing（非本算子引入；既有 fp16_matmul_n
+    "8/8" 亦 schedule-lucky）。根因详见 memory `debt-032-resident-timing-rootcause`。稳定化=下次专项。
+    """
+
+    M = 8   # >4：真破 M≤4（M 行流式广播，无端口/pipeline-depth 硬限）
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        cfg = super().tensor_configs
+        cfg["a"]["shape"] = [self.M, self.K]     # M 广播激活行
+        cfg["y"]["shape"] = [self.M * 4]         # M 词 × COLS=4 lane（readback 连续 fp32）
+        return cfg
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        # 激活 **flat [M*K]**：框架 num_loop_iters = len(第一个input) // vector_lanes(fp16=8) = M*K//8 = M。
+        # 每迭代 1 词（K=8 fp16）= 第 m 行 → SHIFTUP 逐行广播。
+        a = rng.uniform(1.0, 5.0, self.M * self.K).astype(np.float16)
+        out = {"a": a}
+        for c in range(self.COLS):
+            out[f"b{c}"] = rng.uniform(1.0, 5.0, (smc_num, self.K)).astype(np.float16)  # partitioned 列
+        return out
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        X = input_data["a"].astype(np.float16).reshape(self.M, self.K)   # flat → [M, K]
+        f32 = np.float32
+
+        def dot8(act, w):
+            p = (act.astype(np.float32) * w.astype(np.float32))
+            l0 = f32(p[0] + p[1]); l1 = f32(p[2] + p[3])
+            l2 = f32(p[4] + p[5]); l3 = f32(p[6] + p[7])
+            return f32(f32(l0 + l1) + f32(l2 + l3))
+
+        smc_num = input_data["b0"].shape[0]
+        # readback word 序：word m = 第 m 行 COLS 列 → flat 索引 m*4+c = Q[m,c]
+        golden = np.zeros((smc_num, self.M * 4), dtype=np.float32)
+        for s in range(smc_num):
+            for m in range(self.M):
+                for c in range(self.COLS):
+                    golden[s, m * 4 + c] = dot8(X[m], input_data[f"b{c}"][s].astype(np.float16))
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"]                       # flat [M*K]
+        a_addr = self.get_bank_addr("a", spec)
+        # 广播 M 行只注入 SMC_0（SHIFTUP fan-out）：flat M*K = M 个连续词（word m = 第 m 行）
+        programs[0].inject_vector(a_addr, a, stride=1)
+        for c in range(self.COLS):
+            b_addr = self.get_bank_addr(f"b{c}", spec)
+            for k, prog in enumerate(programs):
+                prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)  # 本地权重列 c（不随迭代变）
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        # fp16_matmul_n 的 SMC 内 DFG（1 FP16MUL + 4 ADDTREE8TO1 链 + SHIFTUP 广播）。
+        # M 行循环由框架 num_loop_iters（=len(a)//vector_lanes=M）驱动；地址递增靠 stride：
+        #   a_read stride=1（广播源 ur-r0 逐迭代 +1 词读第 m 行）、权重 stride=0（复读不变）、
+        #   输出 stride=1（逐迭代 +1 词写第 m 行 [Q0..Q3]）。cumulative=False → 每行独立终值。
+        ops = super().get_dfg(spec)
+        for op in ops:
+            ot = op.op_type.upper()
+            mn = op.metadata.get("meta_name")
+            if ot == "UR_READ" and mn is not None and mn.startswith("b"):
+                op.metadata["stride"] = 0             # 权重列每迭代复读同一词
+            # a_read（mn=="a"）+ out_obj_0 保持 stride=1（super 已设）→ 逐迭代前进
+        return ops
