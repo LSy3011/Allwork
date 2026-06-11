@@ -1410,3 +1410,49 @@ class ManualFp16MatmulFullOperator(ManualFp16MatmulParallelNOperator):
                 op.metadata["stride"] = 0             # 权重列每迭代复读同一词
             # a_read（mn=="a"）+ out_obj_0 保持 stride=1（super 已设）→ 逐迭代前进
         return ops
+
+
+class ManualFp16MatmulFullDsTOperator(ManualFp16MatmulFullOperator):
+    """ADR-035/036 Increment B：fp16_matmul_full 的流式 compute + SMI_DS_T 转置前端
+    （mirror `ManualFp16MatmulQDsTOperator`，但 lanes=M>1 多行而非单 token）。
+
+    与 `fp16_matmul_full`（Increment A，M 激活行直注 SMC_0 bank0）的区别：M×K 激活**列对齐存全 8 SMC**
+    （SMC_s bank{SRC_BANK} 持 1 词 = 列 s 的 M 个 fp16 `[X[0,s]..X[M-1,s]]`）→ `SMI_DS_T` gather K×M Tile
+    → 转置 M×K → M 行各 1 词写回 SMC_0 bank0 addr 0..M-1（word m = 行 m）→ full 的逐行 SHIFTUP 广播流式 compute。
+
+    转置是**单次** prologue（`_inject_smi_ds_t_transpose` 的 shape=[1]：一次产全 M 行，非随 a_read 的 M-loop 复发），
+    数值由 `cluster.apply_smi_ds_t` model-A 提供（element_bits=16 fp16 codec）。**首次行使 lanes=M>1 多行转置**
+    （q_dst 是 lanes=1 单 token）；`transpose_tile` out[m]=[X[m,0..K-1]]，**lanes=8 已验**（lanes∈(1,8) 未单独验）。
+
+    ⚠ **边界（硬依赖 M=K=8，未支持即静默失效，扩展前须先补）**：fp16 codec 一个 128b 词最多 8 个 fp16，
+    `smi_ds_t_config` 传 lanes=M、gather 只读单词。故 **M>8 时 lane≥8 越 128b 词边界静默丢弃**、**K>8（列跨词）
+    未覆盖**、**M<8 codec 支持但未验**。当前 M=K=word_lanes=8「1 列=1 词、1 行=1 词」整除恰好成立。
+    ⚠ **时序忠实度（model-A）**：转置数值走 `cluster.apply_smi_ds_t` 的 run 前 storage→storage backdoor，
+    **不验**跨-SMC SHIFTDN/SHIFTUP 逐拍时序与 INST_DONE 握手（DEBT-033-DST-CTRL）。8/8 bit-perfect 仅**终值 parity**，
+    对 RTL 时序忠实度增信近零，升 Accepted 需 VCS。DEBT-032 已修（ADR-037）→ 流式 compute 稳定，转置前端方可叠加。"""
+
+    SRC_BANK = 6   # 列对齐 FP16 激活存放 bank（避让 a=0 / b0-3=1-4 / y=5；mirror q_dst NOTE-3）
+
+    def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
+        # gather K=8 个 SMC（各 lanes=M 个 fp16 = 1 词）→ 转置 M×K → 写回 SMC_0 bank0 的 M 个词（每行 1 词 fp16）
+        return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+                "gather_smc_cnt": self.K, "lanes": self.M, "element_bits": 16, "word_lanes": 8}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        X = input_data["a"].astype(np.float16).reshape(self.M, self.K)   # flat M*K → [M, K]
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        src_logical = self.SRC_BANK * bank_depth
+        for c in range(self.COLS):
+            b_addr = self.get_bank_addr(f"b{c}", spec)
+            for k, prog in enumerate(programs):
+                prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)   # 本地权重列 c per-SMC
+        for s, prog in enumerate(programs):
+            if s < self.K:
+                # SMC_s 持列 s = [X[0,s]..X[M-1,s]]（M 个 fp16 = 1 词）；不注入 bank0（转置写回）
+                prog.inject_vector(src_logical, X[:, s].copy(), stride=1)
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        # full 的 M 行流式 DFG（FP16MUL + 4 ADDTREE8TO1 + SHIFTUP 广播）+ SMI_DS_T 转置前端注入
+        ops = super().get_dfg(spec)
+        return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)

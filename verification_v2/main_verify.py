@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 
 OPERATOR_MAP = {
@@ -47,6 +47,8 @@ OPERATOR_MAP = {
     # ADR-035：SMI_DS_T 跨-SMC 转置落到 FP16 matmul 路径（fp16_matmul_n + 转置前端）
     "fp16_matmul_q_dst": ManualFp16MatmulQDsTOperator,
     "fp16_matmul_full": ManualFp16MatmulFullOperator,
+    # ADR-035/036 Increment B：fp16_matmul_full 流式 compute + SMI_DS_T 转置前端（lanes=M>1 多行）
+    "fp16_matmul_full_dst": ManualFp16MatmulFullDsTOperator,
 }
 
 CATEGORIES = {
