@@ -1420,16 +1420,19 @@ class ManualFp16MatmulFullDsTOperator(ManualFp16MatmulFullOperator):
     （SMC_s bank{SRC_BANK} 持 1 词 = 列 s 的 M 个 fp16 `[X[0,s]..X[M-1,s]]`）→ `SMI_DS_T` gather K×M Tile
     → 转置 M×K → M 行各 1 词写回 SMC_0 bank0 addr 0..M-1（word m = 行 m）→ full 的逐行 SHIFTUP 广播流式 compute。
 
-    转置是**单次** prologue（`_inject_smi_ds_t_transpose` 的 shape=[1]：一次产全 M 行，非随 a_read 的 M-loop 复发），
-    数值由 `cluster.apply_smi_ds_t` model-A 提供（element_bits=16 fp16 codec）。**首次行使 lanes=M>1 多行转置**
+    转置是**单次** prologue（`_inject_smi_ds_t_transpose` 的 shape=[1]：一次产全 M 行，非随 a_read 的 M-loop 复发）。
+    数值核走 **ADR-036 S2 流式 stepped 单元**（`SmiDsTUnit.evaluate/tick`，由 `setup_smi_ds_t_trigger`
+    指令 VLD 驱动、固定 latency=16 pipeline、scatter 逐行 DATA_OUT；**非** `apply_smi_ds_t` gather-gate backdoor，
+    后者仅无指令流时 fallback）。element_bits=16 fp16 codec。**首次行使 lanes=M>1 多行转置**
     （q_dst 是 lanes=1 单 token）；`transpose_tile` out[m]=[X[m,0..K-1]]，**lanes=8 已验**（lanes∈(1,8) 未单独验）。
 
     ⚠ **边界（硬依赖 M=K=8，未支持即静默失效，扩展前须先补）**：fp16 codec 一个 128b 词最多 8 个 fp16，
     `smi_ds_t_config` 传 lanes=M、gather 只读单词。故 **M>8 时 lane≥8 越 128b 词边界静默丢弃**、**K>8（列跨词）
     未覆盖**、**M<8 codec 支持但未验**。当前 M=K=word_lanes=8「1 列=1 词、1 行=1 词」整除恰好成立。
-    ⚠ **时序忠实度（model-A）**：转置数值走 `cluster.apply_smi_ds_t` 的 run 前 storage→storage backdoor，
-    **不验**跨-SMC SHIFTDN/SHIFTUP 逐拍时序与 INST_DONE 握手（DEBT-033-DST-CTRL）。8/8 bit-perfect 仅**终值 parity**，
-    对 RTL 时序忠实度增信近零，升 Accepted 需 VCS。DEBT-032 已修（ADR-037）→ 流式 compute 稳定，转置前端方可叠加。"""
+    ⚠ **时序忠实度缺口（ADR-036 still proposed）**：数值核虽已是流式 stepped 单元，但 **latency=16 是占位拍数
+    （未经 VCS 校准）**，且 **SHIFTDN 逐拍 drain / interleave-stagger / INST_DONE 多并发握手 / COND 数据就绪同步
+    仍未建模**（DEBT-033-DST-CTRL / DEBT-S4 / 文档 D-07 seq990）。8/8 bit-perfect 仅**终值 parity**，对跨-SMC
+    逐拍时序忠实度增信近零，升 Accepted 需 VCS。DEBT-032 已修（ADR-037）→ 流式 compute 稳定，转置前端方可叠加。"""
 
     SRC_BANK = 6   # 列对齐 FP16 激活存放 bank（避让 a=0 / b0-3=1-4 / y=5；mirror q_dst NOTE-3）
 

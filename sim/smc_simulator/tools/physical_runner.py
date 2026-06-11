@@ -267,9 +267,11 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
     trace_file = case_path / "sim_trace.log"
     trace_file.touch()
 
-    # ADR-034 Stage-I 2b：SMI_DS_T 转置改由其指令的 VLD 在 run 中触发（cluster 级单实例），
-    # 替 ADR-033 Stage-A 的 run-前无条件 apply。数值核仍 model-A（apply_smi_ds_t 复用转置核），
-    # 但触发时机由 emit→hex→decode 的 VLD 驱动 → vld=0 破坏微指令则 e2e FAIL（指令驱动可证伪）。
+    # ADR-034 2b 指令驱动 + ADR-036 S2 流式：SMI_DS_T 转置由其指令 VLD 在 run 中触发（cluster 单实例），
+    # 替 ADR-033 Stage-A 的 run-前无条件 apply。数值核走 setup_smi_ds_t_trigger 的流式 stepped 单元
+    # （SmiDsTUnit.evaluate/tick 固定 latency pipeline、逐行 DATA_OUT；**非** apply_smi_ds_t gather-gate backdoor，
+    # 后者仅无 smi_ds_t hex 时 fallback）。触发时机由 emit→hex→decode VLD 驱动 → vld=0 破坏微指令则 e2e FAIL。
+    # 残留 model-A 缺口 = latency 拍数占位 + SHIFTDN drain/interleave/INST_DONE/COND 未建（DEBT-033-DST-CTRL/-S4）。
     # 列对齐激活已 poison_memory 到各 SMC bank。
     smi_ds_t_cfg = config.get("smi_ds_t")
     if smi_ds_t_cfg:
