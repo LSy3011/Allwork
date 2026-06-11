@@ -21,6 +21,10 @@ from smc_simulator.core.decoder import InstructionDecoder
 from smc_simulator.datapath.constants import RtoVRInputSource, RtoVROutput
 from smc_simulator.core.trace_recorder import TraceRecorder
 
+# sim log 默认只打印有效指令与数据；逐拍 [KERNEL-STEP] 进度噪声默认静默，
+# 设环境变量 AIACC_SIM_DEBUG=1 复现完整逐拍流。
+_SIM_DBG = os.environ.get("AIACC_SIM_DEBUG", "") not in ("", "0", "false", "False")
+
 # 导入所有重构后的单元
 from smc_simulator.units.int_add_unit import IntAddUnit
 from smc_simulator.units.fp_add_unit import FPAddUnit
@@ -193,7 +197,7 @@ class ParallelKernel:
 
     def step(self):
         """执行一个并行仿真周期"""
-        print(f"[KERNEL-STEP] Cycle: {self.cycle_count} Started", flush=True)
+        _SIM_DBG and print(f"[KERNEL-STEP] Cycle: {self.cycle_count} Started", flush=True)
         # 收集来自上一拍计算单元的反馈信号
 
         # 收集来自上一拍计算单元的反馈信号

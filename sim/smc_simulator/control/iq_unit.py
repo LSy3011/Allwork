@@ -4,6 +4,10 @@ import logging
 from typing import Dict, List, Any
 from smc_simulator.core.base import Component
 
+# sim log 默认只打印有效指令与数据（AUDIT-DATA / 写数据）；IQ 内部 bit/loop/inc 调试打印
+# 默认静默，设环境变量 AIACC_SIM_DEBUG=1 复现完整逐拍调试流。
+_SIM_DBG = os.environ.get("AIACC_SIM_DEBUG", "") not in ("", "0", "false", "False")
+
 class IQUnit(Component):
     """
     重构后的 Instruction Queue (IQ) 单元。
@@ -17,7 +21,7 @@ class IQUnit(Component):
         self.en_inc = en_inc
         p_width = self.decoder.payload_width if self.decoder else 0
         self.payload_width = p_width
-        print(f"  [IQ-INIT-AUDIT] Unit: {name:<10} | Payload Width: {p_width}")
+        _SIM_DBG and print(f"  [IQ-INIT-AUDIT] Unit: {name:<10} | Payload Width: {p_width}")
         self.memory = []
         self.pc = 0
         self._next_pc = 0
@@ -54,7 +58,7 @@ class IQUnit(Component):
             lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
             self.memory = [int(l, 16) for l in lines]
         if len(self.memory) > 0 and "rtovr-13" in self.unit:
-             print(f"[IQ-LOAD-AUDIT] {self.unit} Loaded PC=0 Raw:{hex(self.memory[0])}")
+             _SIM_DBG and print(f"[IQ-LOAD-AUDIT] {self.unit} Loaded PC=0 Raw:{hex(self.memory[0])}")
         self.logger.info(f"[IQ:{self.unit}] Successfully loaded {len(self.memory)} instructions from {file_path}")
 
     def evaluate(self, inputs: Dict[str, Any] = {}, cycle: int = 0):
@@ -91,7 +95,7 @@ class IQUnit(Component):
             current_inc = raw_inc if raw_inc < 8 else raw_inc - 16
             
             if self.unit == "ur-r1":
-                print(f"  [IQ-INC-AUDIT] ur-r1 PC:{self.pc} Raw:{hex(raw_base)} INC:{current_inc}")
+                _SIM_DBG and print(f"  [IQ-INC-AUDIT] ur-r1 PC:{self.pc} Raw:{hex(raw_base)} INC:{current_inc}")
 
             # 🚀 物理契约 V27.0: 无论 VLD 是否为 1，只要是执行帧 (EMBED=0) 就必须运行地址合成
             is_control_frame = (hjump == 1) or (hembed > 0)
@@ -108,7 +112,7 @@ class IQUnit(Component):
                 self.loop_states[0]["inc"] = current_inc
                 self.loop_states[0]["max"] = loops_val
             elif hembed > 0:
-                print(f"    [IQ-LOOP-INIT] Unit:{self.unit} Level:{hembed} Max:{loops_val}")
+                _SIM_DBG and print(f"    [IQ-LOOP-INIT] Unit:{self.unit} Level:{hembed} Max:{loops_val}")
                 self.loop_states[hembed]["max"] = loops_val
                 # 🛸 关键修复：外层循环 (Level 1) 必须从专用位域 INC_EMBED 提取步长
                 if hembed == 1:
@@ -119,7 +123,7 @@ class IQUnit(Component):
                 else:
                     self.loop_states[hembed]["inc"] = current_inc
                 self.loop_states[hembed]["cnt"] = 0
-                print(f"    [IQ-DEBUG-HDR] {self.unit} Stored Level:{hembed} Inc:{self.loop_states[hembed]['inc']}")
+                _SIM_DBG and print(f"    [IQ-DEBUG-HDR] {self.unit} Stored Level:{hembed} Inc:{self.loop_states[hembed]['inc']}")
                 self.loop_start_pcs[hembed] = self.pc + 1
                 self._next_pc = self.pc + 1
                 self._instruction_valid = False
@@ -155,7 +159,7 @@ class IQUnit(Component):
             if self.unit == "ur-w0":
                 raw_bin = f"{raw:0128b}"
                 b58 = raw_bin[-59]
-                print(f"[IQ-BIT-AUDIT] ur-w0 PC={self.pc} b58={b58} Raw:{hex(raw)}")
+                _SIM_DBG and print(f"[IQ-BIT-AUDIT] ur-w0 PC={self.pc} b58={b58} Raw:{hex(raw)}")
             
             off_end = self.decoder._layout['EMBED_END']['offset']
             end_mask = (raw >> off_end) & 0x3F
@@ -169,7 +173,7 @@ class IQUnit(Component):
 
                         # 成功回跳
                         self._next_pc = self.loop_start_pcs[i]
-                        print(f"[IQ-LOOP-HIT] {self.unit} PC:{self.pc} -> Next:{self._next_pc} L{i}Cnt:{self.loop_states[i]['cnt']}/{self.loop_states[i]['max']}")
+                        _SIM_DBG and print(f"[IQ-LOOP-HIT] {self.unit} PC:{self.pc} -> Next:{self._next_pc} L{i}Cnt:{self.loop_states[i]['cnt']}/{self.loop_states[i]['max']}")
                         for j in range(0, i):
                             self.loop_states[j]["cnt"] = 0
                         self.delay_active = False
@@ -233,7 +237,7 @@ class IQUnit(Component):
                 new_field_val = (orig_val + total_phys_inc) & field_mask
                 
                 if self.unit.startswith("ur-") and cycle % 100 == 0: # 减少日志打印
-                    print(f"[IQ-DIAG] {self.unit} Cyc:{cycle} TotalInc:{total_phys_inc} "
+                    _SIM_DBG and print(f"[IQ-DIAG] {self.unit} Cyc:{cycle} TotalInc:{total_phys_inc} "
                           f"Base:{orig_val} -> Final:{new_field_val}")
                 
                 new_payload = (new_payload & ~(field_mask << offset)) | (new_field_val << offset)
