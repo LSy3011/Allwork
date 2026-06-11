@@ -125,6 +125,13 @@ class PipelineRunner:
             if cfg:
                 self._patch_sim_config(output_dir, {"smi_ds_t": cfg})
 
+        # DEBT-032 H2：SHIFTUP 广播源独立捕获寄存器 config（消 flaky，hco H2 判定）。
+        # 从 DFG 找 broadcast_source 标记的 UR_READ，解析其读端口(iq_id-base)与 bank(layout)，
+        # 令 sim 在该端口读该 bank 时快照广播激活、不被同端口异 bank（权重）读 clobber。
+        bcast_cfg = self._broadcast_capture_config(ops)
+        if bcast_cfg:
+            self._patch_sim_config(output_dir, {"broadcast_capture": bcast_cfg})
+
         # 🛸 [V5.4 FIX] 保存物理指令供审计员使用
         with open(os.path.join(output_dir, "physical_instructions.json"), "w") as f:
             json.dump([instr.to_dict() for instr in physical_instrs], f, indent=2)
@@ -223,6 +230,22 @@ class PipelineRunner:
         data.update(extra)
         with open(conf_path, "w") as f:
             json.dump(data, f, indent=2)
+
+    def _broadcast_capture_config(self, ops) -> dict:
+        """DEBT-032 H2：从 DFG 派生 SHIFTUP 广播源捕获 config（port + bank）。
+        广播源 = `_inject_shiftup_broadcast` 标记 broadcast_source 的 UR_READ（pin iq_id=ur-r0）。
+        port = iq_id - UR_READ 基址；bank = logical_addr 经 PhysicalMemoryLayout 解析。
+        无广播源（非 broadcast 算子）→ 返回 None，sim 保持旧 live-read 行为。"""
+        src = next((o for o in ops if o.metadata.get("broadcast_source")
+                    and o.metadata.get("iq_id") is not None), None)
+        if src is None:
+            return None
+        base = self.spec.config.get("iq_registry", {}).get("UR_READ", 30)
+        port = int(src.metadata["iq_id"]) - int(base)
+        from src.core.memory_layout import PhysicalMemoryLayout
+        layout = PhysicalMemoryLayout.from_spec(self.spec)
+        bank, _off = layout.resolve(int(src.metadata.get("logical_addr", 0)))
+        return {"port": port, "bank": int(bank)}
 
     def parse_simulation_timeline(self, output_dir: str) -> Dict[str, List[str]]:
         timeline_path = os.path.join(output_dir, "smc_0", "analysis", "timeline_ascii.txt")

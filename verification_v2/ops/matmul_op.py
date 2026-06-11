@@ -31,6 +31,11 @@ def _inject_shiftup_broadcast(ops: List[Any], broadcast_names: set, spec: Any) -
                 and op.metadata.get("role") == "input"):
             if len(ur_to_shiftup) == 0:
                 op.metadata["iq_id"] = UR_R0_IQ_ID  # 单广播源 pin ur-r0
+                # DEBT-032（ADR-037）：标记广播源，供 pipeline_runner._broadcast_capture_config
+                # 派生 sim 的 SHIFTUP 独立捕获寄存器 config（port/bank）。修法在 sim 层（hco H2 判定：
+                # 同端口权重读 prologue 伪读 clobber port0 锁存器是 sim model-A artifact），**不加任何 SMT
+                # 约束**（H1 端口独占方案已证伪 UNSAT 并否决，见 ADR-037 Rejected 段）。
+                op.metadata["broadcast_source"] = True
             sup_id = f"shiftup_{op.trace_id}"
             sup_op = MIROp(
                 op_type="SHIFTUP", logic_cycle=0, trace_id=sup_id,
@@ -1336,11 +1341,11 @@ class ManualFp16MatmulFullOperator(ManualFp16MatmulParallelNOperator):
     绕 SMI_DS_T 转置前端（Increment B 接，mirror fp16_matmul_q_dst）。输出 per-SMC M 词、word m =
     第 m 行的 [Q0..Q3]（COLS=4 lane）。golden (smc_num, M*4) 对齐 readback word 序。
 
-    ⚠ **当前 flaky（阻塞于 DEBT-032-RESIDENT-TIMING，2026-06-11 根因已定位）**：继承 fp16_matmul_n
-    的 pre-existing 脆弱性——广播激活 pin 到 ur-r0，但 II loop 的 prologue 伪读也排在 ur-r0，在
-    SHIFTUP 捕获前覆盖 port0 输出锁存器 → 广播 0 → 全 SMC 全 0。好排程（暖 cache/特定 seed）下 8/8
-    bit-perfect、坏排程下 0/8。控制实验证此 flaky 是 pre-existing（非本算子引入；既有 fp16_matmul_n
-    "8/8" 亦 schedule-lucky）。根因详见 memory `debt-032-resident-timing-rootcause`。稳定化=下次专项。
+    ✅ **DEBT-032-RESIDENT-TIMING 已修（ADR-037，2026-06-11，hco H2 判定）**：根因=广播激活 pin 到 ur-r0，
+    但同端口权重读的 II prologue 伪读在 SHIFTUP 捕获前覆盖 port0 锁存器 → 广播 0。hco 读 spec 表542-544 判定
+    这是 sim model-A artifact（SHIFTUP 物理读指令字 `data` 字段、非 live UR 端口）。修法=给 SHIFTUP 广播源独立
+    捕获寄存器（a_read 拍快照、hold 到广播），消 flaky：fp16_matmul_full / fp16_matmul_n 各 4/4 cold-build 确定性
+    8/8 bit-perfect。绝对拍忠实度待 user RTL 流式时序表 + VCS（ADR-037 升 Accepted 门）。
     """
 
     M = 8   # >4：真破 M≤4（M 行流式广播，无端口/pipeline-depth 硬限）

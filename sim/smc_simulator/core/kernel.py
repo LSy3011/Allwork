@@ -116,6 +116,18 @@ class ParallelKernel:
         for _u in self.units.values():
             _u.smc_id = smc_id
 
+        # DEBT-032 H2（hco 判定）：SHIFTUP 广播源独立捕获寄存器。
+        # spec 表542-544：SHIFTUP 暴露 DR_SHIFTUP_D = CRU_SHIFTUP_O[data]（指令字 data 字段），
+        # 物理上**不** live 读 UR 读端口。model-A 用 ur-r0 live 读顶替流式激活（DEBT-023-A），
+        # 但同端口权重读的 modulo prologue 伪读会在 SHIFTUP 捕获前覆盖 port0 锁存器 → 广播 0。
+        # 修法：广播源读（port=_bcast_capture[0]、bank=_bcast_capture[1]）发生时把值快照进
+        # _bcast_capture_data、hold 到广播 fire，不被同端口异 bank 读覆盖。None → 旧 live-read 行为。
+        self._bcast_capture = None       # (port_idx, bank) 或 None
+        self._bcast_capture_data = 0
+
+    def set_broadcast_capture(self, port_idx: int, bank: int):
+        """启用 DEBT-032 H2 广播源快照：当 port_idx 读 bank 时锁存广播激活。"""
+        self._bcast_capture = (int(port_idx), int(bank))
 
     def enable_trace(self):
         """Enable trace recording"""
@@ -528,7 +540,10 @@ class ParallelKernel:
             'ctrl': controls.get('shiftup', 0),
             'smc_id': self.smc_id,
             'cru_shiftup_i': self.chain_inputs.get('shiftup', 0),
-            'data': self.ur_bank.get_read_data(0)  # SMC_0 chain head 本地数据源；其他 SMC 不用此字段
+            # SMC_0 chain head 本地数据源；其他 SMC 不用此字段。
+            # DEBT-032 H2：配了广播捕获则用独立快照寄存器（避 port0 锁存器被同端口异 bank 读 clobber）。
+            'data': (self._bcast_capture_data if self._bcast_capture is not None
+                     else self.ur_bank.get_read_data(0))
         })
         self.units['shiftdn'].evaluate({
             'ctrl': controls.get('shiftdn', 0),
@@ -591,6 +606,14 @@ class ParallelKernel:
         
         if ur_inputs:
             self.ur_bank.evaluate(ur_inputs, cycle=self.cycle_count)
+
+        # DEBT-032 H2：广播源读发生时快照激活（本拍读、下拍可见，与 live get_read_data 1 拍流水一致）。
+        # 仅当配置端口读配置 bank 才更新 → 同端口异 bank（权重）读不覆盖广播激活。
+        if self._bcast_capture is not None:
+            port, bank = self._bcast_capture
+            req = ur_inputs.get(f'R{port}')
+            if req and req.get('en') and int(req.get('bank', -1)) == bank:
+                self._bcast_capture_data = self.ur_bank._next_read_ports_out[port]
 
     def _tick_all(self):
         self.ur_bank.tick(self.cycle_count)

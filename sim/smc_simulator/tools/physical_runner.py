@@ -254,11 +254,15 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
     )
 
     iq_map = {n: str(case_path / h) for n, h in iq_init.items()}
+    # DEBT-032 H2：SHIFTUP 广播源独立捕获寄存器配置（消 flaky，hco H2 判定）
+    bcast_cap = config.get("broadcast_capture")
     for k in range(smc_num):
         kernel = cluster.kernels[k]
         kernel.enable_trace()
         kernel.load_program(dict(iq_map), {})  # 每 SMC 各自 load 同一套全局指令流（lockstep）
         poison_memory(kernel, per_smc_ur[k], case_path)
+        if bcast_cap:
+            kernel.set_broadcast_capture(bcast_cap["port"], bcast_cap["bank"])
 
     trace_file = case_path / "sim_trace.log"
     trace_file.touch()
