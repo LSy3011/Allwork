@@ -123,6 +123,21 @@ class PipelineRunner:
         if is_multi_smc and hasattr(operator, "smi_ds_t_config"):
             cfg = operator.smi_ds_t_config(spec=self.spec)
             if cfg:
+                # ADR-036 S3-a：real-gather 时 ds_src_read 进 emit、solver 分配端口。post-solve 回读其
+                # 实际落的端口 → cfg["src_read_port"]（cluster 据此走读端口 gather 而非 storage backdoor）
+                # + dst_src_capture（独立捕获寄存器，避同端口异 bank 读 clobber，mirror broadcast_capture）。
+                dst_cap = self._dst_src_capture_config(ops)
+                # ADR-036 S3-a（hco a1d94523 note）：real-gather 时 ds_src_read 已 emit 真 bank 读指令，
+                # 若端口回读失败（dst_cap None，仅当 solver 漏赋 iq_id）则 cluster 会静默回 storage
+                # backdoor → 固件走真读 / sim 走 backdoor 的半态。loud-fail 钉死此不一致（现 emit 路径
+                # 每个非 structural op 必赋 iq_id、触发不到；前移守 S3-b 固件完整性门）。
+                if any(o.metadata.get("ds_src_read") for o in ops) and dst_cap is None:
+                    raise RuntimeError(
+                        "ADR-036 S3-a: ds_src_read 标记 real-gather 但端口回读失败（iq_id 未分配）——"
+                        "拒绝静默回 storage backdoor（固件真读/sim backdoor 半态）")
+                if dst_cap:
+                    cfg["src_read_port"] = dst_cap["port"]
+                    self._patch_sim_config(output_dir, {"dst_src_capture": dst_cap})
                 self._patch_sim_config(output_dir, {"smi_ds_t": cfg})
 
         # DEBT-032 H2：SHIFTUP 广播源独立捕获寄存器 config（消 flaky，hco H2 判定）。
@@ -237,6 +252,24 @@ class PipelineRunner:
         port = iq_id - UR_READ 基址；bank = logical_addr 经 PhysicalMemoryLayout 解析。
         无广播源（非 broadcast 算子）→ 返回 None，sim 保持旧 live-read 行为。"""
         src = next((o for o in ops if o.metadata.get("broadcast_source")
+                    and o.metadata.get("iq_id") is not None), None)
+        if src is None:
+            return None
+        base = self.spec.config.get("iq_registry", {}).get("UR_READ", 30)
+        port = int(src.metadata["iq_id"]) - int(base)
+        from src.core.memory_layout import PhysicalMemoryLayout
+        layout = PhysicalMemoryLayout.from_spec(self.spec)
+        bank, _off = layout.resolve(int(src.metadata.get("logical_addr", 0)))
+        return {"port": port, "bank": int(bank)}
+
+    def _dst_src_capture_config(self, ops) -> dict:
+        """ADR-036 S3-a：从 DFG 派生 SMI_DS_T 列对齐源读（ds_src_read）的端口捕获 config。
+        real-gather 时 ds_src_read 标 `ds_src_read=True` 且不硬 pin iq_id → solver 分配空闲读端口
+        （4 端口已被 compute 占满，但 ds_src 是单次 prologue，与稳态读时间错开）。
+        port = 实际分配 iq_id - UR_READ 基址；bank = logical_addr 经 layout 解析（=SRC_BANK）。
+        非 real-gather（structural_only，无此标记）→ 返回 None，sim 维持 storage backdoor。
+        Q1 待 RTL：DST 列对齐源读是否实占 compute 的 UR_READ 端口（DEBT-036-DST-SRC-PORT，hco）。"""
+        src = next((o for o in ops if o.metadata.get("ds_src_read")
                     and o.metadata.get("iq_id") is not None), None)
         if src is None:
             return None

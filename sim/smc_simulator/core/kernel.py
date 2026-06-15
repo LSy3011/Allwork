@@ -128,10 +128,20 @@ class ParallelKernel:
         # _bcast_capture_data、hold 到广播 fire，不被同端口异 bank 读覆盖。None → 旧 live-read 行为。
         self._bcast_capture = None       # (port_idx, bank) 或 None
         self._bcast_capture_data = 0
+        # ADR-036 S3-a：SMI_DS_T 列对齐源读（ds_src_read）独立捕获寄存器。real-gather 时 ds_src_read
+        # 经 solver 分配端口、读本地 bank{SRC_BANK} 列对齐激活；cluster gather 从此快照取数（替 storage
+        # backdoor）。与 _bcast_capture 同构（hco 判定）：避同端口异 bank（权重）读 clobber 该端口锁存器，
+        # snapshot hold 到 cluster gather 读取拍。None → cluster 维持 storage 直读。
+        self._dst_src_capture = None     # (port_idx, bank) 或 None
+        self._dst_src_capture_data = 0
 
     def set_broadcast_capture(self, port_idx: int, bank: int):
         """启用 DEBT-032 H2 广播源快照：当 port_idx 读 bank 时锁存广播激活。"""
         self._bcast_capture = (int(port_idx), int(bank))
+
+    def set_dst_src_capture(self, port_idx: int, bank: int):
+        """ADR-036 S3-a：启用 SMI_DS_T 列对齐源读快照：当 port_idx 读 bank 时锁存列对齐激活。"""
+        self._dst_src_capture = (int(port_idx), int(bank))
 
     def enable_trace(self):
         """Enable trace recording"""
@@ -618,6 +628,14 @@ class ParallelKernel:
             req = ur_inputs.get(f'R{port}')
             if req and req.get('en') and int(req.get('bank', -1)) == bank:
                 self._bcast_capture_data = self.ur_bank._next_read_ports_out[port]
+
+        # ADR-036 S3-a：列对齐源读（ds_src_read）快照——同端口读配置 bank 时锁存（不被同端口异 bank 读覆盖），
+        # hold 到 cluster gather 读取拍。与 _bcast_capture 同款（hco：sim 建模层避 clobber，不加 SMT 约束）。
+        if self._dst_src_capture is not None:
+            port, bank = self._dst_src_capture
+            req = ur_inputs.get(f'R{port}')
+            if req and req.get('en') and int(req.get('bank', -1)) == bank:
+                self._dst_src_capture_data = self.ur_bank._next_read_ports_out[port]
 
     def _tick_all(self):
         self.ur_bank.tick(self.cycle_count)

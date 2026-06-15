@@ -159,6 +159,51 @@ exit=1 + truth auditor 逐拍报 a_read stale → **任何 latency 漂移 loud-f
   否则暴真 bank 冲突。
 - latency=16 仍是 Q2「先按 gather 完成点建模」假设；逐拍与 RTL 一致 = 验收 ②，**待 S4 VCS**。`still_holds: proposed` 维持。
 
+## S3-a 实现（2026-06-15，gather 去 backdoor → 真固件 UR 读端口；hco BLOCK 提案 A → 修正 → 落地）
+S3-a（VCS 第一手反馈暴露 model-A backdoor 缺口：`fp16_matmul_full_dst` 固件首个 UR 读=bank0 a_read，
+但 sim 首个 UR 读=DST-GATHER bank6——两者不对齐，因 bank6 列对齐读标 `structural_only` 被 emit 前过滤、
+固件无 bank6 读指令，sim 靠 `cluster.py` storage 直读蒙过；8/8 假绿因只比 sim-vs-golden、不检查固件-log 一致）。
+**目标 = gather 侧去 backdoor，让 sim 走真固件指令**（scatter 留 S3-b、删 model-A 残余留 S3-c）。
+
+落地（env flag `AIACC_DST_REAL_GATHER` 守，默认 OFF=维持 backdoor，ON=真 gather；ON/OFF 逐 bit A/B 护栏）：
+- **`matmul_op._inject_smi_ds_t_transpose`**：ON → `ds_src_read` 去 `structural_only`（进 emit/sim、真 emit
+  BANK=6 读指令）且**不硬 pin iq_id**（让 solver 分配端口）；OFF → 维持 `structural_only=True` + pin。
+- **`pipeline_runner._dst_src_capture_config`**（镜像 `_broadcast_capture_config`）：post-solve 回读 ds_src_read
+  实际落的端口（`port=iq_id-UR_READ基址`）→ `smi_ds_t cfg["src_read_port"]` + patch `dst_src_capture{port,bank}`。
+- **`kernel.set_dst_src_capture` + 读 evaluate 快照**：独立捕获寄存器 `_dst_src_capture_data`，同端口读配置 bank
+  时锁存（与 `_bcast_capture` 同构）→ 即使 ds_src 与广播 a_read 共享 port0，两寄存器按 bank（6 vs 0）独立快照、
+  互不 clobber（sim 建模层避 clobber，**不加 SMT 约束**——hco H1 端口独占 axiom 已证伪 UNSAT，见 ADR-037）。
+- **`cluster._tick_smi_ds_t_trigger`**：`cfg["src_read_port"]` 存在 → gather 从 `kernels[s]._dst_src_capture_data`
+  取数，**删 storage[bank6] 直读**；否则维持 backdoor。
+
+### hco 裁定（agentId a8d2840595118f5c8，BLOCK 提案 A → 修正后方向 ACCEPT）
+- **BLOCK 原提案「ds_src_read 硬 pin ur-r1」**：4 个 UR 读端口已被 fp16 compute（4 权重 + 广播激活）占满
+  （ADR-037 实测 II=4..18+ 全 UNSAT），无空闲 ur-r1。修正 = 不硬 pin、solver 在转置 prologue 窗口（ds_src 是
+  单次 `shape=[1]`，与稳态读时间错开）分配端口 + post-solve 回读（实测 solver 分到 port0=ur-r0，与广播源共享，
+  靠双捕获寄存器按 bank 区分而无冲突）。
+- **Q2 ACCEPT**：从读端口锁存器取数是合格 model-A 中转、SHIFTDN 下行搬运段仍记 DEBT-S4，**是进步非倒退**
+  （从「绕一切直读 storage」收敛到「占真 R 端口 + 进 arbiter 视野」）。
+- **Q4 确认**：bank0 同拍 R+W 此阶段不触（scatter 仍 backdoor 写 bank0、不进 arbiter），S3-b scatter 端口化才暴露。
+
+### 实证（本会话）
+- ON：II=10 SAT、固件含 1 条 `BANK=6 ADDR=0` UR 读指令（trace_id=ds_src_read，落 ur-r0）、sim 8 条 DST-GATHER
+  Port:0 Bank:6 读捕获寄存器（非零真实 fp16 列数据）、**8/8 bit-perfect e2e exit=0**。
+- A/B：ON vs OFF 输出逐 bit 一致（两路均 bit-perfect vs golden）。
+- 回归：pytest 145 passed / 6 skipped（默认 OFF 不受影响；含 S3-a 新增 4 测试）。
+- **可证伪性**：`_dst_src_capture_data` 初值 0、仅由真 bank6 读填充；若固件无该读指令则 gather 得 0 → 输出错 → FAIL。
+  ON 8/8 通过 ⇒ 真固件读生效（非 backdoor）。
+
+### S3-a 债务 / 待办
+- **DEBT-036-DST-SRC-PORT**（hco Q1，user-fact 待 RTL）：SMI_DS_T 跨-SMC 列对齐源读（SMC_s 读本地 bank6 列 s）
+  **物理上走哪条 datapath/端口**未明——(a) SHIFTDN 内部搬运读，不占 compute 的 4 个 UR_READ 端口；或 (b) 复用
+  compute 的 UR_READ 端口（端口时序耦合是真约束）。S3-a 取**保守模型 (b)**（占真端口、靠排程错开）。**升 Accepted
+  门**之一 = user 答此 datapath/端口归属 + VCS 实测；若证 (a)，把 ds_src 建成 UR_READ IQ 的做法需重构。
+- **默认 OFF 暂不翻**：S3-a 仅 gather 侧；backdoor 整体删（含 scatter S3-b + model-A 残余 S3-c）后才翻默认/删 flag。
+- 固件完整性门（hco 建议，auditor 扫 sim log 每 UR 读写事件必有固件指令对应、否则 FAIL，抓 backdoor）= S3-b/c 增量。
+  **已部分前移**（hco a1d94523 note 1）：`pipeline_runner` 在 real-gather 标记存在但端口回读失败时 loud-fail，
+  拒绝「固件真读 / sim 静默回 backdoor」半态（现 emit 路径触发不到，守未来回归）。其可证伪单测留 S3-b。
+- DEBT-S4-SHIFTDN-DRAIN / DST-SCATTER 同拍 R+W（既存）见 S2 债务段。`still_holds: proposed` 维持。
+
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/
   para1236-1246（矩阵×矩阵 + 激活矩阵排序=SMI_DS_T）/ 表542-548（SHIFTUP/SHIFTDN）/ 表593-595（SMI_IQ）/ 表596-598（SMI_DS_T）

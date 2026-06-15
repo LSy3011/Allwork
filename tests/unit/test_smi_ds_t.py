@@ -699,5 +699,117 @@ class TestSmiDsTS1FiveStage(unittest.TestCase):
                       "auditor 必须过滤 structural_only（emit 过滤=audit 过滤不变量，hco a4f6b70）")
 
 
+class TestSmiDsTS3aRealGather(unittest.TestCase):
+    """ADR-036 S3-a：env flag AIACC_DST_REAL_GATHER 控制 gather 是否走真固件 UR 读端口
+    （替 cluster storage backdoor）。锁死 hco 修正后的不变量：
+      - OFF（默认）→ ds_src_read structural_only=True + 硬 pin iq_id（维持 backdoor，S1 行为）
+      - ON → ds_src_read 进 emit（去 structural_only）+ **不硬 pin iq_id**（让 solver 分配端口，
+        hco BLOCK 提案 A：4 读端口已被 compute 占满，无空闲 ur-r 可静态 pin）+ 标 ds_src_read=True
+        （供 pipeline_runner post-solve 回读端口）。"""
+
+    def _build_full_dst_dfg(self):
+        sys.path.append(str(_ROOT / "src"))
+        sys.path.append(str(_ROOT / "verification_v2"))
+        from api.hw_spec import HardwareSpec
+        from verification_v2.ops.matmul_op import ManualFp16MatmulFullDsTOperator
+        spec = HardwareSpec.load("hw_config")
+        return ManualFp16MatmulFullDsTOperator().get_dfg(spec=spec)
+
+    def setUp(self):
+        import os
+        self._saved = os.environ.get("AIACC_DST_REAL_GATHER")
+
+    def tearDown(self):
+        import os
+        if self._saved is None:
+            os.environ.pop("AIACC_DST_REAL_GATHER", None)
+        else:
+            os.environ["AIACC_DST_REAL_GATHER"] = self._saved
+
+    def test_off_keeps_structural_only_backdoor(self):
+        """OFF（默认）：ds_src_read structural_only + pin iq_id → 维持 model-A backdoor。"""
+        import os
+        os.environ.pop("AIACC_DST_REAL_GATHER", None)
+        by_id = {o.trace_id: o for o in self._build_full_dst_dfg()}
+        src = by_id["ds_src_read"]
+        self.assertTrue(src.metadata.get("structural_only"),
+                        "OFF 时 ds_src_read 必须 structural_only（不进 emit，走 storage backdoor）")
+        self.assertIsNotNone(src.metadata.get("iq_id"), "OFF 时维持硬 pin iq_id")
+        self.assertFalse(src.metadata.get("ds_src_read"), "OFF 不打 real-gather 标记")
+
+    def test_on_emits_real_read_no_pin(self):
+        """ON：ds_src_read 去 structural_only（进 emit 真 bank 读）+ 不硬 pin iq_id（solver 分配）
+        + 标 ds_src_read=True。专杀 hco BLOCK 提案 A 的硬 pin 回归。"""
+        import os
+        os.environ["AIACC_DST_REAL_GATHER"] = "1"
+        by_id = {o.trace_id: o for o in self._build_full_dst_dfg()}
+        src = by_id["ds_src_read"]
+        self.assertFalse(src.metadata.get("structural_only"),
+                         "ON 时 ds_src_read 必须进 emit（去 structural_only → 真固件 bank 读指令）")
+        self.assertIsNone(src.metadata.get("iq_id"),
+                          "ON 时**不得硬 pin iq_id**（hco BLOCK：4 读端口已满，须让 solver 分配空闲端口）")
+        self.assertTrue(src.metadata.get("ds_src_read"),
+                        "ON 时须标 ds_src_read=True（供 pipeline_runner post-solve 回读端口）")
+        # logical_addr 仍指向 SRC_BANK=6（真 bank6 列对齐读）
+        self.assertEqual(src.metadata.get("logical_addr"), 6 * 256,
+                         "ds_src_read 应读 SRC_BANK=6（fp16 full_dst 列对齐激活）")
+
+
+class TestSmiDsTS3aCaptureRegister(unittest.TestCase):
+    """ADR-036 S3-a：ds_src 独立捕获寄存器（hco Q3）——同端口异 bank 读不 clobber 列对齐源读快照。
+    专杀 DEBT-032 同类失效（广播源被同端口权重读 clobber）：即使 ds_src(bank6) 与广播 a_read(bank0)
+    共享 port0（solver 实测分到 port0），按 bank 区分的捕获寄存器各自独立快照、互不覆盖。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "sim"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _kernel(self):
+        self._paths()
+        from smc_simulator.core.kernel import ParallelKernel
+        return ParallelKernel(smc_id=0)
+
+    def _ur_read_instr(self, spec, bank, addr):
+        """真编码一条 UR 读 body 微指令（VALID/BANK/ADDR），驱动 kernel._evaluate_ur 走真解码路径。"""
+        from driver.packer import BitPacker
+        return BitPacker.pack_capsule(
+            spec, "UR_READ", {"VALID": 1, "BANK": bank, "ADDR": addr, "smc_id_en": 7},
+            is_body=True, VLD=1)
+
+    def _spec(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        return HardwareSpec.load("hw_config")
+
+    def test_capture_holds_through_same_port_other_bank_read(self):
+        """忠实驱动 kernel._evaluate_ur（真解码 UR 读指令）：port0 读 bank6（ds_src）→ 快照；
+        随后 port0 读 bank0（广播）→ ds_src 快照**不被 clobber**（按 bank 区分的独立捕获寄存器）。"""
+        spec = self._spec()
+        k = self._kernel()
+        k.set_dst_src_capture(port_idx=0, bank=6)
+        k.set_broadcast_capture(port_idx=0, bank=0)   # 共享 port0，验互不干扰
+        DST_VAL = 0xABCDEF0123456789
+        BCAST_VAL = 0x1111222233334444
+        # 拍1：port0 读 bank6（ds_src 列对齐激活）→ _evaluate_ur 内快照进 _dst_src_capture_data
+        k.ur_bank.storage[6][0] = DST_VAL
+        k.cycle_count = 1
+        k._evaluate_ur({"ur-r0": self._ur_read_instr(spec, 6, 0)})
+        k.ur_bank.tick(cycle=1)
+        self.assertEqual(k._dst_src_capture_data, DST_VAL, "拍1 后 ds_src 快照应=bank6 值")
+        # 拍2：port0 读 bank0（广播激活）→ 覆盖 port0 活锁存器，但 ds_src 快照（bank6）应 hold 不变
+        k.ur_bank.storage[0][0] = BCAST_VAL
+        k.cycle_count = 2
+        k._evaluate_ur({"ur-r0": self._ur_read_instr(spec, 0, 0)})
+        k.ur_bank.tick(cycle=2)
+        self.assertEqual(k._dst_src_capture_data, DST_VAL,
+                         "同端口异 bank（bank0 广播）读后，ds_src 快照(bank6)不应被 clobber")
+        self.assertEqual(k._bcast_capture_data, BCAST_VAL, "广播快照(bank0)各自独立更新")
+        self.assertEqual(k.ur_bank.get_read_data(0), BCAST_VAL,
+                         "port0 活锁存器已被 bank0 覆盖（证明若直读端口会 clobber，故需独立捕获寄存器）")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,8 +1,17 @@
+import os
 import numpy as np
 from typing import List, Dict, Any
 from .base import BaseOperator
 from ir.mir.builder import MIROpBuilder
 from driver.hw_resource import ResourceType as RT, PortSlot as PS
+
+
+def dst_real_gather_enabled() -> bool:
+    """ADR-036 S3-a：env flag 控制 SMI_DS_T gather 是否走真固件 UR 读端口（替 cluster storage backdoor）。
+    ON → ds_src_read 进 emit/sim（真 bank{SRC_BANK} 读指令、solver 分配空闲端口）+ cluster 经读端口捕获
+    寄存器 gather；OFF（默认）→ 维持 structural_only + storage 直读（model-A backdoor）。
+    护栏：ON vs OFF 逐 bit A/B diff 须一致（hco APPROVE-with-notes，保守模型 b，DEBT-036-DST-SRC-PORT）。"""
+    return os.environ.get("AIACC_DST_REAL_GATHER", "0").lower() in ("1", "true", "on", "yes")
 
 
 def _inject_shiftup_broadcast(ops: List[Any], broadcast_names: set, spec: Any) -> List[Any]:
@@ -134,15 +143,27 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
     # 「UR read—SHIFTDN gather—SMI_DS_T transpose—scatter」(cluster.py)，故本节点仅作 SMT
     # 排程的「列对齐读」依赖锚点、**不进 emit/sim**（pipeline_runner emit 前按此 flag 过滤），
     # 避免被 solver 重指派到真 ur-r 执行而覆盖 backdoor 转置结果。S3 删 model-A 后转为真流式读。
+    # ADR-036 S3-a：real-gather ON → ds_src_read 进 emit/sim（真 bank{SRC_BANK} 读指令），且**不硬 pin
+    # iq_id**——4 个 UR 读端口已被 fp16 compute（4 权重 + 广播激活）占满（ADR-037 实测全 UNSAT），无空闲
+    # ur-rN 可静态 pin（hco BLOCK 提案 A）。ds_src_read 是单次 prologue（shape=[1]），让 solver 在转置
+    # prologue 窗口分配一个空闲端口；其实际落的端口由 pipeline_runner post-solve 回读 → patch 进
+    # smi_ds_t cfg(src_read_port) + dst_src_capture（镜像 ADR-037 _broadcast_capture_config）。
+    # OFF（默认）→ structural_only=True（仅 SMT 锚点、不进 emit）+ iq_id=ur_read_iq，维持 model-A backdoor。
+    real_gather = dst_real_gather_enabled()
+    ds_src_meta = {
+        "depends_on": [], "iq_type": RT.UR_READ,
+        "meta_name": "ds_src", "role": "input", "stride": 0,
+        "logical_addr": src_bank * bank_depth + src_addr,
+        "math": "smi_ds_t_src_read(col-aligned X[:,s] on SMC_s)", **prologue,
+    }
+    if real_gather:
+        ds_src_meta["ds_src_read"] = True  # post-solve 回读端口的标记（mirror broadcast_source）
+    else:
+        ds_src_meta["iq_id"] = ur_read_iq
+        ds_src_meta["structural_only"] = True
     ds_src_read = MIROp(
         op_type="UR_READ", logic_cycle=0, trace_id="ds_src_read",
-        metadata={
-            "depends_on": [], "iq_type": RT.UR_READ, "iq_id": ur_read_iq,
-            "meta_name": "ds_src", "role": "input", "stride": 0,
-            "logical_addr": src_bank * bank_depth + src_addr,
-            "structural_only": True,
-            "math": "smi_ds_t_src_read(col-aligned X[:,s] on SMC_s)", **prologue,
-        },
+        metadata=ds_src_meta,
     )
     ds_gather = MIROp(
         op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather",

@@ -251,11 +251,19 @@ class SystemCluster:
             # codec 随精度（element_bits）：fp16 16-bit lane / fp32 32-bit lane（ADR-035 D2）。
             sb, sa = int(cfg["src_bank"]), int(cfg["src_addr"])
             gc, ln = int(cfg["gather_smc_cnt"]), int(cfg["lanes"])
+            # ADR-036 S3-a：real-gather（cfg 带 src_read_port）→ 从各 SMC 的 ds_src 捕获寄存器取数
+            #   （= 真固件 UR 读指令把 bank{src_bank} 列对齐激活读入该端口、由 set_dst_src_capture 快照），
+            #   **删 storage[sb][sa] 直读 backdoor**。SHIFTDN 下行搬运段仍未建模（DEBT-S4）。
+            # 非 real-gather（None）→ 维持 model-A storage 直读（A/B 护栏的 OFF 侧）。
+            src_port = cfg.get("src_read_port")
             cols = []
             for s in range(gc):
-                word = self.kernels[s].ur_bank.storage[sb][sa]
-                # S2-D1b（hco）：bank4 读 = SMC_s 的 UR-read（占其 R 端口）；SHIFTDN 下行搬运未建模(debt)
-                self._audit_smi_ds_t("UR-READ", "DST-GATHER", s, 0, sb, sa, word)
+                if src_port is not None:
+                    word = self.kernels[s]._dst_src_capture_data  # 真端口读快照（无 backdoor）
+                else:
+                    word = self.kernels[s].ur_bank.storage[sb][sa]  # model-A storage backdoor
+                # S2-D1b（hco）：bank{src_bank} 读 = SMC_s 的 UR-read（占其 R 端口）；SHIFTDN 下行搬运未建模(debt)
+                self._audit_smi_ds_t("UR-READ", "DST-GATHER", s, int(src_port or 0), sb, sa, word)
                 cols.append(unit._lanes_from_word(word, ln))
             # ADR-036 S2：流式触发（evaluate，无 gather-gate），转置行词经固定 latency pipeline 逐拍出。
             unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)
