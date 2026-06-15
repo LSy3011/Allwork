@@ -138,6 +138,12 @@ class PipelineRunner:
                 if dst_cap:
                     cfg["src_read_port"] = dst_cap["port"]
                     self._patch_sim_config(output_dir, {"dst_src_capture": dst_cap})
+                    # ADR-036 S3-b（full fan-out）：real-gather 同时去 scatter backdoor——转置行经 SHIFTUP
+                    # 广播输入缓冲直喂 compute（删 bank0 staging）。scatter_to_feed 驱动 cluster 投缓冲；
+                    # dst_bcast_feed 配 head(SMC_0) 启用、bank = a_read 触发读的 dst_bank。
+                    cfg["scatter_to_feed"] = True
+                    self._patch_sim_config(output_dir, {
+                        "dst_bcast_feed": {"bank": int(cfg["dst_bank"]), "smc": 0}})
                 self._patch_sim_config(output_dir, {"smi_ds_t": cfg})
 
         # DEBT-032 H2：SHIFTUP 广播源独立捕获寄存器 config（消 flaky，hco H2 判定）。

@@ -134,6 +134,16 @@ class ParallelKernel:
         # snapshot hold 到 cluster gather 读取拍。None → cluster 维持 storage 直读。
         self._dst_src_capture = None     # (port_idx, bank) 或 None
         self._dst_src_capture_data = 0
+        # ADR-036 S3-b（full fan-out，hco a6cc1a2 APPROVE-with-notes）：SMI_DS_T 转置结果经真 SHIFTUP
+        # 广播 fan-out 直喂 compute 的「广播输入缓冲」——建模 RTL `SMI_DS_T DATA_OUT → SHIFTUP data 入口
+        # (CRU_SHIFTUP_I[data]) → DR_SHIFTUP_D → RtoVR`，替 model-A「写 bank0 再 a_read 读 bank0」staging。
+        # cluster scatter 按行 offset 填本 dict（仅 head/SMC_0）；a_read 仍发真指令读 bank0(空)作触发+提供
+        # decode 的 addr=m 索引（NOTE-Q3-A：m 取自本拍 a_read decode 的 addr，非内部计数器）。
+        # SHIFTUP data 三分支优先级（NOTE-Q3-B）：_dst_bcast_feed > _bcast_capture_data > live read。
+        # None → 维持 bank0 staging（OFF 默认）。
+        self._dst_bcast_feed = None      # {row_addr: word} 或 None（enable 时 = {}）
+        self._dst_bcast_feed_bank = -1   # a_read 读哪个 bank 触发取行（= scatter dst_bank）
+        self._dst_bcast_feed_cur = 0     # 本拍 a_read 选中的转置行（下一拍 SHIFTUP 消费，1 拍流水同 _bcast_capture）
 
     def set_broadcast_capture(self, port_idx: int, bank: int):
         """启用 DEBT-032 H2 广播源快照：当 port_idx 读 bank 时锁存广播激活。"""
@@ -142,6 +152,13 @@ class ParallelKernel:
     def set_dst_src_capture(self, port_idx: int, bank: int):
         """ADR-036 S3-a：启用 SMI_DS_T 列对齐源读快照：当 port_idx 读 bank 时锁存列对齐激活。"""
         self._dst_src_capture = (int(port_idx), int(bank))
+
+    def set_dst_bcast_feed(self, bank: int):
+        """ADR-036 S3-b：启用 SMI_DS_T 转置结果广播输入缓冲。bank = a_read 读的触发 bank（= scatter dst_bank）。
+        cluster scatter 经 _dst_bcast_feed[row_addr]=word 填行；广播源（port0 a_read）读该 bank addr=m 时
+        取第 m 行喂 SHIFTUP data。"""
+        self._dst_bcast_feed = {}
+        self._dst_bcast_feed_bank = int(bank)
 
     def enable_trace(self):
         """Enable trace recording"""
@@ -555,8 +572,12 @@ class ParallelKernel:
             'smc_id': self.smc_id,
             'cru_shiftup_i': self.chain_inputs.get('shiftup', 0),
             # SMC_0 chain head 本地数据源；其他 SMC 不用此字段。
-            # DEBT-032 H2：配了广播捕获则用独立快照寄存器（避 port0 锁存器被同端口异 bank 读 clobber）。
-            'data': (self._bcast_capture_data if self._bcast_capture is not None
+            # ADR-036 S3-b（hco NOTE-Q3-B）：三分支优先级 _dst_bcast_feed（SMI_DS_T 转置行直喂）>
+            # _bcast_capture_data（DEBT-032 H2 广播捕获，避 port0 异 bank 读 clobber）> live read。
+            # 转置算子下广播源 = 转置行；若反过来让 _bcast_capture 优先，会捕获已空的 bank0=0 → 广播 0
+            # → 退回 DEBT-032 全 0 假象（test_dst_bcast_feed_priority_over_bcast_capture 守此）。
+            'data': (self._dst_bcast_feed_cur if self._dst_bcast_feed is not None
+                     else self._bcast_capture_data if self._bcast_capture is not None
                      else self.ur_bank.get_read_data(0))
         })
         self.units['shiftdn'].evaluate({
@@ -636,6 +657,14 @@ class ParallelKernel:
             req = ur_inputs.get(f'R{port}')
             if req and req.get('en') and int(req.get('bank', -1)) == bank:
                 self._dst_src_capture_data = self.ur_bank._next_read_ports_out[port]
+
+        # ADR-036 S3-b：广播源（port0 a_read）读 dst_bcast_feed_bank 时按 decode 的 addr=m 选第 m 行转置结果
+        # （NOTE-Q3-A：m 取自本拍 a_read decode 的 addr，非内部计数器）。_evaluate_units(SHIFTUP) 在本方法
+        # 之前跑、消费上一拍设的值 → 1 拍流水（同 _bcast_capture）。bank0(空)读值在此被弃用、转置行替之。
+        if self._dst_bcast_feed is not None:
+            req = ur_inputs.get('R0')
+            if req and req.get('en') and int(req.get('bank', -1)) == self._dst_bcast_feed_bank:
+                self._dst_bcast_feed_cur = self._dst_bcast_feed.get(int(req.get('addr', 0)), 0)
 
     def _tick_all(self):
         self.ur_bank.tick(self.cycle_count)

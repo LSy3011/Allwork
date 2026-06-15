@@ -275,15 +275,22 @@ class SystemCluster:
             iq.tick()
             self.logger.info(
                 f"[SMI_DS_T] instruction-driven transpose started at cycle {self.cycle_count}")
-        # scatter：tick 固定 latency pipeline；DATA_OUT_VLD 拍发一个 DATA_OUT 词 → 写 SMC_0 bank0。
+        # scatter：tick 固定 latency pipeline；DATA_OUT_VLD 拍发一个 DATA_OUT 词。
         # latency 窗口内 tick() 返 None（气泡，不写），到点后每拍发一行词（线速）。
         emit = unit.tick()
         if emit is not None:
             off, word = emit
             db, da = int(cfg["dst_bank"]), int(cfg["dst_addr"])
-            self.kernels[0].ur_bank.storage[db][da + off] = word
-            # S2-D1b（hco）：bank0 写 = SMC_0 的 UR-write（占 W 端口、参与 bank 冲突）；SHIFTUP 上游搬运未建模(debt)
-            self._audit_smi_ds_t("UR-WRITE", "DST-SCATTER", 0, 0, db, da + off, word)
+            if cfg.get("scatter_to_feed"):
+                # ADR-036 S3-b（full fan-out）：转置行喂 SMC_0 的 SHIFTUP 广播输入缓冲（_dst_bcast_feed），
+                # **删 bank0 storage 直写 staging**——建模 RTL `SMI_DS_T DATA_OUT → SHIFTUP data 入口`。
+                # a_read 仍发真指令读 bank0(空) 作触发 + 按 decode 的 addr=da+off 取本行（kernel 侧）。
+                # 无 bank0 写 → DST-SCATTER 同拍 R+W 伪冲突物理消失（hco：RETIRE，非绕 arbiter）。
+                self.kernels[0]._dst_bcast_feed[da + off] = word
+                self._audit_smi_ds_t("SHIFTUP-FEED", "DST-SCATTER", 0, 0, db, da + off, word)
+            else:
+                self.kernels[0].ur_bank.storage[db][da + off] = word  # model-A bank0 staging（OFF）
+                self._audit_smi_ds_t("UR-WRITE", "DST-SCATTER", 0, 0, db, da + off, word)
         if unit.inst_done:
             self.smi_ds_t_done = True
             self.logger.info(f"[SMI_DS_T] INST_DONE at cycle {self.cycle_count}")

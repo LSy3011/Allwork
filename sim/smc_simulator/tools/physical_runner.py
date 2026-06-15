@@ -258,6 +258,8 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
     bcast_cap = config.get("broadcast_capture")
     # ADR-036 S3-a：SMI_DS_T 列对齐源读（ds_src_read）独立捕获寄存器配置（real-gather 时存在）
     dst_src_cap = config.get("dst_src_capture")
+    # ADR-036 S3-b：SMI_DS_T 转置结果 SHIFTUP 广播输入缓冲（full fan-out，仅 head/SMC_0 启用）
+    dst_bcast_feed = config.get("dst_bcast_feed")
     for k in range(smc_num):
         kernel = cluster.kernels[k]
         kernel.enable_trace()
@@ -267,6 +269,8 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
             kernel.set_broadcast_capture(bcast_cap["port"], bcast_cap["bank"])
         if dst_src_cap:
             kernel.set_dst_src_capture(dst_src_cap["port"], dst_src_cap["bank"])
+        if dst_bcast_feed and k == int(dst_bcast_feed.get("smc", 0)):
+            kernel.set_dst_bcast_feed(dst_bcast_feed["bank"])
 
     trace_file = case_path / "sim_trace.log"
     trace_file.touch()

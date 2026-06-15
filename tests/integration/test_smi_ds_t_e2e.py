@@ -67,8 +67,16 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         return re.findall(r"\[SMC_\d\][^\n]*\|\s*SMC=\[[^\]]*\]", out)
 
     def test_on_exit0_and_bit_identical_to_off(self):
+        import json
+        bdir = _ROOT / "build" / "verification_v2" / "fp16_matmul_full_dst"
         rc_off, out_off = self._run()                                  # 默认 OFF（backdoor）
         self.assertEqual(rc_off, 0, f"OFF e2e 应 exit=0，得 {rc_off}\n{out_off[-1500:]}")
+        # OFF 对称守门（hco 可选建议）：OFF 路径 scatter 仍走 bank0 staging（UR-WRITE）——验双路 else 分支未被误删。
+        # 须在 ON 跑前读（ON 会覆盖同一 build 目录）。
+        off_scatter = [l for l in (bdir / "fp16_matmul_full_dst_sim.log").read_text().splitlines()
+                       if "Tag:DST-SCATTER" in l]
+        self.assertTrue(any("Unit:UR-WRITE" in l for l in off_scatter),
+                        "OFF 路径 scatter 应仍是 UR-WRITE bank0 staging（守双路 else 分支）")
         rc_on, out_on = self._run({"AIACC_DST_REAL_GATHER": "1"})       # ON（真固件 gather）
         self.assertEqual(rc_on, 0, f"ON e2e 应 exit=0，得 {rc_on}\n{out_on[-1500:]}")
         self.assertIn("ALL PHYSICAL CHECKS PASSED", out_on)
@@ -76,8 +84,6 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         #   ① 固件含真 BANK=6 ds_src_read 读指令（非 structural_only 被过滤）；
         #   ② sim_config 带 src_read_port（cluster 据此走端口快照 gather 而非 storage backdoor）；
         #   ③ sim log 有 DST-GATHER 端口读事件。
-        import json
-        bdir = _ROOT / "build" / "verification_v2" / "fp16_matmul_full_dst"
         instrs = json.loads((bdir / "physical_instructions.json").read_text())
         b6 = [i for i in instrs if i.get("payload", {}).get("BANK") == 6
               and i.get("trace_id") == "ds_src_read"]
@@ -88,10 +94,23 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         self.assertIsNotNone(cfg.get("dst_src_capture"), "ON 须配 dst_src_capture 捕获寄存器")
         sim_log = (bdir / "fp16_matmul_full_dst_sim.log").read_text()
         self.assertIn("Tag:DST-GATHER", sim_log, "ON sim log 应有 DST-GATHER 端口读事件")
-        # A/B 逐 bit：两路 SMC 输出串完全一致（real-gather vs backdoor）
+        # S3-b（full fan-out）：scatter 去 backdoor —— 转置行经 SHIFTUP-FEED 直喂、删 bank0 staging 写。
+        self.assertTrue(cfg.get("smi_ds_t", {}).get("scatter_to_feed"),
+                        "ON sim_config 须带 scatter_to_feed（scatter 走 SHIFTUP 广播输入缓冲）")
+        self.assertIsNotNone(cfg.get("dst_bcast_feed"), "ON 须配 dst_bcast_feed")
+        self.assertIn("Unit:SHIFTUP-FEED", sim_log, "ON scatter 应走 SHIFTUP-FEED（非 UR-WRITE bank0）")
+        scatter_lines = [l for l in sim_log.splitlines() if "Tag:DST-SCATTER" in l]
+        self.assertTrue(scatter_lines, "应有 DST-SCATTER 事件")
+        self.assertFalse(any("Unit:UR-WRITE" in l for l in scatter_lines),
+                         "S3-b：scatter 不应再是 UR-WRITE bank0（bank0 staging 已删）")
+        # BLOCK-Q2：a_read 仍发真 bank0 读指令（trigger + addr 索引，未退化成 phantom）
+        a_read = [i for i in instrs if i.get("trace_id") == "a_read"
+                  and i.get("payload", {}).get("BANK") == 0]
+        self.assertTrue(a_read, "BLOCK-Q2：a_read 须仍发真 BANK=0 读指令（占端口、arbiter 可见）")
+        # A/B 逐 bit：两路 SMC 输出串完全一致（real-datapath vs backdoor）
         off_smc, on_smc = self._smc_outputs(out_off), self._smc_outputs(out_on)
         self.assertTrue(off_smc, "未解析到 OFF 的 SMC 输出")
-        self.assertEqual(off_smc, on_smc, "real-gather(ON) 与 backdoor(OFF) 输出应逐 bit 一致")
+        self.assertEqual(off_smc, on_smc, "real-datapath(ON) 与 backdoor(OFF) 输出应逐 bit 一致")
 
 
 if __name__ == "__main__":

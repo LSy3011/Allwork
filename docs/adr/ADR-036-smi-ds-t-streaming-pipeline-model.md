@@ -156,7 +156,8 @@ exit=1 + truth auditor 逐拍报 a_read stale → **任何 latency 漂移 loud-f
 - **DST-SCATTER 同拍 R+W 对 arbiter 不可见**（既存 DEBT，非 S2 引入）：scatter 直写 `kernels[0].ur_bank.storage`
   绕 per-kernel arbiter，故 Cyc22 SMC_0 bank0 的 scatter(W)+a_read(R) 同拍不报冲突。**S3 退出条件**：删 backdoor、
   ds_src_read 转真 UR_READ 进 sim 后，此同拍 R+W 进 arbiter 视野 → **必须确认 DLY 把 a_read 排在 scatter 之后不同拍**，
-  否则暴真 bank 冲突。
+  否则暴真 bank 冲突。**【S3-b RETIRE，见 S3-b 债务段】**：full fan-out 重构后 ON 路径 scatter 不再写 bank0
+  （转置行经 `_dst_bcast_feed` 直喂 SHIFTUP）→ 此 bank0 R+W 伪冲突在 ON 路径物理消失（OFF backdoor 仍保留至 S3-c）。
 - latency=16 仍是 Q2「先按 gather 完成点建模」假设；逐拍与 RTL 一致 = 验收 ②，**待 S4 VCS**。`still_holds: proposed` 维持。
 
 ## S3-a 实现（2026-06-15，gather 去 backdoor → 真固件 UR 读端口；hco BLOCK 提案 A → 修正 → 落地）
@@ -203,6 +204,60 @@ S3-a（VCS 第一手反馈暴露 model-A backdoor 缺口：`fp16_matmul_full_dst
   **已部分前移**（hco a1d94523 note 1）：`pipeline_runner` 在 real-gather 标记存在但端口回读失败时 loud-fail，
   拒绝「固件真读 / sim 静默回 backdoor」半态（现 emit 路径触发不到，守未来回归）。其可证伪单测留 S3-b。
 - DEBT-S4-SHIFTDN-DRAIN / DST-SCATTER 同拍 R+W（既存）见 S2 债务段。`still_holds: proposed` 维持。
+
+## S3-b 实现（2026-06-15，scatter 去 backdoor —— **事实订正：scatter ≠ UR 写**；hco afa16aa1 设计裁定）
+
+### ⚠ 事实订正（hco afa16aa1，推翻 handoff c92748e 对 S3-b 的前提，必看）
+handoff 设想「S3-b = scatter 转真 UR 写指令」。**这个前提是错的**——hco 据 spec 查实：文档钦定的真实
+datapath 是 `SMI_DS_T DATA_OUT → SHIFTUP 广播（DR_SHIFTUP_D, rtovr_src 29）→ RtoVR → compute`
+（`shiftup.yaml:24-27,50-53` + `rtovr_config.yaml:34` consumers_dr 29 + ADR-033 D1/D3-Q2）。**转置后的
+行对齐激活是被 SHIFTUP 广播-消费的，从不单独写回一个 UR slot**；datapath 末端的 UR_WRITE 是 compute
+**结果**写回、不是转置激活写回。
+- 故 `cluster.py` 的 `storage[bank0][addr]=word`（scatter 写）**不是隐藏真指令的 backdoor**（gather 侧 bank6
+  读才是——RTL 有该读、被 structural_only 过滤掉了，S3-a 已修），而是 sim model-A 把转置结果「暂存 bank0
+  让 a_read 去读」的**速率匹配中转 artifact**——RTL 里没有这一步、也没有对应 UR 写指令。
+- **选项 A（加 scatter UR_WRITE DFG 节点）/ 选项 B（端口化直写进 arbiter）= hco no-go**：会坐实一条 RTL
+  不发的 UR 写、制造新固件-RTL 不一致（比现状更糟），且 B 暴露的 bank0 R+W 是 sim 自造伪冲突、对忠实度零增信。
+- **gather 侧（S3-a）是真 backdoor 去除；scatter 侧无 backdoor 可去**——这个不对称是核心洞察。
+
+### 落点（user 2026-06-15 裁定 full fan-out 重构）
+让 SMI_DS_T DATA_OUT 经真 SHIFTUP 广播 fan-out 逐行直喂 compute、删 bank0 staging + a_read 读 bank0
+对 bank0 的数据依赖。hco 评 full 重构「时序忠实度仍 S4-blocked（churn without fidelity gain）」、保守落点
+（留 staging + 记债）亦可；user 选 full 重构（清掉 model-A staging artifact，为 S3-c 删 model-A 铺路）。
+
+### 落地（env flag AIACC_DST_REAL_GATHER 守，ON = 完整真 datapath = S3-a gather + S3-b scatter；OFF 维持 backdoor）
+转置结果改走专用「SHIFTUP 广播输入缓冲」`_dst_bcast_feed`（建模 RTL `SMI_DS_T DATA_OUT → SHIFTUP
+data 入口 CRU_SHIFTUP_I → DR_SHIFTUP_D → RtoVR`），删 `cluster.py` 的 `storage[bank0]=word` staging：
+- **`kernel`**：加 `_dst_bcast_feed`(行缓冲) + `_dst_bcast_feed_cur` + `set_dst_bcast_feed(bank)`；`_evaluate_ur`
+  里广播源(port0 a_read)读 feed_bank addr=m 时按 **decode 的 addr** 取第 m 行（NOTE-Q3-A）；SHIFTUP data
+  三分支优先级 `_dst_bcast_feed > _bcast_capture_data > live`（NOTE-Q3-B）。`_dst_bcast_feed_cur` 更新 guard
+  同 `_bcast_capture`（仅 port0 读 feed_bank 才更新）→ **保留 ADR-037 防 clobber 性质**。
+- **`cluster._tick_smi_ds_t_trigger`**：`cfg.scatter_to_feed` 时投 `kernels[0]._dst_bcast_feed[da+off]=word`（审计
+  Unit:SHIFTUP-FEED），删 bank0 storage 直写。
+- **`pipeline_runner`**：real-gather 时 `cfg.scatter_to_feed=True` + patch `dst_bcast_feed{bank,smc:0}`。
+- **`physical_runner`**：读 `dst_bcast_feed` → 仅 head(SMC_0) `set_dst_bcast_feed`。
+- **a_read 保持真指令**（BLOCK-Q2）：仍 emit 真 BANK=0 读、占 ur-r0 端口、arbiter 可见，作 SHIFTUP 广播触发
+  + 提供 decode 的 addr=m 索引；其 bank0(空)读值被转置行替代（**禁止**标 structural_only/不 emit，否则退化 backdoor）。
+
+### hco 设计裁定（agentId a6cc1a2，APPROVE-with-notes）+ 实证
+3 硬约束（BLOCK-Q2 / NOTE-Q3-A / NOTE-Q3-B）已落实。实证：ON e2e 8/8 bit-perfect exit=0 + 3 次 cold-run 逐 bit
+一致（确定性）+ A/B（ON vs OFF）逐 bit 一致 + 固件含真 a_read BANK=0 读 + scatter 8 条 SHIFTUP-FEED（零 UR-WRITE
+bank0）。pytest 147 passed（+2 S3-b 单测：行索引跟随 decode addr / dispatch 优先级反证）。广播路径算子（fp16_matmul_n
+/ matmul_parallel_n / fma_parallel_n）OFF 默认未破（三分支 dispatch `_dst_bcast_feed=None` 回落原路径）。
+
+### S3-b 债务（hco Q4）
+- **RETIRE「scatter 写 bank0 + a_read 读 bank0 数据依赖」**：full 重构后转置行经 `_dst_bcast_feed` 直喂，ON
+  路径 a_read 不再依赖 bank0 有转置数据（仍读 bank0 作触发，读值弃用）。
+- **RETIRE「DST-SCATTER 同拍 R+W 对 arbiter 不可见」（S2 债务段）**：ON 路径 bank0 **不再被 scatter 写** →
+  bank0 R+W 伪冲突**物理消失**（不是「绕 arbiter」，是根本没这个写）。⚠ **仅 ON 路径**；OFF backdoor 仍写
+  bank0，该伪冲突在 OFF 保留，至默认翻 ON / 删 flag（S3-c）才全消。
+- **新增 DEBT-036-DST-BCAST-FEED-TIMING**（= S4 时序簇，交叉引用 DEBT-023-BCAST-TIMING / DEBT-S4-SHIFTDN-DRAIN）：
+  `_dst_bcast_feed` 是 burst 一次性收整 tile 的中转（非逐拍 SMI_DS_T DATA_OUT → SHIFTUP data 入口流式投递）；
+  逐拍投递时序 + SHIFTUP 入口寄存器 hold 拍 gated on user-fact（同 ADR-037 升 Accepted 门表）+ VCS。
+- **拓扑忠实度真进步**（hco Q1）：删 UR write→UR read 往返 artifact，转置行喂进 SHIFTUP data 入口（对齐
+  spec `DR_SHIFTUP_D=CRU_SHIFTUP_O[data]`）；但**时序忠实度仍 S4-blocked**（user 已接受 churn caveat）。
+- **DEBT-036-STRUCTURAL-ANCHOR / 默认 OFF**：不关闭——S3-b 只删 scatter staging，gather 侧捕获寄存器中转
+  + model-A 整体删 = S3-c（+ VCS）。`still_holds: proposed` 维持。
 
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/

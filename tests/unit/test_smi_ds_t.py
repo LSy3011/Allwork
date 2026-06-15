@@ -811,5 +811,78 @@ class TestSmiDsTS3aCaptureRegister(unittest.TestCase):
                          "port0 活锁存器已被 bank0 覆盖（证明若直读端口会 clobber，故需独立捕获寄存器）")
 
 
+class TestSmiDsTS3bBcastFeed(unittest.TestCase):
+    """ADR-036 S3-b（full fan-out，hco a6cc1a2）：SMI_DS_T 转置结果经 _dst_bcast_feed 直喂 SHIFTUP 广播、
+    删 bank0 staging。锁死 hco 三条硬约束的可证伪门：NOTE-Q3-A（行索引取自 a_read decode addr）+
+    NOTE-Q3-B（dispatch 优先级 _dst_bcast_feed > _bcast_capture_data > live）。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "sim"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _kernel(self):
+        self._paths()
+        from smc_simulator.core.kernel import ParallelKernel
+        return ParallelKernel(smc_id=0)
+
+    def _spec(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        return HardwareSpec.load("hw_config")
+
+    def _ur_read_instr(self, spec, bank, addr):
+        from driver.packer import BitPacker
+        return BitPacker.pack_capsule(
+            spec, "UR_READ", {"VALID": 1, "BANK": bank, "ADDR": addr, "smc_id_en": 7},
+            is_body=True, VLD=1)
+
+    def test_row_index_follows_aread_addr(self):
+        """NOTE-Q3-A：_dst_bcast_feed_cur 取自本拍 a_read decode 的 addr（非内部自增计数器）。
+        喂非顺序 addr 序列 → 取到的行必须跟随 decode addr，否则乱序/气泡下取错行。"""
+        spec = self._spec()
+        k = self._kernel()
+        k.set_dst_bcast_feed(bank=0)
+        # 填 3 行可区分值（行 addr → word）
+        k._dst_bcast_feed = {0: 0xAA00, 1: 0xBB11, 2: 0xCC22}
+        # 非顺序读 addr=2,0,1 → cur 必须依次 = 行2,行0,行1（跟随 decode addr）
+        for addr in (2, 0, 1):
+            k.cycle_count = addr
+            k._evaluate_ur({"ur-r0": self._ur_read_instr(spec, 0, addr)})
+            self.assertEqual(k._dst_bcast_feed_cur, k._dst_bcast_feed[addr],
+                             f"读 addr={addr} 应取第 {addr} 行（跟随 decode addr，非计数器）")
+        # 反证：同端口异 bank（权重 bank1）读不更新 feed cur（保留 ADR-037 防 clobber 性质）
+        k._dst_bcast_feed_cur = 0xDEAD
+        k.cycle_count = 9
+        k._evaluate_ur({"ur-r0": self._ur_read_instr(spec, 1, 0)})   # bank1 ≠ feed_bank0
+        self.assertEqual(k._dst_bcast_feed_cur, 0xDEAD,
+                         "同端口异 bank 读不应 clobber feed cur（防 DEBT-032 同款）")
+
+    def test_feed_priority_over_bcast_capture(self):
+        """NOTE-Q3-B（最高回归风险）：head 同时配 _dst_bcast_feed 与 _bcast_capture 时，
+        SHIFTUP 广播 data 必须取转置行（_dst_bcast_feed_cur），非 bank0 捕获值。
+        破坏优先级 → 取 bank0 捕获（已空=0）→ 广播 0 → 退回 DEBT-032 全 0 假象。"""
+        from driver.packer import BitPacker
+        spec = self._spec()
+        k = self._kernel()
+        FEED_VAL = 0x1234ABCD
+        CAP_VAL = 0x9999          # 若优先级错会取这个
+        k.set_dst_bcast_feed(bank=0)
+        k._dst_bcast_feed_cur = FEED_VAL
+        k.set_broadcast_capture(0, 0)
+        k._bcast_capture_data = CAP_VAL
+        # 驱动真 SHIFTUP 广播指令（VALID + broadcast），smc_id=0(head) → cru_o = 传入的 data
+        cap = BitPacker.pack_capsule(
+            spec, "SHIFTUP", {"VALID": 1, "broadcast": 1, "smc_id_en": 7}, is_body=True, VLD=1)
+        k._evaluate_units({"shiftup": cap})
+        k.units["shiftup"].tick()
+        self.assertEqual(k.units["shiftup"].cru_o, FEED_VAL,
+                         "SHIFTUP 广播 data 应取 _dst_bcast_feed_cur（转置行），非 bank0 捕获值")
+        self.assertNotEqual(k.units["shiftup"].cru_o, CAP_VAL,
+                            "优先级错→取 bank0 捕获→DEBT-032 全 0 回归")
+
+
 if __name__ == "__main__":
     unittest.main()
