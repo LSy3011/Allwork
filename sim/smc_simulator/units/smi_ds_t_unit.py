@@ -108,8 +108,6 @@ class SmiDsTUnit:
         # gather 缓冲（CRD_SHIFTDN）：_buf[smc_id] = 该 SMC 的 UR 行（lanes 个元素）；None = 尚未 gather
         self._buf: List[Optional[List]] = [None] * self.smc_num
         self._out: Optional[List[List]] = None
-        # DATA_OUT 发送队列：[(dst_word_offset, word_value)]
-        self._emit_queue: List = []
         # ADR-036 S2 流式接口状态：转置后行词 FIFO + 固定 latency 倒计时
         self._out_words: List = []     # 转置产出的 (off, word) 待发队列（经 latency 后逐拍出）
         self._latency_ctr = -1         # -1 = 空闲未触发；>=0 = latency 倒计时中
@@ -118,44 +116,11 @@ class SmiDsTUnit:
         self.data_out_vld = 0
         self.inst_done = 0
 
-    # ── ADR-034 S2-D1：真 step-driven 数据流（表596 接口）──────────────────────
-    def load_tile(self, columns: Sequence[Sequence]):
-        """CRD_SHIFTDN：latch 经 SHIFTDN（下行收集） 传回的 Tile（columns[smc] = 该 SMC 的 UR 行 lanes 元素）。
-        逐 SMC 走 gather()（行宽 / 越界校验 = gather gate）。"""
-        self.reset()
-        for s, row in enumerate(columns):
-            self.gather(s, row)
-
-    def execute(self) -> int:
-        """gather 到齐 → 转置 → 构建 DATA_OUT 发送队列（一行 smc_num 元素拆 ceil/word_lanes 个 128b 词）。
-        未到齐抛 RuntimeError（gather-before-scatter gate，表596 语义）。返回待发 word 数。"""
-        rows = self.transpose()    # 内部 is_ready gate：未到齐抛错
-        nword = (self.smc_num + self.word_lanes - 1) // self.word_lanes
-        self._emit_queue = []
-        for m in range(self.lanes):
-            for w in range(nword):
-                chunk = rows[m][w * self.word_lanes:(w + 1) * self.word_lanes]
-                self._emit_queue.append((m * nword + w, self._word_from_lanes(chunk)))
-        self.inst_done = 0
-        return len(self._emit_queue)
-
-    def emit_step(self):
-        """发一个 DATA_OUT 词（表596 DATA_OUT/DATA_OUT_VLD 拉高）；队空则 INST_DONE 拉高。
-        返回 (dst_word_offset, word_value) 或 None（已发完）。"""
-        if not self._emit_queue:
-            self.data_out_vld = 0
-            self.inst_done = 1
-            return None
-        off, word = self._emit_queue.pop(0)
-        self.data_out = word
-        self.data_out_vld = 1
-        if not self._emit_queue:
-            self.inst_done = 1
-        return off, word
-
-    def busy(self) -> bool:
-        """是否还有 DATA_OUT 待发（scatter 进行中）。"""
-        return bool(self._emit_queue)
+    # ── ADR-036 S3-c：删 ADR-034 S2-D1 step-driven 接口（load_tile/execute/emit_step/busy）──
+    #   已被本节 ADR-036 S2 流式接口（evaluate/tick/get_outputs）取代、仅旧测试调用、无 production 路径，
+    #   死代码移除（user 2026-06-15 裁定「先删纯死 gate 方法」）。转置数值核仍由 transpose_tile（静态纯核，
+    #   下方）+ S2 流式 evaluate/tick 覆盖。apply_smi_ds_t 用的 gather/transpose/is_ready/missing 仍保留
+    #   （matmul_q_dst_full 经 fallback 依赖；删它须先 triage 该算子，本轮不动）。
 
     # ── ADR-036 S2：流式 stepped 单元接口（evaluate/tick/get_outputs，固定 latency pipeline）──
     #   对标 units/fp32addtree8to1_unit.py 的 evaluate→tick→get_outputs 约定。语义：转置是

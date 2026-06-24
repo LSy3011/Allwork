@@ -231,12 +231,13 @@ class SystemCluster:
               f"Tag:{tag} Port:{port} Bank:{bank} Addr:{addr} V0:{val & ((1 << 128) - 1):032x}", flush=True)
 
     def _tick_smi_ds_t_trigger(self):
-        """S2-D1 真 step-driven：kernels step 前驱动 SMI_DS_T 单元。
+        """ADR-036 S2 流式 step-driven：kernels step 前驱动 SMI_DS_T 单元。
         - 未触发：evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) → 经 SHIFTDN（下行收集） 各 SMC 列对齐
-          UR 行 latch 进单元 CRD_SHIFTDN，execute() 转置（gather-before-scatter gate）。
-        - 已触发未完成：每拍 emit_step() 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0；INST_DONE 即完成。
+          UR 行作 tile 喂 `unit.evaluate({valid,tile})`（transpose_tile 纯核，无 gather-gate）。
+        - 已触发未完成：每拍 `unit.tick()` 经固定 latency pipeline 发一个 DATA_OUT 词 → scatter（ON：
+          SHIFTUP 广播输入缓冲 / OFF：bank0 staging）；INST_DONE 即完成。
         调度保证 t[transpose] < t[a_read]，scatter 逐词写先于 a_read 逐行读。
-        S2-D1b：gather/scatter 端点 emit AUDIT-DATA 事件（sim-VCS diff 可观测）。"""
+        端点 emit AUDIT-DATA 事件（DST-SHIFTDN/DST-SHIFTUP，sim-VCS diff 可观测）。"""
         unit = self.smi_ds_t_unit
         if unit is None or self.smi_ds_t_done:
             return
