@@ -32,9 +32,9 @@ flowchart TD
     C1 --> GA
     C2 --> GA
     C3 --> GA
-    GA["② SHIFTDN gather<br/>4 列经下行链汇聚<br/>→ SMI 中心 CRD_SHIFTDN (129b)"]
+    GA["② SHIFTDN（下行收集）<br/>4 列经下行链汇聚<br/>→ SMI 中心 CRD_SHIFTDN (129b)"]
     GA --> DST["③ SMI_DS_T transpose 4×4<br/>列对齐 → 行对齐<br/>CRD_SHIFTDN → DATA_OUT (128b)"]
-    DST -->|"④ SHIFTUP scatter<br/>DATA_OUT 逐词 + DATA_OUT_VLD"| B0["SMC_0 bank0@0..3<br/>= X[0,:] X[1,:] X[2,:] X[3,:]<br/>(行对齐, 每行 1 词)"]
+    DST -->|"④ SHIFTUP broadcast<br/>DATA_OUT 逐词 + DATA_OUT_VLD"| B0["SMC_0 bank0@0..3<br/>= X[0,:] X[1,:] X[2,:] X[3,:]<br/>(行对齐, 每行 1 词)"]
     B0 -->|"⑤ a_read(ur-r0)<br/>+ SHIFTUP 广播 fan-out → 全 8 SMC"| MUL
     W["每 SMC_s 本地权重<br/>W[:,s] @ bank1 (partitioned)"] --> MUL
     MUL["FPMUL<br/>X[m,:] ⊙ W[:,s]"] --> RED["FP32ADDTREE5TO1<br/>4-lane reduce"]
@@ -44,10 +44,10 @@ flowchart TD
 
 > ⚠ 当前实现：①②③④ 由 **SMI_DS_T 指令（`iq_smi-ds-t-0.hex`，表598 微指令）VLD 触发**；model-A 把 gather 直读各 SMC `bank4`（SHIFTDN 链逐拍物理 drain 未建，见 §5）。
 >
-> **S2-D1b：gather/scatter 的 UR 端点已打进 sim log（可与 VCS diff）**——`grep "Tag:DST-GATHER\|Tag:DST-SCATTER"`：
+> **S2-D1b：gather/scatter 的 UR 端点已打进 sim log（可与 VCS diff）**——`grep "Tag:DST-SHIFTDN\|Tag:DST-SHIFTUP"`：
 > ```
-> SMC_ID:0 Cyc:3 Unit:UR-READ  Tag:DST-GATHER  Port:0 Bank:4 Addr:0 V0:<col0>   ① bank4 读 (×SMC_0..3)
-> SMC_ID:0 Cyc:3 Unit:UR-WRITE Tag:DST-SCATTER Port:0 Bank:0 Addr:0 V0:<X[0,:]> ④ bank0 写 (×row 0..3, Cyc3..6)
+> SMC_ID:0 Cyc:3 Unit:UR-READ  Tag:DST-SHIFTDN  Port:0 Bank:4 Addr:0 V0:<col0>   ① bank4 读 (×SMC_0..3)
+> SMC_ID:0 Cyc:3 Unit:UR-WRITE Tag:DST-SHIFTUP Port:0 Bank:0 Addr:0 V0:<X[0,:]> ④ bank0 写 (×row 0..3, Cyc3..6)
 > SMC_ID:0 Cyc:4 Unit:UR-READ  Tag:READ        Port:0 Bank:0 Addr:0 V0:<X[0,:]> ⑤ a_read 读 (晚 1 拍, 读到 ④ 写的值)
 > ```
 > 归属按 hco 订正：bank4 读 = **SMC_s 的 UR-read**、bank0 写 = **SMC_0 的 UR-write**（**非** SMI_DS_T；表596 SMI_DS_T 无 UR 端口）。
@@ -74,7 +74,7 @@ sequenceDiagram
     participant SMC as SMC_0..3 @bank4
     participant B0 as SMC_0 @bank0
     IQ->>U: CRI 指令 VLD=1 (表598: vld/intlv_*)
-    SMC->>U: ① UR read 列 → ② SHIFTDN gather → CRD_SHIFTDN
+    SMC->>U: ① UR read 列 → ② SHIFTDN（下行收集） → CRD_SHIFTDN
     Note over U: gather 全到齐才转置<br/>(gather-before-scatter gate, 未到齐抛错)
     U->>U: ③ transpose 4×4 → DATA_OUT 发送队列
     loop 每行 m = 0..3 (DATA_OUT 逐词)
@@ -119,9 +119,9 @@ gantt
 
 | 维度 | 当前 sim (model-A) | VCS / RTL 真相 | 对齐建议 |
 |---|---|---|---|
-| **gather**（bank4 读） | log 有 `UR-READ DST-GATHER`（SMC_s，S2-D1b）；SHIFTDN 链搬运**未建模** | SMC_s UR-read + SHIFTDN 链**逐拍 drain** 到 CRD_SHIFTDN | ✅diff 端点值/SMC_ID；❌SHIFTDN 事件数/时序 |
+| **gather**（bank4 读） | log 有 `UR-READ DST-SHIFTDN`（SMC_s，S2-D1b）；SHIFTDN 链搬运**未建模** | SMC_s UR-read + SHIFTDN 链**逐拍 drain** 到 CRD_SHIFTDN | ✅diff 端点值/SMC_ID；❌SHIFTDN 事件数/时序 |
 | **transpose 触发** | SMI_DS_T 指令 VLD（cluster cycle ≈ 3）；TRANSPOSE 仅 logger marker | CRI + 4 并发 interleave（**每两指令 2 拍 stagger**, para961） | 对齐「转置在 gather 全到齐后、a_read 前」 |
-| **scatter**（bank0 写） | log 有 `UR-WRITE DST-SCATTER`（SMC_0，S2-D1b）；DATA_OUT 逐词 1 拍/词 | SHIFTUP + SMC_0 UR-write 端口 | ✅diff 端点值/addr；❌SHIFTUP 事件数/绝对拍 |
+| **scatter**（bank0 写） | log 有 `UR-WRITE DST-SHIFTUP`（SMC_0，S2-D1b）；DATA_OUT 逐词 1 拍/词 | SHIFTUP + SMC_0 UR-write 端口 | ✅diff 端点值/addr；❌SHIFTUP 事件数/绝对拍 |
 | **逐拍脆弱性** | scatter(1词/拍) 与 a_read(1行/拍) **同速率 0-容差** → bank0 同拍 R+W | COND 同步（无同拍 R+W） | 改 emit/read 速率会破；**diff harness 须豁免 DST-* 的 bank0 同拍 R+W，勿误判 ADR-008** |
 | **smc_id_en** | sim 全盲（8/8 是 sim-vs-golden 自洽） | 真 8-SMC 各分支 | **VCS 必验 SMC_1..7 各算对** |
 | **转置粒度** | element 粒度 | **byte 粒度**（para1037） | K=4 fp32 每元素 4 byte 不跨词 → 等价 |

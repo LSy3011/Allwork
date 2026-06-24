@@ -1,14 +1,14 @@
 """SMI_DS_T（Data Shuffle_Transpose）跨-SMC 转置中心模块。
 
 ADR-033 Stage-A（model-A 整链原子段）。忠实设计文档 v0.4.19 表596-598 + [seq1037-1051]：
-  - 输入 = 对所有 SMC 进行 UR 读、经 **SHIFTDN gather** 传回 SMI 的 Tile
+  - 输入 = 对所有 SMC 进行 UR 读、经 **SHIFTDN（下行收集）** 传回 SMI 的 Tile
     （`PARAM_IN_LINE_NUM=PARAM_SMC_NUM` 行 × `PARAM_IN_LINE_BYTE_CNT=PARAM_UR_BYTE_CNT` 列）；
   - **转置**为 `PARAM_UR_BYTE_CNT` 行 × `PARAM_SMC_NUM` 列的 Tile；
-  - 输出经 **SHIFTUP scatter** 广播 → 形成
+  - 输出经 **SHIFTUP broadcast** 广播 → 形成
     `UR read — SHIFTDN — SMI_DS_T — SHIFTUP — UR write` 的数据整理完整 datapath。
 
 与 DS（表585-588，每-SMC、挂 STB↔LDB、仅单 SMC 内 UR→UR）**是两个不同模块**——本模块是
-SMI 中心单实例、跨-SMC（输入来自 SHIFTDN gather、输出去 SHIFTUP scatter）。详见 ADR-033 / 分歧台账 D-01。
+SMI 中心单实例、跨-SMC（输入来自 SHIFTDN（下行收集）、输出去 SHIFTUP broadcast）。详见 ADR-033 / 分歧台账 D-01。
 
 Stage-A 取 model-A：**只建模转置数值功能 + gather 完成序约束**（hco B-BLOCK-1 裁定整链原子段）。
 interleave（intlv_*）4 并发时序 / CRI 字段位宽 / INST_DONE 握手 = DEBT-033-DST-CTRL / -FIELDS /
@@ -120,7 +120,7 @@ class SmiDsTUnit:
 
     # ── ADR-034 S2-D1：真 step-driven 数据流（表596 接口）──────────────────────
     def load_tile(self, columns: Sequence[Sequence]):
-        """CRD_SHIFTDN：latch 经 SHIFTDN gather 传回的 Tile（columns[smc] = 该 SMC 的 UR 行 lanes 元素）。
+        """CRD_SHIFTDN：latch 经 SHIFTDN（下行收集） 传回的 Tile（columns[smc] = 该 SMC 的 UR 行 lanes 元素）。
         逐 SMC 走 gather()（行宽 / 越界校验 = gather gate）。"""
         self.reset()
         for s, row in enumerate(columns):
@@ -208,7 +208,7 @@ class SmiDsTUnit:
                 "INST_DONE": self.inst_done}
 
     def gather(self, smc_id: int, row: Sequence):
-        """SHIFTDN gather：收一个 SMC 的一行 UR 数据（lanes 个元素）。"""
+        """SHIFTDN（下行收集）：收一个 SMC 的一行 UR 数据（lanes 个元素）。"""
         if not (0 <= smc_id < self.smc_num):
             raise ValueError(f"smc_id {smc_id} out of range [0,{self.smc_num})")
         row = list(row)

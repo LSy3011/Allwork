@@ -137,8 +137,8 @@ class SystemCluster:
     def apply_smi_ds_t(self, cfg: dict):
         """ADR-033 Stage-A：SMI_DS_T 跨-SMC 转置 datapath（model-A 整链原子段，hco B-BLOCK-1 裁定）。
 
-        在 cluster.run 之前一次性执行 `UR read — SHIFTDN gather — SMI_DS_T transpose —
-        SHIFTUP scatter — UR write` 的数值功能：
+        在 cluster.run 之前一次性执行 `UR read — SHIFTDN（下行收集） — SMI_DS_T transpose —
+        SHIFTUP broadcast — UR write` 的数值功能：
           - **gather**：从 cfg['gather_smc_cnt'] 个 SMC 各读 src_bank/src_addr 的列对齐激活（非转置间插存）；
           - **transpose**：SmiDsTUnit 把 gather_smc_cnt×lanes 的 Tile 转置为 lanes×gather_smc_cnt（行对齐）；
           - **scatter/write**：把恢复的行对齐激活写回 SMC_0 的 dst_bank/dst_addr（供后续 SHIFTUP 广播读）。
@@ -161,13 +161,13 @@ class SystemCluster:
 
         unit = SmiDsTUnit(smc_num=gather_cnt, lanes=lanes,
                           word_lanes=word_lanes, element_bits=element_bits)
-        # gather：逐 SMC 读列对齐激活（SHIFTDN gather 的 model-A 数值等价）
+        # gather：逐 SMC 读列对齐激活（SHIFTDN（下行收集） 的 model-A 数值等价）
         for s in range(gather_cnt):
             word = self.kernels[s].ur_bank.storage[src_bank][src_addr]
             unit.gather(s, lanes_from_word(word, lanes))
         # transpose：gather 全到齐才出（未到齐抛错 = gather-before-scatter 硬约束）
         rows = unit.transpose()        # rows[m] = 行对齐激活 X[m,:]（gather_cnt 个元素）
-        # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP scatter 的 model-A 数值等价）。
+        # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP broadcast 的 model-A 数值等价）。
         # 行宽 gather_cnt 可 > word_lanes（如 fp32 K=8 = 2 词）→ 每行拆 ceil(K/word_lanes) 个连续词。
         nword = (gather_cnt + word_lanes - 1) // word_lanes
         for m in range(lanes):
@@ -225,14 +225,14 @@ class SystemCluster:
         """ADR-034 S2-D1b（hco a681b91 订正）：把 SMI_DS_T datapath 的 **UR 端点**（gather 源读 / scatter 目的写）
         打成 AUDIT-DATA，**Unit 归属 = 实际访存单元 UR-READ/UR-WRITE**（表596：SMI_DS_T 仅 CRD_SHIFTDN 输入、
         无 UR 端口；bank4 读 = SMC_s 的 UR-read 占其 R 端口、bank0 写 = SMC_0 的 UR-write 占 W 端口+参与 bank 冲突）。
-        Tag 标 DST-GATHER/DST-SCATTER 区分于 compute UR 访存；Port 为 model-A 占位（RTL 端口由调度定）。
+        Tag 标 DST-SHIFTDN/DST-SHIFTUP 区分于 compute UR 访存；Port 为 model-A 占位（RTL 端口由调度定）。
         SHIFTDN/SHIFTUP 搬运段未建模（debt），故只发 UR 端点事件。使 sim log 可与 VCS **UR 端点逐事件 diff**。"""
         print(f">>> [AUDIT-DATA] SMC_ID:{smc_id} Cyc:{self.cycle_count} Unit:{unit} "
               f"Tag:{tag} Port:{port} Bank:{bank} Addr:{addr} V0:{val & ((1 << 128) - 1):032x}", flush=True)
 
     def _tick_smi_ds_t_trigger(self):
         """S2-D1 真 step-driven：kernels step 前驱动 SMI_DS_T 单元。
-        - 未触发：evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) → 经 SHIFTDN gather 各 SMC 列对齐
+        - 未触发：evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) → 经 SHIFTDN（下行收集） 各 SMC 列对齐
           UR 行 latch 进单元 CRD_SHIFTDN，execute() 转置（gather-before-scatter gate）。
         - 已触发未完成：每拍 emit_step() 发一个 DATA_OUT 词 → scatter 写 SMC_0 bank0；INST_DONE 即完成。
         调度保证 t[transpose] < t[a_read]，scatter 逐词写先于 a_read 逐行读。
@@ -263,7 +263,7 @@ class SystemCluster:
                 else:
                     word = self.kernels[s].ur_bank.storage[sb][sa]  # model-A storage backdoor
                 # S2-D1b（hco）：bank{src_bank} 读 = SMC_s 的 UR-read（占其 R 端口）；SHIFTDN 下行搬运未建模(debt)
-                self._audit_smi_ds_t("UR-READ", "DST-GATHER", s, int(src_port or 0), sb, sa, word)
+                self._audit_smi_ds_t("UR-READ", "DST-SHIFTDN", s, int(src_port or 0), sb, sa, word)
                 cols.append(unit._lanes_from_word(word, ln))
             # ADR-036 S2：流式触发（evaluate，无 gather-gate），转置行词经固定 latency pipeline 逐拍出。
             unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)
@@ -285,12 +285,12 @@ class SystemCluster:
                 # ADR-036 S3-b（full fan-out）：转置行喂 SMC_0 的 SHIFTUP 广播输入缓冲（_dst_bcast_feed），
                 # **删 bank0 storage 直写 staging**——建模 RTL `SMI_DS_T DATA_OUT → SHIFTUP data 入口`。
                 # a_read 仍发真指令读 bank0(空) 作触发 + 按 decode 的 addr=da+off 取本行（kernel 侧）。
-                # 无 bank0 写 → DST-SCATTER 同拍 R+W 伪冲突物理消失（hco：RETIRE，非绕 arbiter）。
+                # 无 bank0 写 → DST-SHIFTUP 同拍 R+W 伪冲突物理消失（hco：RETIRE，非绕 arbiter）。
                 self.kernels[0]._dst_bcast_feed[da + off] = word
-                self._audit_smi_ds_t("SHIFTUP-FEED", "DST-SCATTER", 0, 0, db, da + off, word)
+                self._audit_smi_ds_t("SHIFTUP-BCAST", "DST-SHIFTUP", 0, 0, db, da + off, word)
             else:
                 self.kernels[0].ur_bank.storage[db][da + off] = word  # model-A bank0 staging（OFF）
-                self._audit_smi_ds_t("UR-WRITE", "DST-SCATTER", 0, 0, db, da + off, word)
+                self._audit_smi_ds_t("UR-WRITE", "DST-SHIFTUP", 0, 0, db, da + off, word)
         if unit.inst_done:
             self.smi_ds_t_done = True
             self.logger.info(f"[SMI_DS_T] INST_DONE at cycle {self.cycle_count}")

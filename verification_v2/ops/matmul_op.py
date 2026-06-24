@@ -137,10 +137,10 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
                 "inner_inc": 0, "outer_inc": 0}
     # ADR-036 S1：5 段 DFG 首段 = UR_read 列对齐（每 SMC_s 读本地 bank{src_bank} 的列 s）。
     # 令 ds_gather 依赖它 → 完整链 ds_src_read(UR_READ)→ds_gather(SHIFTDN)→ds_transpose(SMI_DS_T)
-    # →shiftup_a_read(SHIFTUP scatter)→rt_a(RTOVR)→…→out(UR_WRITE)。数值仍走 apply_smi_ds_t
+    # →shiftup_a_read(SHIFTUP broadcast)→rt_a(RTOVR)→…→out(UR_WRITE)。数值仍走 apply_smi_ds_t
     # (model-A)，本节点对 SMT 提供「列对齐读」依赖锚点，使排程把整条转置 datapath 串在 compute 之前。
     # structural_only：S1 期间 model-A 的 apply_smi_ds_t backdoor 已在 run 前执行完整
-    # 「UR read—SHIFTDN gather—SMI_DS_T transpose—scatter」(cluster.py)，故本节点仅作 SMT
+    # 「UR read—SHIFTDN（下行收集）—SMI_DS_T transpose—scatter」(cluster.py)，故本节点仅作 SMT
     # 排程的「列对齐读」依赖锚点、**不进 emit/sim**（pipeline_runner emit 前按此 flag 过滤），
     # 避免被 solver 重指派到真 ur-r 执行而覆盖 backdoor 转置结果。S3 删 model-A 后转为真流式读。
     # ADR-036 S3-a：real-gather ON → ds_src_read 进 emit/sim（真 bank{SRC_BANK} 读指令），且**不硬 pin
@@ -422,7 +422,7 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
         # ADR-034 Stage-I 2a：在 matmul_q 计算 DFG 前注入 SMI_DS_T 转置指令节点
-        # （ds_gather→ds_transpose→现有 broadcast SHIFTUP scatter）。数值仍走 apply_smi_ds_t。
+        # （ds_gather→ds_transpose→现有 broadcast SHIFTUP broadcast）。数值仍走 apply_smi_ds_t。
         ops = super().get_dfg(spec)
         return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
 

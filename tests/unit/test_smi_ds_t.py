@@ -409,8 +409,8 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
                 if fc.smi_ds_t_done:
                     break
         lines = [l for l in buf.getvalue().splitlines() if "[AUDIT-DATA]" in l]
-        gather = [l for l in lines if "Tag:DST-GATHER" in l]
-        scatter = [l for l in lines if "Tag:DST-SCATTER" in l]
+        gather = [l for l in lines if "Tag:DST-SHIFTDN" in l]
+        scatter = [l for l in lines if "Tag:DST-SHIFTUP" in l]
         self.assertEqual(len(gather), K, "每 gather SMC 一条 UR-READ")
         self.assertEqual(len(scatter), M, "每转置行一条 UR-WRITE")
         for l in gather:

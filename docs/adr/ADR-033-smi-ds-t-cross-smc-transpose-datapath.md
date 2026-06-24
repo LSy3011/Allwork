@@ -14,7 +14,7 @@ builds_on: ADR-022, ADR-023, ADR-025, ADR-026
 > [v0.4.19 文档系统理解](../spec/aiacc-v0.4.19-understanding.md)（分歧台账 D-01）。
 >
 > **一句话**：matmul（matrix×matrix）激活的「列对齐→行对齐」转置，**真路径是 SMI_DS_T**
-> （表596-598，跨-SMC：UR read → SHIFTDN gather → SMI_DS_T 转置 → SHIFTUP scatter → UR write，
+> （表596-598，跨-SMC：UR read → SHIFTDN（下行收集） → SMI_DS_T 转置 → SHIFTUP broadcast → UR write，
 > `[seq1051]`），**不是 [ADR-026](ADR-026-matmul-q-matrix-matrix-ds-transpose.md) 当初建模的 DS 模块**
 > （表585-588，每-SMC、挂 STB↔LDB、仅单 SMC 内 UR→UR、用途是 DRAM writeback reshape）。
 > ADR-026 的 compute 机制（广播左 + 每 SMC 列点积 + addtree cumulative）**不受影响、继续有效**；
@@ -71,10 +71,10 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
 ### D3. sim 取 model-A：转置数值忠实，控制/时序 defer
 - **本轮只建模 SMI_DS_T 的转置数值功能**：sim 端把跨-SMC 收集的 `PARAM_SMC_NUM × PARAM_UR_BYTE_CNT` Tile
   做真转置（列对齐→行对齐），让广播拿到正确激活行。**必须真搬数值**（沿用 ADR-026 B4 教训：no-op/view 会拿到列对齐错数据→静默算错）。
-- **SHIFTDN gather / SHIFTUP scatter 复用现有** `shift_dn_unit.py` / `shift_up_unit.py`（已建模、伪代码见理解文档 A2）。
+- **SHIFTDN（下行收集） / SHIFTUP broadcast 复用现有** `shift_dn_unit.py` / `shift_up_unit.py`（已建模、伪代码见理解文档 A2）。
   新增 **中心转置单元**（`sim/smc_simulator/`，参照 `cluster._broadcast_shiftup_fanout` 接入位置，做 UR→UR 跨-SMC 转置变换）。
 - **SMT 边界裁定（hco B-BLOCK-1 收口，原 Open Q1）**：与 ADR-026 的 DS 不同——ADR-026 的 DS 是单 SMC 内
-  UR→UR、SHIFTDN/SHIFTUP 不参与，model-A 自洽；**本 ADR 的五段链里 SHIFTDN gather 与 SHIFTUP scatter 是真 op，
+  UR→UR、SHIFTDN/SHIFTUP 不参与，model-A 自洽；**本 ADR 的五段链里 SHIFTDN（下行收集） 与 SHIFTUP broadcast 是真 op，
   中心转置核夹在两个真 op 之间，存在 SMT 看不见的数据依赖断点**（调度器不知 scatter 必须等转置完成、而转置依赖全部
   gather 到齐；`[seq990]` 这条链「几十周期」靠 COND + SMI_IQ `EXTRA_DATA` 就绪同步）。**裁定**：
   - **Stage-A 取 (b) 整链 model-A 原子段**（同 ADR-023 SHIFTUP fan-out 同拍处理模式，对现有 SMT/SAT 零扰动、风险最低）：
@@ -97,7 +97,7 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
   机制（广播左、每 SMC 列点积、addtree 8 通道 cumulative、dense 4/词打包）**保留有效**。
 
 ### D5. 分阶段（保 ADR-026 已绿的 compute 不破）
-- **Stage-A**：单 SMI_DS_T 指令（`intlv_en=0`）+ 真转置数值 + SHIFTDN gather / SHIFTUP scatter 串成链，
+- **Stage-A**：单 SMI_DS_T 指令（`intlv_en=0`）+ 真转置数值 + SHIFTDN（下行收集） / SHIFTUP broadcast 串成链，
   喂给现有 matmul_q compute（替掉 data-prep 预排假转置）。`--mode e2e` @ PARAM_SMC_NUM=8 → 8/8 bit-perfect。
 - **Stage-B**：`intlv_en=1` 多并发指令间插（`PARAM_INST_NUM=4`），对齐表598 interleave 语义（DEBT-033-DST-CTRL）。
 - **Stage-C**：放大到 PARAM_SMC_NUM=32 参数化验证（NEEDS-VCS）。
@@ -106,11 +106,11 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
 ### D6. 可证伪验收门
 - `test_smi_ds_t_transpose_numeric`：跨-SMC tile（SMC_NUM×UR_BYTE，非对称矩阵）转置为 UR_BYTE×SMC_NUM，
   按 `[seq1037-1039]` 真转置；配对偶用例 no-op/view 实现必 fail（沿用 ADR-026 B4 硬门）。
-- `test_smi_ds_t_is_cross_smc`：断言转置输入来自**所有 SMC 的 SHIFTDN gather**（非单 SMC 本地），
+- `test_smi_ds_t_is_cross_smc`：断言转置输入来自**所有 SMC 的 SHIFTDN（下行收集）**（非单 SMC 本地），
   专杀「退回 DS 单-SMC UR→UR」的回归。
 - `test_matmul_via_smi_ds_t_datapath`：matmul_q 走 SMI_DS_T 五段链 e2e bit-perfect（终值 = numpy `X@W` 对应 per-SMC 切片）。
 - `test_smi_ds_t_param_smc_num_scalable`：换 PARAM_SMC_NUM（如 4/8）转置维度随参数变，无硬编码 8。
-- `test_gather_before_scatter_ordering`（hco B-BLOCK-1）：SHIFTDN gather 未到齐时 SHIFTUP scatter 不得读到 stale/零的中心 tile —— 断言转置核输出依赖**全部** N 行 gather 完成。Stage-A 取 (b) 原子段则为 sim 内序检查；若升 (a) 进 SMT 则验依赖边存在。专杀 model-A 静默乱序。
+- `test_gather_before_scatter_ordering`（hco B-BLOCK-1）：SHIFTDN（下行收集） 未到齐时 SHIFTUP broadcast 不得读到 stale/零的中心 tile —— 断言转置核输出依赖**全部** N 行 gather 完成。Stage-A 取 (b) 原子段则为 sim 内序检查；若升 (a) 进 SMT 则验依赖边存在。专杀 model-A 静默乱序。
 
 ## Consequences
 
@@ -129,7 +129,7 @@ UR read  →  SHIFTDN(gather)  →  SMI_DS_T(transpose)  →  SHIFTUP(scatter/br
 ## Open questions
 1. ~~SMI_DS_T 转置核是否进 SMT？~~ **【hco 已裁定，见 D3】** Stage-A 取 (b) 整链 model-A 原子段（零扰动现有 SMT + 显式
    忠实度 caveat）；(a) 进 SMT 依赖建模 = 忠实度里程碑，gated on NEEDS-USER-FACT-033-DSTDONE + VCS。
-2. ~~SHIFTUP scatter 的 broadcast/smc_id_en 取值？~~ **【hco 已确认】** matmul 行对齐广播 = `broadcast==1` +
+2. ~~SHIFTUP broadcast 的 broadcast/smc_id_en 取值？~~ **【hco 已确认】** matmul 行对齐广播 = `broadcast==1` +
    `smc_id_en=N-1`（`[seq559/566]` 全 SMC 收同一行；与 N-1 缺省一致，无冲突，台账 D-04）。
 3. 与 ADR-026 Stage-2b/2c（M>4 多行 / 大 K 多 tile）的次序：SMI_DS_T 先行还是并行？（纯工程排期，交 user/主 agent。）
 

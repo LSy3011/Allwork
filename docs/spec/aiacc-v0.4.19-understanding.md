@@ -171,7 +171,7 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
 
 ### D-01 🔴 matmul 激活转置引擎接错：DS → 应为 SMI_DS_T
 - **文档**：matmul「激活矩阵排序微指令」= 把列对齐 Tile 转置为行对齐 `[seq1242]`，机制 = SMI_DS_T
-  跨-SMC（SHIFTDN gather→转置→SHIFTUP scatter）`[seq1037-1051]`。DS（表585-588）是每-SMC、挂 STB↔LDB、
+  跨-SMC（SHIFTDN（下行收集）→转置→SHIFTUP broadcast）`[seq1037-1051]`。DS（表585-588）是每-SMC、挂 STB↔LDB、
   `SRC/DST=STB的UR读/写`、仅单 SMC 内 UR→UR `[seq888/1552]`，用途是 DRAM writeback reshape。
 - **我们现状**：[ADR-026](../adr/ADR-026-matmul-q-matrix-matrix-ds-transpose.md) 把 matmul 激活 transpose 建模为
   **DS 模块（表585-588）**（`CRU_DS/CRD_DS`、UR→UR、AXI tid b00..b11）。代码侧 DS/ShuffleUnit/SMI_DS_T **全未落地**
@@ -200,7 +200,7 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
   → **ADR-031 的 blanket N-1 不会误伤 SHIFTUP/SHIFTDN**（它们走 op metadata 显式赋值）。
 - **性质**：🟢 缺省机制无误伤；⚪ 残留＝SHIFTUP/SHIFTDN 各 op 的 broadcast 位 + smc_id_en 取值是否
   按文档区分「broadcast==1 范围 / broadcast==0 目标 ID」由各算子 metadata 负责，需逐 op 核（非缺省 bug）。
-- **建议**：ADR-033 的 SHIFTUP scatter / SHIFTDN gather 部分显式写明 broadcast 位与 smc_id_en 取值；
+- **建议**：ADR-033 的 SHIFTUP broadcast / SHIFTDN（下行收集） 部分显式写明 broadcast 位与 smc_id_en 取值；
   从 🔴 降级（原担心的缺省误伤已排除）。
 
 ### D-05 ⚪ FP16MUL S0123=广播 / S4567=本地（matmul-native 组织）

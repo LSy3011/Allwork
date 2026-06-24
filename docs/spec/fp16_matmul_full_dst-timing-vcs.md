@@ -11,6 +11,14 @@
 > - 不变量：ON vs OFF 输出**逐 bit 一致**（A/B 护栏），ON 8/8 bit-perfect。
 >
 > **忠实度边界一句话**：数值终值 + 数据流空间结构 + 依赖序 + compute 段相对 latency = **可对 RTL**；SMI_DS_T 级 latency / SHIFTDN 逐拍 drain / `_dst_bcast_feed` burst 投递 / COND 协调 / 绝对拍 = **model-A，VCS 校准前勿逐拍对**。
+>
+> 🔤 **术语订正（2026-06-15，user 裁定）——「gather / scatter」不是硬件单元**：本文（及 ADR-033/036、代码注释）里的
+> **gather / scatter 是借并行计算术语描述的「方向」，非 RTL 单元名**。真硬件只有：
+> - **SHIFTDN**（跨-SMC 下行链）—— 文中 "gather" = 经 SHIFTDN 把各 SMC 列对齐数据收集回 SMI 中心；
+> - **SHIFTUP**（跨-SMC 上行链，`broadcast`/`P2P` 两 mode，`shiftup.yaml`）—— 文中 "scatter" = **SHIFTUP broadcast**
+>   （`broadcast=1` + `smc_id_en`，`DR_SHIFTUP_D ← CRU_SHIFTUP_O[data]`）把转置行广播给各 SMC。
+> **VCS 对照只有 SHIFTUP/SHIFTDN，没有 gather/scatter 单元**。sim log 端点 tag 已正名 `DST-SHIFTDN`(原 DST-GATHER) /
+> `DST-SHIFTUP`(原 DST-SCATTER) / `SHIFTUP-BCAST`(原 SHIFTUP-FEED)。下文残留的 gather/scatter 均按本注理解为方向 shorthand。
 
 ---
 
@@ -51,14 +59,14 @@ python3 verification_v2/main_verify.py --op fp16_matmul_full_dst --mode e2e
 ① 列对齐激活 X[8,8] @ bank6（全 8 SMC 各持 1 列）
    SMC_s bank6@0 = [X[0,s] X[1,s] … X[7,s]]   （8 fp16 = 1 词）
         │
-        ▼  ② SHIFTDN gather（8 列经下行链汇聚 → SMI 中心）
+        ▼  ② SHIFTDN（下行收集）（8 列经下行链汇聚 → SMI 中心）
    SMI_DS_T 8×8 Tile
         │
         ▼  ③ SMI_DS_T transpose（列对齐 → 行对齐，out[m]=tile[*][m]=X[m,:]）
    8 行各 1 词
         │
-        ▼  ④ SHIFTUP scatter（DATA_OUT 逐词 + DATA_OUT_VLD）
-   ON：转置行 X[m,:] 喂 SMC_0 的 SHIFTUP 广播输入缓冲 `_dst_bcast_feed[m]`（**不写 bank0**，audit Unit:SHIFTUP-FEED）
+        ▼  ④ SHIFTUP broadcast（DATA_OUT 逐词 + DATA_OUT_VLD）
+   ON：转置行 X[m,:] 喂 SMC_0 的 SHIFTUP 广播输入缓冲 `_dst_bcast_feed[m]`（**不写 bank0**，audit Unit:SHIFTUP-BCAST）
    OFF：写 SMC_0 bank0@m = X[m,:]（model-A staging，audit Unit:UR-WRITE）
         │
         ▼  ⑤ a_read(ur-r0) 逐行触发（仍发真 bank0 读指令）+ SHIFTUP 广播 fan-out → 全 8 SMC
@@ -75,7 +83,7 @@ python3 verification_v2/main_verify.py --op fp16_matmul_full_dst --mode e2e
 > 数值核走 **ADR-036 S2 流式 stepped 单元**（`SmiDsTUnit.evaluate/tick`，固定 latency pipeline、逐行 DATA_OUT；
 > **非** `apply_smi_ds_t` gather-gate backdoor）。
 > **① 源读 = 真固件 `ds_src_read` bank6 UR 读指令（ON，S3-a）**：sim 真执行该微指令读列对齐激活入 ur-r0 端口、捕获寄存器快照；
-> ② gather 的 DST-GATHER 取该捕获值（SHIFTDN 下行链逐拍 drain 未建模 = DEBT-S4）。
+> ② gather 的 DST-SHIFTDN 取该捕获值（SHIFTDN 下行链逐拍 drain 未建模 = DEBT-S4）。
 > **④ scatter（ON，S3-b）= 文档 datapath `SMI_DS_T DATA_OUT → SHIFTUP data 入口 → DR_SHIFTUP_D → RtoVR`**：转置行**不写 UR slot**
 > （RTL 无 scatter UR 写——见 ADR-036 S3-b 事实订正），经 `_dst_bcast_feed` 喂 SHIFTUP 广播输入。
 > 端点归属（hco 订正）：bank6 读 = **SMC_s 的 UR-read**（真指令）；scatter ON = **SHIFTUP 广播投递**（非 UR-write）/ OFF = SMC_0 UR-write staging。
@@ -90,15 +98,15 @@ python3 verification_v2/main_verify.py --op fp16_matmul_full_dst --mode e2e
 | Cyc | 事件 | 端点 | 数据（解码示例） |
 |---|---|---|---|
 | **7** | ① **真固件 ds_src_read**（bank6 列对齐源读，新增 S3-a）| UR-READ `READ` bank6@0（×SMC_0..7，占 ur-r0）→ 捕获寄存器 | SMC_0 = X[:,0]=`[3.55,3.17,4.45,3.46,1.54,3.29,1.34,2.80]` |
-| **9** | ② SMI_DS_T gather（取捕获值，SHIFTDN drain 未建模）| UR-READ `DST-GATHER` bank6@0（×SMC_0..7）| 同上（读 ① 捕获的列） |
+| **9** | ② SMI_DS_T gather（取捕获值，SHIFTDN drain 未建模）| UR-READ `DST-SHIFTDN` bank6@0（×SMC_0..7）| 同上（读 ① 捕获的列） |
 | 9→25 | ③ transpose | （SMI_DS_T latency=16；9+16=25）| — |
-| **25-32** | ④ scatter（逐行 1 词/拍，**ON：喂广播缓冲不写 bank0**）| **`SHIFTUP-FEED` `DST-SCATTER`** bank0@0..7（SMC_0）| @0=X[0,:] … @7=X[7,:]（行对齐转置结果）|
+| **25-32** | ④ scatter（逐行 1 词/拍，**ON：喂广播缓冲不写 bank0**）| **`SHIFTUP-BCAST` `DST-SHIFTUP`** bank0@0..7（SMC_0）| @0=X[0,:] … @7=X[7,:]（行对齐转置结果）|
 | **2-112** | ⑤ a_read（bank0 触发读，广播 data 取 `_dst_bcast_feed[m]`）+ 权重读 | UR-READ `READ` bank0(触发)/bank1-4(权重)| 广播 = ④ 喂的转置行 X[m,:] |
 | **47-135** | ⑥ RTOVR 选通 → FP16MUL → ADDTREE | RTOVR `ROUTE` | — |
 | **66-136** | ⑦ 输出写回（逐行）| UR-WRITE `WRITE` bank5@(m·4+c)（SMC_s）| SMC_0 行0 = `[70.21,68.00,76.42]…` |
 
 整体：Cyc7 首 ds_src_read → Cyc9 gather → Cyc25-32 scatter → Cyc136 末输出 → 排空到 max_cycles=201。
-> ⚠ **bank0 在 ON 路径全程不被写**（scatter 走 SHIFTUP-FEED）——sim log 唯一 UR-WRITE 是 bank5 结果写（Cyc66-136）。a_read 读 bank0 是触发指令（读值弃用、转置行替代）。
+> ⚠ **bank0 在 ON 路径全程不被写**（scatter 走 SHIFTUP-BCAST）——sim log 唯一 UR-WRITE 是 bank5 结果写（Cyc66-136）。a_read 读 bank0 是触发指令（读值弃用、转置行替代）。
 
 ---
 
@@ -112,7 +120,7 @@ python3 verification_v2/main_verify.py --op fp16_matmul_full_dst --mode e2e
 | **FP16MUL** | **4** | **ADR-032**（user 2026-06-04 裁定，原 2 改 4）| FP16MUL 输入 → 输出 +4 |
 | **FP32ADDTREE8TO1** | **3** | `pipeline_delays.yaml` | **tree-to-tree 链每 +3**（y_0→y_1→y_2→y_3） |
 
-依赖序（**VCS 必满足**）：`ds_src_read < gather < transpose < scatter(SHIFTUP-FEED) < a_read < shiftup_broadcast < FP16MUL < ADDTREE < write` —— 严格有序，可逐项对 RTL（ds_src_read 真读 bank6 列对齐源是 S3-a 新增首段）。
+依赖序（**VCS 必满足**）：`ds_src_read < gather < transpose < scatter(SHIFTUP-BCAST) < a_read < shiftup_broadcast < FP16MUL < ADDTREE < write` —— 严格有序，可逐项对 RTL（ds_src_read 真读 bank6 列对齐源是 S3-a 新增首段）。
 
 ---
 
@@ -121,18 +129,18 @@ python3 verification_v2/main_verify.py --op fp16_matmul_full_dst --mode e2e
 | 维度 | 当前 sim (model-A) | VCS / RTL 真相 | 对齐建议 |
 |---|---|---|---|
 | **数据流空间结构**（§2 五段）| 列对齐→gather→转置→scatter→广播→compute | 同 | ✅ **逐项对**（结构契约）|
-| **端点值**（gather/scatter/output 数据）| sim log `DST-GATHER`/`DST-SCATTER`/`WRITE` 有值 | SMC_s UR-read / SMC_0 UR-write 端点 | ✅ **diff 值 + SMC_ID + bank/addr** |
+| **端点值**（gather/scatter/output 数据）| sim log `DST-SHIFTDN`/`DST-SHIFTUP`/`WRITE` 有值 | SMC_s UR-read / SMC_0 UR-write 端点 | ✅ **diff 值 + SMC_ID + bank/addr** |
 | **依赖序** | gather<transpose<scatter<read<mul<tree<write | 同 | ✅ **对序** |
 | **compute 段相对 latency**（FP16MUL=4 / ADDTREE=3 链 / RTOVR/UR=1）| §4 真值 | 同（pipeline_delays / ADR-032）| ✅ **对相对拍 gap** |
 | **SMI_DS_T 级 latency=16** | `= PARAM_SMC_NUM×2`（para1194/1237 的「**广播读延迟**」量，被 ADR-036 **Q2 假设借作**「转置 latency」）| 待 VCS 实测 | ❌ **不要对这 16 拍绝对值**；VCS 校准后回填 |
 | **SHIFTDN 逐拍 drain** | gather 当 1 拍原子（unit lat=1），8-SMC drain **欠建模**，其延迟被借进上面的 16 | SHIFTDN 链逐拍 drain（~8 拍）+ interleave 2 拍 stagger（para961）| ✅ diff 端点值；❌ **SHIFTDN 事件数/逐拍时序** |
 | **scatter 投递（ON，S3-b）** | 1 词/拍逐行（Cyc25-32 线速）→ `_dst_bcast_feed` 喂 SHIFTUP 广播输入（**不写 bank0**）| `SMI_DS_T DATA_OUT → SHIFTUP data 入口 → DR_SHIFTUP_D`（**无 scatter UR 写**，ADR-036 S3-b 订正）| ✅ diff 转置行值/addr + 路径=SHIFTUP；❌ 绝对拍（burst 投递 = DEBT-036-DST-BCAST-FEED-TIMING）|
-| **gather 源读（ON，S3-a）** | 真固件 `ds_src_read` bank6 读（Cyc7，占 ur-r0）+ 捕获寄存器 → DST-GATHER 取值（Cyc9）| SMC_s 经 SHIFTDN gather 列对齐激活 | ✅ diff bank6 读端点值 + 真指令存在；❌ DST-GATHER 与源读的 2 拍 gap（捕获中转 artifact）|
+| **gather 源读（ON，S3-a）** | 真固件 `ds_src_read` bank6 读（Cyc7，占 ur-r0）+ 捕获寄存器 → DST-SHIFTDN 取值（Cyc9）| SMC_s 经 SHIFTDN（下行收集） 列对齐激活 | ✅ diff bank6 读端点值 + 真指令存在；❌ DST-SHIFTDN 与源读的 2 拍 gap（捕获中转 artifact）|
 | **COND 数据就绪同步** | **无**（ADR-036 Q3：user 裁定用固定-latency 静态排程替代；链全固定延迟 → 编译期排 `t≥t[p]+lat`）| RTL 即便用 COND，固定延迟 → 拍数应一致 | ⚠ **缺口实质 = latency 16 校准对不对**（不是缺 COND 机制）|
 | **绝对 cycle** | 跨 cold-build 稳定（ds_src=7/gather=9/scatter=25-32/write=66-136），但建立在 latency=16 假设 | RTL 绝对拍由真 latency 决定 | ❌ **latency≠16 则全平移**；先对相对结构 |
 | **smc_id_en** | sim 全盲（8/8 是 sim-vs-golden 自洽）| 真 8-SMC 各分支 | ❌ **VCS 必验 SMC_1..7 各算对** |
 | **转置粒度** | element（fp16 lane）| **byte**（para1037）| fp16 每元素 2byte 不跨 lane → 等价（ADR-035 BLOCK-1 不变式，**非** q_dst 文档表）|
-| **bank0 同拍 R+W** | **ON：已 RETIRE（S3-b）**——scatter 不再写 bank0（走 SHIFTUP-FEED）→ bank0 R+W 伪冲突物理消失；唯一 bank0 访问是 a_read 读（触发）。 **OFF（legacy）**：scatter 写 + a_read 读可能同拍 R+W bank0（model-A 同速率人为产物，单端口 SRAM 一拍做不到、RTL 不会出现）| COND 同步无同拍 R+W | ✅ **ON 路径无此伪冲突，VCS 不会遇到**；OFF diff harness 须豁免、勿误判 ADR-008 |
+| **bank0 同拍 R+W** | **ON：已 RETIRE（S3-b）**——scatter 不再写 bank0（走 SHIFTUP-BCAST）→ bank0 R+W 伪冲突物理消失；唯一 bank0 访问是 a_read 读（触发）。 **OFF（legacy）**：scatter 写 + a_read 读可能同拍 R+W bank0（model-A 同速率人为产物，单端口 SRAM 一拍做不到、RTL 不会出现）| COND 同步无同拍 R+W | ✅ **ON 路径无此伪冲突，VCS 不会遇到**；OFF diff harness 须豁免、勿误判 ADR-008 |
 
 **一句话**：和 VCS 对齐 **§2/§3 空间数据流 + 端点值 + §4 依赖序与 compute 相对 latency**；**不要**逐拍对齐 SMI_DS_T latency=16 / SHIFTDN drain / scatter 绝对拍 / COND —— 那些是 model-A 占位，VCS 才是真相（ADR-036 验收②）。
 
@@ -149,10 +157,10 @@ python3 verification_v2/main_verify.py --op fp16_matmul_full_dst --mode e2e
 ## 7. 固件文件（VCS 加载，`build/verification_v2/fp16_matmul_full_dst/`）
 
 - 全局指令流（8-SMC lockstep 共享）：`iq_ur-r0.hex`(a_read+ds_src_read) · `iq_ur-r1/r2/r3.hex`(权重读) · `iq_shiftdn.hex`(ds_gather) · **`iq_smi-ds-t-0.hex`**(SMI_DS_T 转置，表598) · `iq_shiftup.hex`(广播) · `iq_fp16mul.hex` · `iq_fp32addtree8to1.hex` · `iq_rtovr-{19..23,32,33,35}.hex` · `iq_ur-w0.hex`
-- 每-SMC 数据：`smc_0..7/ur_data`（列对齐激活在 **bank6**、权重 bank1-4；**bank0 全程不注入也不写**——ON 转置经 SHIFTUP-FEED 喂广播、不落 bank0）
+- 每-SMC 数据：`smc_0..7/ur_data`（列对齐激活在 **bank6**、权重 bank1-4；**bank0 全程不注入也不写**——ON 转置经 SHIFTUP-BCAST 喂广播、不落 bank0）
 - 加载映射 + cfg：`sim_config.json`（`iq_init` + `smi_ds_t`【ON 含 `src_read_port` + `scatter_to_feed`】 + `dst_src_capture`(ON) + `dst_bcast_feed`(ON) + `broadcast_capture` + `per_smc_ur_init`）
 - golden 比对：`golden_data.npz`（`y` shape (8,32)）+ `smc_k/output_bank/`（bank5）
-- **固件 ON 真路径锚点**：`physical_instructions.json` 含真 `ds_src_read` BANK=6 读指令（trace_id=ds_src_read，落 ur-r0）；sim log scatter 事件 = `Unit:SHIFTUP-FEED`（**零 `Unit:UR-WRITE` bank0**）
+- **固件 ON 真路径锚点**：`physical_instructions.json` 含真 `ds_src_read` BANK=6 读指令（trace_id=ds_src_read，落 ur-r0）；sim log scatter 事件 = `Unit:SHIFTUP-BCAST`（**零 `Unit:UR-WRITE` bank0**）
 
 ---
 

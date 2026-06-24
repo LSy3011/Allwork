@@ -74,7 +74,7 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         # OFF 对称守门（hco 可选建议）：OFF 路径 scatter 仍走 bank0 staging（UR-WRITE）——验双路 else 分支未被误删。
         # 须在 ON 跑前读（ON 会覆盖同一 build 目录）。
         off_scatter = [l for l in (bdir / "fp16_matmul_full_dst_sim.log").read_text().splitlines()
-                       if "Tag:DST-SCATTER" in l]
+                       if "Tag:DST-SHIFTUP" in l]
         self.assertTrue(any("Unit:UR-WRITE" in l for l in off_scatter),
                         "OFF 路径 scatter 应仍是 UR-WRITE bank0 staging（守双路 else 分支）")
         rc_on, out_on = self._run({"AIACC_DST_REAL_GATHER": "1"})       # ON（真固件 gather）
@@ -83,7 +83,7 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         # ON 须真走 gather 路径——验 build 产物（sim log 写文件、不在 console stdout）：
         #   ① 固件含真 BANK=6 ds_src_read 读指令（非 structural_only 被过滤）；
         #   ② sim_config 带 src_read_port（cluster 据此走端口快照 gather 而非 storage backdoor）；
-        #   ③ sim log 有 DST-GATHER 端口读事件。
+        #   ③ sim log 有 DST-SHIFTDN 端口读事件。
         instrs = json.loads((bdir / "physical_instructions.json").read_text())
         b6 = [i for i in instrs if i.get("payload", {}).get("BANK") == 6
               and i.get("trace_id") == "ds_src_read"]
@@ -93,14 +93,14 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
                              "ON sim_config 须带 src_read_port（cluster 走端口 gather）")
         self.assertIsNotNone(cfg.get("dst_src_capture"), "ON 须配 dst_src_capture 捕获寄存器")
         sim_log = (bdir / "fp16_matmul_full_dst_sim.log").read_text()
-        self.assertIn("Tag:DST-GATHER", sim_log, "ON sim log 应有 DST-GATHER 端口读事件")
-        # S3-b（full fan-out）：scatter 去 backdoor —— 转置行经 SHIFTUP-FEED 直喂、删 bank0 staging 写。
+        self.assertIn("Tag:DST-SHIFTDN", sim_log, "ON sim log 应有 DST-SHIFTDN 端口读事件")
+        # S3-b（full fan-out）：scatter 去 backdoor —— 转置行经 SHIFTUP-BCAST 直喂、删 bank0 staging 写。
         self.assertTrue(cfg.get("smi_ds_t", {}).get("scatter_to_feed"),
                         "ON sim_config 须带 scatter_to_feed（scatter 走 SHIFTUP 广播输入缓冲）")
         self.assertIsNotNone(cfg.get("dst_bcast_feed"), "ON 须配 dst_bcast_feed")
-        self.assertIn("Unit:SHIFTUP-FEED", sim_log, "ON scatter 应走 SHIFTUP-FEED（非 UR-WRITE bank0）")
-        scatter_lines = [l for l in sim_log.splitlines() if "Tag:DST-SCATTER" in l]
-        self.assertTrue(scatter_lines, "应有 DST-SCATTER 事件")
+        self.assertIn("Unit:SHIFTUP-BCAST", sim_log, "ON scatter 应走 SHIFTUP-BCAST（非 UR-WRITE bank0）")
+        scatter_lines = [l for l in sim_log.splitlines() if "Tag:DST-SHIFTUP" in l]
+        self.assertTrue(scatter_lines, "应有 DST-SHIFTUP 事件")
         self.assertFalse(any("Unit:UR-WRITE" in l for l in scatter_lines),
                          "S3-b：scatter 不应再是 UR-WRITE bank0（bank0 staging 已删）")
         # BLOCK-Q2：a_read 仍发真 bank0 读指令（trigger + addr 索引，未退化成 phantom）
