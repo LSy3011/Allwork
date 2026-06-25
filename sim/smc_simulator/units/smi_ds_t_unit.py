@@ -15,7 +15,7 @@ interleave（intlv_*）4 并发时序 / CRI 字段位宽 / INST_DONE 握手 = DE
 NEEDS-USER-FACT-033-DSTDONE，本轮 defer。
 """
 import struct
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 
 def fp32_lanes_from_word(word: int, lanes: int) -> List[float]:
@@ -69,9 +69,10 @@ def _lane_codec(element_bits: int):
 class SmiDsTUnit:
     """SMI 中心跨-SMC 转置单元（非每-SMC，无 SMC_ID）。
 
-    用法（cluster 模型 A 原子段）：
-      reset() → 对每个 SMC gather(smc_id, ur_row) → transpose() 返回行对齐 Tile。
-    transpose() 在 gather 未到齐时抛错（gate: gather-before-scatter ordering）。
+    用法（ADR-036 S2 流式 step-driven）：
+      reset() → evaluate({'valid':1,'tile':cols}) 触发整-tile 转置（核 = transpose_tile 静态纯函数）
+      → 每拍 tick() 经固定 latency pipeline 发一个 DATA_OUT 行词 → get_outputs() 读接口寄存器。
+    （ADR-033 的 gather/transpose 原子 gate 方法已随 apply_smi_ds_t backdoor 删，S3-c。）
     """
 
     def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4, element_bits: int = 32,
@@ -105,9 +106,6 @@ class SmiDsTUnit:
         self.reset()
 
     def reset(self):
-        # gather 缓冲（CRD_SHIFTDN）：_buf[smc_id] = 该 SMC 的 UR 行（lanes 个元素）；None = 尚未 gather
-        self._buf: List[Optional[List]] = [None] * self.smc_num
-        self._out: Optional[List[List]] = None
         # ADR-036 S2 流式接口状态：转置后行词 FIFO + 固定 latency 倒计时
         self._out_words: List = []     # 转置产出的 (off, word) 待发队列（经 latency 后逐拍出）
         self._latency_ctr = -1         # -1 = 空闲未触发；>=0 = latency 倒计时中
@@ -119,8 +117,9 @@ class SmiDsTUnit:
     # ── ADR-036 S3-c：删 ADR-034 S2-D1 step-driven 接口（load_tile/execute/emit_step/busy）──
     #   已被本节 ADR-036 S2 流式接口（evaluate/tick/get_outputs）取代、仅旧测试调用、无 production 路径，
     #   死代码移除（user 2026-06-15 裁定「先删纯死 gate 方法」）。转置数值核仍由 transpose_tile（静态纯核，
-    #   下方）+ S2 流式 evaluate/tick 覆盖。apply_smi_ds_t 用的 gather/transpose/is_ready/missing 仍保留
-    #   （matmul_q_dst_full 经 fallback 依赖；删它须先 triage 该算子，本轮不动）。
+    #   下方）+ S2 流式 evaluate/tick 覆盖。
+    #   ── 续 S3-c（2026-06-25）：apply_smi_ds_t backdoor 已删 → 其 gather/transpose/is_ready/missing
+    #   gate 方法本轮一并删（matmul_q_dst_full 已去误继承的 smi_ds_t_config、不再经 fallback）。
 
     # ── ADR-036 S2：流式 stepped 单元接口（evaluate/tick/get_outputs，固定 latency pipeline）──
     #   对标 units/fp32addtree8to1_unit.py 的 evaluate→tick→get_outputs 约定。语义：转置是
@@ -172,34 +171,9 @@ class SmiDsTUnit:
         return {"DATA_OUT": self.data_out, "DATA_OUT_VLD": self.data_out_vld,
                 "INST_DONE": self.inst_done}
 
-    def gather(self, smc_id: int, row: Sequence):
-        """SHIFTDN（下行收集）：收一个 SMC 的一行 UR 数据（lanes 个元素）。"""
-        if not (0 <= smc_id < self.smc_num):
-            raise ValueError(f"smc_id {smc_id} out of range [0,{self.smc_num})")
-        row = list(row)
-        if len(row) != self.lanes:
-            raise ValueError(f"gather row from SMC {smc_id} has {len(row)} elems, expected lanes={self.lanes}")
-        self._buf[smc_id] = row
-
-    def is_ready(self) -> bool:
-        """是否所有 SMC 的 gather 都到齐。"""
-        return all(r is not None for r in self._buf)
-
-    def missing(self) -> List[int]:
-        """尚未 gather 的 SMC id 列表。"""
-        return [i for i, r in enumerate(self._buf) if r is None]
-
-    def transpose(self) -> List[List]:
-        """gather 全到齐后转置并返回行对齐 Tile（lanes 行 × smc_num 列）。
-
-        **未到齐则抛 RuntimeError**——把「scatter 必须等全部 gather 完成」钉成硬约束
-        （hco B-BLOCK-1 / D6 gather-before-scatter ordering），防 model-A 静默乱序读到 stale/零。
-        """
-        if not self.is_ready():
-            raise RuntimeError(
-                f"SMI_DS_T transpose() called before gather complete: missing SMC {self.missing()}")
-        self._out = self.transpose_tile(self._buf)
-        return self._out
+    # ── ADR-036 S3-c：删 gather/is_ready/missing/transpose（实例 gate 方法）──────────────
+    #   这 4 个方法是 apply_smi_ds_t model-A backdoor 的 gather-before-scatter gate 实现，随 backdoor
+    #   一并删除。run 中真 datapath 走流式 evaluate/tick（转置核 = transpose_tile 静态纯函数，无 gate）。
 
     @staticmethod
     def transpose_tile(tile: Sequence[Sequence]) -> List[List]:

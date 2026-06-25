@@ -64,107 +64,11 @@ class TestSmiDsTTranspose(unittest.TestCase):
             SmiDsTUnit.transpose_tile([[1, 2, 3], [4, 5]])
 
 
-class TestSmiDsTGatherOrdering(unittest.TestCase):
-    def test_transpose_before_gather_raises(self):
-        """门 5（unit 级）：gather 未到齐就 transpose → 抛 RuntimeError（gather-before-scatter）。"""
-        u = SmiDsTUnit(smc_num=8, lanes=4)
-        u.gather(0, [1, 2, 3, 4])
-        u.gather(1, [5, 6, 7, 8])          # 只 gather 了 2/8
-        self.assertFalse(u.is_ready())
-        self.assertEqual(set(u.missing()), set(range(2, 8)))
-        with self.assertRaises(RuntimeError):
-            u.transpose()
-
-    def test_is_cross_smc_all_smc_gathered(self):
-        """门 2（unit 级）：输入来自所有 SMC（非单 SMC），全到齐才能转置出正确行对齐数据。"""
-        smc_num, lanes = 8, 4
-        u = SmiDsTUnit(smc_num=smc_num, lanes=lanes)
-        # 每个 SMC 贡献 lanes 个元素：SMC_s 持 [X[0,s], X[1,s], ..., X[lanes-1,s]]（列对齐存）
-        X = [[m * 1000 + s for s in range(smc_num)] for m in range(lanes)]  # 逻辑激活 [lanes 行 × smc_num 列]
-        for s in range(smc_num):
-            u.gather(s, [X[m][s] for m in range(lanes)])   # SMC_s 的 UR 行 = 列 s
-        self.assertTrue(u.is_ready())
-        out = u.transpose()
-        # 转置后第 m 行 = 完整激活行 X[m,:]（跨所有 SMC 汇聚）
-        for m in range(lanes):
-            self.assertEqual(out[m], X[m], f"row {m} not recovered from cross-SMC gather")
-
-    def test_gather_validates_row_width(self):
-        """gather 行宽必须 = lanes，防错配。"""
-        u = SmiDsTUnit(smc_num=8, lanes=4)
-        with self.assertRaises(ValueError):
-            u.gather(0, [1, 2, 3])         # 宽度 3 != lanes 4
-        with self.assertRaises(ValueError):
-            u.gather(99, [1, 2, 3, 4])     # smc_id 越界
-
-
 class TestSmiDsTClusterApply(unittest.TestCase):
-    """门 2/3/5（cluster 级）：cluster.apply_smi_ds_t 从多 SMC bank gather 列对齐激活 →
-    SMI_DS_T 转置 → 行对齐写回 SMC_0 bank0。验证跨-SMC datapath 的数值正确性。"""
-
-    @staticmethod
-    def _fake_cluster(num_kernels, num_banks=8, bank_size=16):
-        import types
-        import logging
-        ker = {}
-        for i in range(num_kernels):
-            ub = types.SimpleNamespace(storage=[[0] * bank_size for _ in range(num_banks)])
-            ker[i] = types.SimpleNamespace(ur_bank=ub)
-        return types.SimpleNamespace(kernels=ker, logger=logging.getLogger("test_smi_ds_t"))
-
-    def test_gather_transpose_scatter(self):
-        """门 2+3：列对齐激活存 K 个 SMC → apply_smi_ds_t → SMC_0 bank0 得行对齐 X[m,:]。"""
-        from smc_simulator.system.cluster import SystemCluster
-        from smc_simulator.units.smi_ds_t_unit import word_from_fp32_lanes, fp32_lanes_from_word
-
-        K, M = 4, 4
-        # 逻辑激活 X[M,K]，元素唯一可区分
-        X = [[float(m * 10 + k + 1) for k in range(K)] for m in range(M)]
-        fake = self._fake_cluster(num_kernels=8)   # 8 SMC，仅前 K 个持激活列
-        # 列对齐存（非转置间插）：SMC_s bank4 持列 s = [X[0,s]..X[M-1,s]]
-        for s in range(K):
-            col = [X[m][s] for m in range(M)]
-            fake.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes(col)
-        cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
-               "gather_smc_cnt": K, "lanes": M}
-        SystemCluster.apply_smi_ds_t(fake, cfg)
-        # SMC_0 bank0 addr m 应 = 行对齐 X[m,:]（跨所有 K 个 SMC 汇聚转置恢复）
-        for m in range(M):
-            row = fp32_lanes_from_word(fake.kernels[0].ur_bank.storage[0][m], K)
-            for k in range(K):
-                self.assertAlmostEqual(row[k], X[m][k], places=4,
-                                       msg=f"row {m} lane {k} not recovered")
-        # 反证：源 SMC_3（持列 3）若全 0，则恢复的每行最后一元素错 → 证明真用了跨-SMC 源
-        fake2 = self._fake_cluster(num_kernels=8)
-        for s in range(K - 1):   # 故意漏掉 SMC_3
-            col = [X[m][s] for m in range(M)]
-            fake2.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes(col)
-        SystemCluster.apply_smi_ds_t(fake2, cfg)
-        row0 = fp32_lanes_from_word(fake2.kernels[0].ur_bank.storage[0][0], K)
-        self.assertNotAlmostEqual(row0[K - 1], X[0][K - 1], places=4)  # 列 3 缺 → 错
-        self.assertAlmostEqual(row0[K - 1], 0.0, places=4)             # 缺的列 = 0
-
-    def test_k8_multiword_gather_transpose_scatter(self):
-        """Stage-A'：K=8 全 gather（8 SMC × lanes=1）→ 转置 1×8 → 写回 SMC_0 bank0 2 词。
-        验证 apply_smi_ds_t 多词行（K=8 > word_lanes=4）正确拆词。"""
-        from smc_simulator.system.cluster import SystemCluster
-        from smc_simulator.units.smi_ds_t_unit import word_from_fp32_lanes, fp32_lanes_from_word
-
-        K = 8
-        a = [float(s + 1) * 1.5 for s in range(K)]   # 8 元素激活向量
-        fake = self._fake_cluster(num_kernels=8)
-        # 列对齐：SMC_s bank4 持 a[s]（lanes=1，词 = [a[s],0,0,0]）
-        for s in range(K):
-            fake.kernels[s].ur_bank.storage[4][0] = word_from_fp32_lanes([a[s]])
-        cfg = {"src_bank": 4, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
-               "gather_smc_cnt": K, "lanes": 1, "word_lanes": 4}
-        SystemCluster.apply_smi_ds_t(fake, cfg)
-        # SMC_0 bank0 addr0 = a[0:4]，addr1 = a[4:8]（行对齐 8 元素拆 2 词）
-        w0 = fp32_lanes_from_word(fake.kernels[0].ur_bank.storage[0][0], 4)
-        w1 = fp32_lanes_from_word(fake.kernels[0].ur_bank.storage[0][1], 4)
-        for k in range(4):
-            self.assertAlmostEqual(w0[k], a[k], places=4)
-            self.assertAlmostEqual(w1[k], a[4 + k], places=4)
+    """ADR-036 S3-c：cluster.apply_smi_ds_t（model-A run-前原子 backdoor）+ SmiDsTUnit 的
+    gather/is_ready/missing/transpose gate 方法已删。跨-SMC 转置数值正确性现由 TestSmiDsTTranspose
+    （transpose_tile 静态纯核）+ TestSmiDsTS2Streaming（流式 evaluate/tick）+ e2e 覆盖。本类仅留
+    codec 往返单测（与 emitter/_read_sim_output 打包约定一致）。"""
 
     def test_word_pack_roundtrip(self):
         """pack/unpack fp32 lane 往返一致（与 emitter/_read_sim_output 约定一致）。"""
@@ -227,7 +131,8 @@ class TestSmiDsTModuleSpec(unittest.TestCase):
 
 class TestSmiDsTInstructionDriven(unittest.TestCase):
     """ADR-034 Stage-I 2a：SMI_DS_T 升 DFG 指令节点的「结构」验证
-    （DFG 拓扑 + SMT 依赖边 + emit 5bit 窄微指令比特层）。数值仍由 apply_smi_ds_t（model-A）提供。"""
+    （DFG 拓扑 + SMT 依赖边 + emit 5bit 窄微指令比特层）。数值由流式 SmiDsTUnit.evaluate/tick 提供
+    （ADR-036 S3-c：apply_smi_ds_t backdoor 已删）。"""
 
     @staticmethod
     def _paths():
@@ -322,7 +227,6 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
         fc = types.SimpleNamespace(kernels=ker, logger=logging.getLogger("test_2b"),
                                    smi_ds_t_iq=None, smi_ds_t_cfg=None,
                                    smi_ds_t_fired=False, cycle_count=0)
-        fc.apply_smi_ds_t = lambda cfg: SystemCluster.apply_smi_ds_t(fc, cfg)
         fc._audit_smi_ds_t = lambda *a, **k: None   # S2-D1b：测试不关心 datapath 日志
         return fc
 
@@ -447,11 +351,12 @@ class TestSmiDsTInstructionTrigger(unittest.TestCase):
         return HardwareSpec.load("hw_config")
 
 
-# ADR-036 S3-c：TestSmiDsTStepDriven 已删——它测的 ADR-034 S2-D1 step-driven 接口
-# (load_tile/execute/emit_step/busy) 已被 ADR-036 S2 流式接口 (evaluate/tick) 取代、为死代码移除。
-# 其覆盖未丢：gather-before-scatter ordering 由 TestSmiDsTGatherOrdering.test_transpose_before_gather_raises
-# (走 transpose() gate) 覆盖；多词行拆分由 TestSmiDsTClusterApply.test_k8_multiword_gather_transpose_scatter
-# (走 apply_smi_ds_t) 覆盖；流式逐词 emit 由 TestSmiDsTS2Streaming (evaluate/tick) 覆盖。
+# ADR-036 S3-c：TestSmiDsTStepDriven / TestSmiDsTGatherOrdering / TestSmiDsTClusterApply 的
+# gate+apply 测试已删——它们测的 ADR-034 step-driven 接口 + apply_smi_ds_t model-A backdoor + 其
+# gather/is_ready/missing/transpose gate 方法均已随 backdoor 删除（无 production 路径）。覆盖迁移：
+# 转置数值正确性 / 多词行拆分由 TestSmiDsTTranspose (transpose_tile) + TestSmiDsTS2Streaming
+# (evaluate/tick 多词 emit) 覆盖；端到端跨-SMC 数值由 e2e (matmul_q_dst / _k8 / fp16) 覆盖。
+# gather-before-scatter ordering gate 随 backdoor 一并退役（流式路径 by-design 无 gate）。
 
 
 class TestSmiDsTFp16(unittest.TestCase):

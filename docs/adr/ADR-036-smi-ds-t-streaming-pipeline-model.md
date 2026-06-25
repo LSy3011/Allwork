@@ -266,6 +266,50 @@ bank0）。pytest 147 passed（+2 S3-b 单测：行索引跟随 decode addr / di
 - **DEBT-036-STRUCTURAL-ANCHOR / 默认 OFF**：不关闭——S3-b 只删 scatter staging，gather 侧捕获寄存器中转
   + model-A 整体删 = S3-c（+ VCS）。`still_holds: proposed` 维持。
 
+## S3-c 实现（2026-06-25，block-2：删 apply_smi_ds_t backdoor + gate 方法；前置 triage matmul_q_dst_full）
+
+handoff 把 S3-c 剩余拆 3 块，user 裁定先做 **block-2「删 apply_smi_ds_t + gate 方法」**。前置 = triage
+`matmul_q_dst_full`（既存 bug：OFF/ON 都 FAILED y SMC_0=0）。
+
+### Triage：matmul_q_dst_full 既存 bug 根因
+`ManualMatmulQDsTFullOperator` 是 **compute 隔离 increment**——`get_dfg` 直注 bank0（绕转置/广播前端）、
+**不调 `_inject_smi_ds_t_transpose`、不产 smi-ds-t hex**。但它从 `ManualMatmulQDsTK8Operator` **误继承
+`smi_ds_t_config()`**（返回非空 cfg）→ `pipeline_runner` patch `smi_ds_t` 进 sim_config →
+`physical_runner` 见 cfg 但无 smi-ds-t hex → 落 `apply_smi_ds_t` fallback，从 src_bank=4 gather 写回
+**SMC_0 bank0 words[0,1]**，正好 clobber 直注的 X[0]（m=0 通道）→ `SMC_0 y[0]=0`（words[2..7] 的
+m=1,2,3 未覆盖 → 正确，故 7/8 + SMC_0 仅首元素错）。
+- **修法**（选项 a「去掉误继承的 cfg」）：override `smi_ds_t_config` 返 `None` → `pipeline_runner:125
+  if cfg` 跳过整段 patch，不落 fallback。修后 `matmul_q_dst_full` **PASSED y: All 8 SMC bit-perfect**。
+- ⚠ 该算子 e2e 仍 exit=1：rigid auditor 对每个中间值期望 `Exp 0.000000`（不建模直注输入的预期值）
+  —— 属 **block-1（auditor 建模）**范畴，**非** apply_smi_ds_t 引起；本算子无断言 exit=0 的 e2e 测试。
+
+### 删除（apply_smi_ds_t 确为死代码）
+确认 run 中真 datapath（`setup_smi_ds_t_trigger` + `_tick_smi_ds_t_trigger`）走流式
+`SmiDsTUnit.evaluate/tick`（转置核 = `transpose_tile` 静态纯函数），**不调** `apply_smi_ds_t`。删后
+`apply_smi_ds_t` 仅剩 physical_runner fallback（已死）+ 测试在用：
+- `cluster.py`：删 `apply_smi_ds_t` 方法（model-A storage-to-storage 原子 backdoor）。
+- `smi_ds_t_unit.py`：删 `gather/is_ready/missing/transpose`（4 个实例 gate 方法，gather-before-scatter
+  gate 实现）+ 死状态 `_buf/_out` + 未用 `Optional` 导入。保留 `transpose_tile`（流式核）+ codec + evaluate/tick。
+- `physical_runner.py`：「cfg 在但无 smi-ds-t hex」分支由 fallback 改 **loud-fail**（`RuntimeError`，同 S3-a
+  反半态原则——拒绝静默回 backdoor）。
+- 测试：删 `TestSmiDsTGatherOrdering`（3 测）+ `TestSmiDsTClusterApply` 的 2 个 apply 测试 + 一处死
+  monkeypatch（`fc.apply_smi_ds_t = ...`，trigger 路径从不读）。覆盖迁移：转置数值/多词拆分 →
+  `TestSmiDsTTranspose`+`TestSmiDsTS2Streaming`；跨-SMC 数值 → e2e。gather-before-scatter gate 随
+  backdoor 退役（流式路径 by-design 无 gate）。
+
+### 验收
+- pytest **139 passed / 6 skipped**（= 144 − 5 删测，无失败）。
+- `matmul_q_dst_full` y bit-perfect（triage 修复）；广播路径 `fp16_matmul_q_dst` / `fp16_matmul_full_dst`
+  OFF+ON 双路均 **PASSED y bit-perfect**（A/B 护栏未破）。
+- 忠实度增信不变：删的是 model-A backdoor 死代码，时序仍 S4-blocked。`still_holds: proposed` 维持。
+
+### S3-c 剩余（block-1 / block-3）
+- **block-1（翻默认 OFF→ON）**：须先改 fp32 truth auditor 建模 ON datapath（触点 `verification_v2/infra/
+  auditor.py`）。matmul_q_dst_full 的 exit=1 即此 auditor gap 的实例。
+- **block-3（固件完整性门）**：hco 建议，auditor 扫 sim log 每 UR 读写必有固件指令对应；须识别
+  DST-SHIFTDN/DST-SHIFTUP 是 SMI_DS_T datapath 端点（非独立 UR 指令）勿误报双计。
+  physical_runner 的 loud-fail 是其前哨（cfg/hex 不一致已钉死）。
+
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/
   para1236-1246（矩阵×矩阵 + 激活矩阵排序=SMI_DS_T）/ 表542-548（SHIFTUP/SHIFTDN）/ 表593-595（SMI_IQ）/ 表596-598（SMI_DS_T）

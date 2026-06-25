@@ -134,50 +134,11 @@ class SystemCluster:
                 su.dr_d = bcast_val
                 su.cru_o = bcast_val
 
-    def apply_smi_ds_t(self, cfg: dict):
-        """ADR-033 Stage-A：SMI_DS_T 跨-SMC 转置 datapath（model-A 整链原子段，hco B-BLOCK-1 裁定）。
-
-        在 cluster.run 之前一次性执行 `UR read — SHIFTDN（下行收集） — SMI_DS_T transpose —
-        SHIFTUP broadcast — UR write` 的数值功能：
-          - **gather**：从 cfg['gather_smc_cnt'] 个 SMC 各读 src_bank/src_addr 的列对齐激活（非转置间插存）；
-          - **transpose**：SmiDsTUnit 把 gather_smc_cnt×lanes 的 Tile 转置为 lanes×gather_smc_cnt（行对齐）；
-          - **scatter/write**：把恢复的行对齐激活写回 SMC_0 的 dst_bank/dst_addr（供后续 SHIFTUP 广播读）。
-
-        忠实度边界（model-A，hco caveat）：本方法**不建模** SHIFTDN/SHIFTUP/转置的逐拍时序与
-        COND 就绪同步（DEBT-033-DST-CTRL / NEEDS-USER-FACT-033-DSTDONE）；只保证终值数值正确 +
-        gather-before-scatter 序约束（SmiDsTUnit.transpose() gather 未到齐即抛错）。
-        """
-        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit, _lane_codec
-        gather_cnt = int(cfg["gather_smc_cnt"])
-        lanes = int(cfg["lanes"])
-        src_bank, src_addr = int(cfg["src_bank"]), int(cfg["src_addr"])
-        dst_bank, dst_addr = int(cfg["dst_bank"]), int(cfg["dst_addr"])
-        # ADR-035 D2：element_bits 选 codec；word_lanes 由其推导（128b 词 / 元素位宽）
-        element_bits = int(cfg.get("element_bits", 32))
-        word_lanes = int(cfg.get("word_lanes", 128 // element_bits))
-        lanes_from_word, word_from_lanes = _lane_codec(element_bits)
-        if gather_cnt > len(self.kernels):
-            raise ValueError(f"SMI_DS_T gather_smc_cnt={gather_cnt} > num_kernels={len(self.kernels)}")
-
-        unit = SmiDsTUnit(smc_num=gather_cnt, lanes=lanes,
-                          word_lanes=word_lanes, element_bits=element_bits)
-        # gather：逐 SMC 读列对齐激活（SHIFTDN（下行收集） 的 model-A 数值等价）
-        for s in range(gather_cnt):
-            word = self.kernels[s].ur_bank.storage[src_bank][src_addr]
-            unit.gather(s, lanes_from_word(word, lanes))
-        # transpose：gather 全到齐才出（未到齐抛错 = gather-before-scatter 硬约束）
-        rows = unit.transpose()        # rows[m] = 行对齐激活 X[m,:]（gather_cnt 个元素）
-        # scatter/write：行对齐激活写回 SMC_0 dst（SHIFTUP broadcast 的 model-A 数值等价）。
-        # 行宽 gather_cnt 可 > word_lanes（如 fp32 K=8 = 2 词）→ 每行拆 ceil(K/word_lanes) 个连续词。
-        nword = (gather_cnt + word_lanes - 1) // word_lanes
-        for m in range(lanes):
-            for w in range(nword):
-                chunk = rows[m][w * word_lanes:(w + 1) * word_lanes]
-                self.kernels[0].ur_bank.storage[dst_bank][dst_addr + m * nword + w] = \
-                    word_from_lanes(chunk)
-        self.logger.info(
-            f"[SMI_DS_T] gather {gather_cnt} SMC × {lanes} lanes → transpose → "
-            f"scatter {lanes} rows × {nword} words to SMC_0 bank{dst_bank}@{dst_addr}")
+    # ── ADR-036 S3-c：apply_smi_ds_t（model-A run-前原子 backdoor）已删 ──────────────
+    #   该 storage-to-storage 后门是 ADR-033 Stage-A 残余，run 中真 datapath 已由 setup_smi_ds_t_trigger
+    #   + _tick_smi_ds_t_trigger（流式 step-driven SmiDsTUnit.evaluate/tick，转置数值核 = transpose_tile）
+    #   取代。所有产 smi-ds-t hex 的算子走 trigger 路径；matmul_q_dst_full（compute 隔离、不产 hex）已去掉
+    #   误继承的 smi_ds_t_config（不再落 fallback）。physical_runner 的「cfg 在但无 hex」分支改 loud-fail。
 
     def setup_smi_ds_t_trigger(self, hex_path: str, cfg: dict):
         """ADR-034 Stage-I 2b + S2-D1：装载 SMI_DS_T 指令流 + 建真 step-driven 单元

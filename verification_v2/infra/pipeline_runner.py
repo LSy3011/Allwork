@@ -71,7 +71,8 @@ class PipelineRunner:
              
         num_loop_iters = len(input_data[input_key]) // vector_lanes
         # ADR-036 S1：structural_only 节点（如 ds_src_read 列对齐读）只作 SMT 排程锚点，
-        # 不进 emit/sim —— S1/S2 期间真实数值由 model-A apply_smi_ds_t backdoor 提供。
+        # 不进 emit/sim —— 真实数值由指令驱动的流式 SMI_DS_T 单元提供（ds_transpose hex →
+        # _tick_smi_ds_t_trigger；ADR-033 的 apply_smi_ds_t run-前 backdoor 已删 S3-c）。
         # solve 已对全部 ops（含 structural）排程并设 global_t；此处仅从 emit/assemble 路径剔除。
         emit_ops = [op for op in ops if not op.metadata.get("structural_only")]
         physical_instrs = assembler.assemble(emit_ops, II=II, num_iterations=num_loop_iters)

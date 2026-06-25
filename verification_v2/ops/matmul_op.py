@@ -103,7 +103,8 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
     复用现有 `shiftup_a_read`（广播）作 scatter，**不另建第二个 SHIFTUP**（避开 sim 单 shiftup
     实例 + multi-broadcast 限制）。
 
-    **2a 边界（hco D5 caveat）**：sim 数值仍由 `cluster.apply_smi_ds_t`（run 前 model-A）提供——
+    **2a 边界（hco D5 caveat）**：sim 数值由指令驱动的流式 SMI_DS_T 单元提供（ADR-034 2b
+    起替 ADR-033 的 `cluster.apply_smi_ds_t` run-前 model-A backdoor，该 backdoor 已删 S3-c）——
     `ds_transpose`(iq40) 经 `get_iq_name`→"smi_ds_t-0"，sim 无同名 IQ → `load_program` 跳过（不扰动）；
     `ds_gather`(SHIFTDN) 单次 fire、smc_id_en 门控 gather_cnt，不写 compute 输入 bank0。本注入只验「结构」
     （DFG 拓扑 + SMT 依赖边 + emit 表598 微指令进流），step-driven 真数据流是 2b/Stage-II。"""
@@ -137,12 +138,14 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
                 "inner_inc": 0, "outer_inc": 0}
     # ADR-036 S1：5 段 DFG 首段 = UR_read 列对齐（每 SMC_s 读本地 bank{src_bank} 的列 s）。
     # 令 ds_gather 依赖它 → 完整链 ds_src_read(UR_READ)→ds_gather(SHIFTDN)→ds_transpose(SMI_DS_T)
-    # →shiftup_a_read(SHIFTUP broadcast)→rt_a(RTOVR)→…→out(UR_WRITE)。数值仍走 apply_smi_ds_t
-    # (model-A)，本节点对 SMT 提供「列对齐读」依赖锚点，使排程把整条转置 datapath 串在 compute 之前。
-    # structural_only：S1 期间 model-A 的 apply_smi_ds_t backdoor 已在 run 前执行完整
-    # 「UR read—SHIFTDN（下行收集）—SMI_DS_T transpose—scatter」(cluster.py)，故本节点仅作 SMT
-    # 排程的「列对齐读」依赖锚点、**不进 emit/sim**（pipeline_runner emit 前按此 flag 过滤），
-    # 避免被 solver 重指派到真 ur-r 执行而覆盖 backdoor 转置结果。S3 删 model-A 后转为真流式读。
+    # →shiftup_a_read(SHIFTUP broadcast)→rt_a(RTOVR)→…→out(UR_WRITE)。数值由指令驱动的流式
+    # SMI_DS_T 单元提供（ds_transpose 节点 emit 成 smi_ds_t hex → physical_runner.setup_smi_ds_t_trigger
+    # → _tick_smi_ds_t_trigger：OFF 从各 SMC storage[src_bank] 直读 gather + transpose_tile + scatter
+    # bank0；ADR-034 2b 起替 ADR-033 的 apply_smi_ds_t run-前原子 backdoor，该 backdoor 已删 S3-c）。
+    # 本节点对 SMT 提供「列对齐读」依赖锚点，使排程把整条转置 datapath 串在 compute 之前。
+    # structural_only：S1/S2 期间本节点仅作 SMT 排程锚点、**不进 emit/sim**（pipeline_runner emit 前按此
+    # flag 过滤），避免被 solver 重指派到真 ur-r 执行而与流式单元的 gather 读冲突。S3-a real-gather ON
+    # 后转为真 bank 读指令（下方）。
     # ADR-036 S3-a：real-gather ON → ds_src_read 进 emit/sim（真 bank{SRC_BANK} 读指令），且**不硬 pin
     # iq_id**——4 个 UR 读端口已被 fp16 compute（4 权重 + 广播激活）占满（ADR-037 实测全 UNSAT），无空闲
     # ur-rN 可静态 pin（hco BLOCK 提案 A）。ds_src_read 是单次 prologue（shape=[1]），让 solver 在转置
@@ -399,8 +402,9 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
     """ADR-033 Stage-A：Matmul_Q 经 SMI_DS_T 跨-SMC 转置 datapath（替掉 matmul_q 的 data-prep 假转置）。
 
     激活 X[M,K] **列对齐存**（非转置间插）：SMC_s（s<K）bank{SRC_BANK} 持列 s = [X[0,s]..X[M-1,s]]。
-    sim run 前 `cluster.apply_smi_ds_t`：gather K 个 SMC 的列 → SMI_DS_T 转置 → 行对齐 X[m,:] 写回
-    SMC_0 bank0 → 后续 SHIFTUP 广播 + 每 SMC dot(X[m,:],W[:,s])。**compute 与 matmul_q 完全一致**
+    run 中指令驱动流式 SMI_DS_T 单元（ds_transpose hex → setup/_tick_smi_ds_t_trigger）：gather K 个
+    SMC 的列 → transpose_tile 转置 → 行对齐 X[m,:] 经 scatter（OFF bank0 / ON SHIFTUP 广播缓冲）→
+    后续 SHIFTUP 广播 + 每 SMC dot(X[m,:],W[:,s])。**compute 与 matmul_q 完全一致**
     （继承 get_dfg/get_golden/prepare_input，K=4 单 addtree 词、无 cumulative），唯一新增 = 跨-SMC 转置前端。
 
     缩放选择：gather 跨 K 个 SMC（=4），广播到全 8 SMC；更忠实的 K=SMC_NUM=8 实例需 cumulative
@@ -422,7 +426,7 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
         # ADR-034 Stage-I 2a：在 matmul_q 计算 DFG 前注入 SMI_DS_T 转置指令节点
-        # （ds_gather→ds_transpose→现有 broadcast SHIFTUP broadcast）。数值仍走 apply_smi_ds_t。
+        # （ds_gather→ds_transpose→现有 broadcast SHIFTUP broadcast）。数值走指令驱动流式单元（2b）。
         ops = super().get_dfg(spec)
         return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
 
@@ -439,14 +443,14 @@ class ManualMatmulQDsTOperator(ManualMatmulQOperator):
             if k < self.K:
                 col = X[:, k].copy()                              # 列 k = [X[0,k]..X[M-1,k]]
                 prog.inject_vector(src_logical, col, stride=1)    # SMC_k bank{SRC_BANK} 持列 k（非转置间插）
-            # 不注入 bank0：apply_smi_ds_t 在 run 前把行对齐激活写回 SMC_0 bank0
+            # 不注入 bank0：run 中流式 SMI_DS_T 单元（_tick_smi_ds_t_trigger）把行对齐激活 scatter 到 SMC_0 bank0
 
 
 class ManualMatmulQDsTK8Operator(ManualMatmulParallelNOperator):
     """ADR-033 Stage-A'：SMI_DS_T **K=SMC_NUM=8 全 gather + cumulative addtree**（完全对齐文档 tile 维度）。
 
-    M=1、K=8：激活向量 8 元素 **列对齐存全 8 个 SMC**（每 SMC 持 1 元素 a[s]）→ `cluster.apply_smi_ds_t`
-    gather 8×1 → SMI_DS_T 转置 1×8 → 恢复 8 元素行对齐向量写回 SMC_0 bank0（2 词）→ 复用 ParallelN
+    M=1、K=8：激活向量 8 元素 **列对齐存全 8 个 SMC**（每 SMC 持 1 元素 a[s]）→ 指令驱动流式 SMI_DS_T
+    单元 gather 8×1 → transpose_tile 转置 1×8 → 恢复 8 元素行对齐向量 scatter 写 SMC_0 bank0（2 词）→ 复用 ParallelN
     cumulative compute（K=8 = 2 词，FP32ADDTREE5TO1 跨词 accumulate 累加，loop_carried II≥4）→
     每 SMC 输出 dot(a, W[:,s])。
 
@@ -480,7 +484,7 @@ class ManualMatmulQDsTK8Operator(ManualMatmulParallelNOperator):
             prog.inject_vector(b_addr, b[k], stride=1)                      # 权重列（8 元素 = 2 词）
             if k < self.K:
                 prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float32), stride=1)  # SMC_k 持 a[k]
-            # 不注入 bank0：apply_smi_ds_t 写恢复的 8 元素向量（2 词）
+            # 不注入 bank0：run 中流式 SMI_DS_T 单元 scatter 写恢复的 8 元素向量（2 词）
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
         # 复用 ParallelN cumulative 点积链，但 K=8（inner_loops = K//4-1 = 1，2 词跨词累加）
@@ -533,6 +537,14 @@ class ManualMatmulQDsTFullOperator(ManualMatmulQDsTK8Operator):
     权重列 W[:,s] 点积 → Q[m,s]。SMI_DS_T 转置前端 + 广播-to-all 下一步接。M≤8（addtree lane 数）。"""
 
     M = 4          # 4 行 = 4 通道（addtree S0..S3，破 M≤4 的真正含义：通道而非 pipeline 巧合）
+
+    def smi_ds_t_config(self, spec: Any = None):
+        # ADR-036 S3-c triage：本算子是 compute 隔离 increment，get_dfg 直注 bank0（绕转置/广播前端），
+        # **不产 smi-ds-t 转置指令**。若沿用 K8 父类的 cfg → pipeline_runner patch smi_ds_t 进 sim_config
+        # → physical_runner 见 cfg 但无 smi-ds-t hex → 落 apply_smi_ds_t fallback，gather src_bank=4 写回
+        # SMC_0 bank0 words[0,1]，clobber 直注的 X[0]（m=0 通道）→ SMC_0 y[0]=0（7/8 既存 bug）。
+        # 返 None 杜绝 fallback：cfg 为假即跳过整段 smi_ds_t patch（pipeline_runner:125 `if cfg`）。
+        return None
 
     def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
         rng = np.random.default_rng(0)

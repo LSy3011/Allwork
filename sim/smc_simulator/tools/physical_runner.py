@@ -288,7 +288,12 @@ def _run_multi_smc(case_path: Path, config: dict, smc_num: int) -> bool:
         if smi_hex:
             cluster.setup_smi_ds_t_trigger(smi_hex, smi_ds_t_cfg)   # 指令驱动（2b）
         else:
-            cluster.apply_smi_ds_t(smi_ds_t_cfg)                    # fallback：无指令流 → 旧 model-A 原子段
+            # ADR-036 S3-c：apply_smi_ds_t model-A backdoor 已删。cfg 在但无 smi-ds-t hex 是不一致
+            # （算子声明转置但未产指令流）→ loud-fail，拒绝静默回 backdoor（同 S3-a 反半态原则）。
+            raise RuntimeError(
+                "ADR-036 S3-c: smi_ds_t cfg 存在但无 smi-ds-t hex 指令流——"
+                "apply_smi_ds_t backdoor 已删，拒绝静默 fallback。"
+                "算子若不走转置 datapath 应令 smi_ds_t_config 返 None（参 matmul_q_dst_full）。")
 
     try:
         max_cycles = config.get("max_cycles", 1000)
