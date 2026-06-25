@@ -69,7 +69,12 @@ class PipelineRunner:
         else:
              input_key = input_tensor_names[0]
              
-        num_loop_iters = len(input_data[input_key]) // vector_lanes
+        # 循环迭代数 = 每-SMC 向量长度 / lanes。多-SMC partitioned 输入是 2D (smc_num, N)，须取末维 N
+        # （非 len() 的首维 smc_num）；broadcast/单-SMC 输入 1D 时 shape[-1]==len()，行为不变。
+        # （修：全-partitioned 多-SMC op 如 unit_fpadd 旧版误用 smc_num 当迭代数 → 只跑 2 迭代、后段 stale。）
+        _in_arr = input_data[input_key]
+        _per_smc_len = _in_arr.shape[-1] if hasattr(_in_arr, "ndim") and _in_arr.ndim >= 2 else len(_in_arr)
+        num_loop_iters = _per_smc_len // vector_lanes
         # ADR-036 S1：structural_only 节点（如 ds_src_read 列对齐读）只作 SMT 排程锚点，
         # 不进 emit/sim —— 真实数值由指令驱动的流式 SMI_DS_T 单元提供（ds_transpose hex →
         # _tick_smi_ds_t_trigger；ADR-033 的 apply_smi_ds_t run-前 backdoor 已删 S3-c）。

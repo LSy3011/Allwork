@@ -44,6 +44,32 @@ class TestSmiDsTE2EExitCode(unittest.TestCase):
         self.assertEqual(rc, 0, f"fp16_matmul_q_dst --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
 
 
+class TestDocFlowUnitE2E(unittest.TestCase):
+    """文档钦定流程的 8-SMC 功能测例 e2e 守护（VCS 对齐基础，自底向上）。
+    - unit_fpadd：Flow A 单一计算指令（FPADD，文档 para 4828）；每 SMC Bank0+Bank1→Bank2。
+    - unit_ds_transpose：Flow B 数据整理 datapath（para 4676，UR read—SHIFTDN—SMI_DS_T—SHIFTUP—UR write）。
+    锁 exit=0（含 y bit-perfect + 固件完整性门）。"""
+
+    def _run_e2e(self, op: str):
+        proc = subprocess.run(
+            [sys.executable, "verification_v2/main_verify.py", "--op", op, "--mode", "e2e"],
+            cwd=str(_ROOT), capture_output=True, text=True, timeout=300, env=dict(os.environ),
+        )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_unit_fpadd_e2e_exit0(self):
+        rc, out = self._run_e2e("unit_fpadd")
+        self.assertEqual(rc, 0, f"unit_fpadd --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
+        self.assertIn("ALL PHYSICAL CHECKS PASSED", out)
+
+    def test_unit_ds_transpose_e2e_exit0(self):
+        rc, out = self._run_e2e("unit_ds_transpose")
+        self.assertEqual(rc, 0, f"unit_ds_transpose --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
+        # Flow B 走真 datapath（default ON）→ 固件完整性门须挂且 PASS
+        self.assertIn("Firmware Integrity Gate: SUCCESS", out,
+                      "unit_ds_transpose 应触发固件完整性门且 PASS（cross-SMC datapath 无 backdoor）")
+
+
 class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
     """ADR-036 S3-a：fp16_matmul_full_dst real-gather（去 gather backdoor，走真固件 bank6 UR 读）。
     A/B 护栏（hco APPROVE-with-notes）：AIACC_DST_REAL_GATHER ON vs OFF 输出逐 bit 一致 + 均 exit=0。
