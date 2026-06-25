@@ -143,8 +143,12 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
         ops=ctx.get("ops"),
         input_data=auditor_input_data
     )
-    
-    if align_ok and sim_ok:
+
+    # ADR-036 S3-c block-3：固件完整性门（hco APPROVE-with-notes）。独立于 truth-audit（不受 fp16
+    # skip 旁路），ON real-gather 下校 sim 每个 UR 端点访存必有固件指令对应——防 model-A backdoor 回归。
+    integrity_ok = auditor.audit_firmware_integrity(ctx["log_path"], ops=ctx.get("ops"))
+
+    if align_ok and integrity_ok and sim_ok:
         print("\n" + "*"*10 + f" ALL PHYSICAL CHECKS PASSED FOR {op_name.upper()} " + "*"*10)
         return True
     else:

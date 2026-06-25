@@ -9,6 +9,7 @@
 
 跨-SMC e2e（门 3 test_matmul_via_smi_ds_t_datapath）见 Increment 3。
 """
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -746,6 +747,120 @@ class TestSmiDsTS3bBcastFeed(unittest.TestCase):
                          "SHIFTUP 广播 data 应取 _dst_bcast_feed_cur（转置行），非 bank0 捕获值")
         self.assertNotEqual(k.units["shiftup"].cru_o, CAP_VAL,
                             "优先级错→取 bank0 捕获→DEBT-032 全 0 回归")
+
+
+class TestSmiDsTS3cIntegrityGate(unittest.TestCase):
+    """ADR-036 S3-c block-3：固件完整性门（hco APPROVE-with-notes）。
+    ON real-gather 下 sim 每个 UR 端点访存必有固件指令对应，否则 FAIL（抓 model-A backdoor 回归）。
+    锁死 hco 阻断项：① DST-SHIFTDN 按具名 ds_src_read 锚定（非任意同-bank UR_READ）；② 多 SMC 共归属
+    同一条 SMC_ID_EN-broadcast 指令；+ 双计豁免 + ON-only（OFF 豁免）+ 可证伪反证。"""
+
+    @staticmethod
+    def _ns(**meta):
+        import types
+        return types.SimpleNamespace(metadata=dict(meta))
+
+    def _auditor(self, instrs):
+        import json, tempfile
+        from verification_v2.infra.auditor import Auditor
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "physical_instructions.json"), "w") as f:
+            json.dump(instrs, f)
+        return Auditor(d, spec=None, show_review=False), d
+
+    @staticmethod
+    def _instr(iq_name, op_type, bank, trace_id):
+        return {"iq_name": iq_name, "op_type": op_type, "trace_id": trace_id,
+                "payload": ({"BANK": bank} if bank is not None else {})}
+
+    def _full_firmware(self):
+        # a_read(ur-r0/bank0) b_read(ur-r1/bank1) ds_src_read(ur-r2/bank4) out(ur-w0/bank5) + ds_transpose
+        return [
+            self._instr("ur-r0", "UR_READ", 0, "a_read"),
+            self._instr("ur-r1", "UR_READ", 1, "b_read"),
+            self._instr("ur-r2", "UR_READ", 4, "ds_src_read"),
+            self._instr("ur-w0", "UR_WRITE", 5, "out_obj_0"),
+            self._instr("smi_ds_t", "SMI_DS_T", None, "ds_transpose"),
+        ]
+
+    @staticmethod
+    def _ev(smc, cyc, unit, tag, port, bank):
+        return (f">>> [AUDIT-DATA] SMC_ID:{smc} Cyc:{cyc} Unit:{unit} Tag:{tag} "
+                f"Port:{port} Bank:{bank} Addr:0 V0:{'0'*32}\n")
+
+    def _write_log(self, d, lines):
+        p = os.path.join(d, "sim.log")
+        with open(p, "w") as f:
+            f.writelines(lines)
+        return p
+
+    _ON = property(lambda self: [TestSmiDsTS3cIntegrityGate._ns(ds_src_read=True)])
+
+    def test_gate_passes_when_all_backed(self):
+        aud, d = self._auditor(self._full_firmware())
+        log = self._write_log(d, [
+            self._ev(0, 2, "UR-READ", "READ", 0, 0),
+            self._ev(0, 2, "UR-READ", "READ", 1, 1),
+            self._ev(0, 4, "UR-READ", "READ", 2, 4),
+            self._ev(0, 6, "UR-READ", "DST-SHIFTDN", 2, 4),
+            self._ev(0, 20, "SHIFTUP-BCAST", "DST-SHIFTUP", 0, 0),
+            self._ev(0, 33, "UR-WRITE", "WRITE", 0, 5),
+        ])
+        self.assertTrue(aud.audit_firmware_integrity(log, ops=self._ON),
+                        "全部访存指令-backed 时门应 PASS")
+
+    def test_gate_flags_unbacked_dst_shiftdn(self):
+        """可证伪反证：固件缺 ds_src_read，但 sim 有 DST-SHIFTDN(bank4) → 门 FAIL（抓 backdoor）。"""
+        fw = [i for i in self._full_firmware() if i["trace_id"] != "ds_src_read"]
+        aud, d = self._auditor(fw)
+        log = self._write_log(d, [self._ev(0, 6, "UR-READ", "DST-SHIFTDN", 2, 4)])
+        self.assertFalse(aud.audit_firmware_integrity(log, ops=self._ON),
+                         "DST-SHIFTDN 无 ds_src_read 指令对应时门必 FAIL（否则 backdoor 漏网）")
+
+    def test_gate_anchors_named_ds_src_read_not_any_bank(self):
+        """hco 阻断①：DST-SHIFTDN 必锚定具名 ds_src_read，无关同-bank UR_READ 不能蒙混。"""
+        # 固件有一条 bank4 的 UR_READ 但 trace_id 是 compute 读（非 ds_src_read），且无真 ds_src_read
+        fw = [i for i in self._full_firmware() if i["trace_id"] != "ds_src_read"]
+        fw.append(self._instr("ur-r2", "UR_READ", 4, "some_compute_read"))  # 同 (port2,bank4) 但非具名
+        aud, d = self._auditor(fw)
+        log = self._write_log(d, [self._ev(0, 6, "UR-READ", "DST-SHIFTDN", 2, 4)])
+        self.assertFalse(aud.audit_firmware_integrity(log, ops=self._ON),
+                         "同 bank 有无关 UR_READ 但无具名 ds_src_read 时，DST-SHIFTDN 仍应 FAIL")
+
+    def test_gate_double_count_exempt(self):
+        """双计豁免：同 (smc,port2,bank4) 的 Tag:READ + DST-SHIFTDN 是同一读，各自 backed、不误报。"""
+        aud, d = self._auditor(self._full_firmware())
+        log = self._write_log(d, [
+            self._ev(0, 4, "UR-READ", "READ", 2, 4),          # ds_src_read 真指令执行
+            self._ev(0, 6, "UR-READ", "DST-SHIFTDN", 2, 4),   # 同读的 datapath 再标注
+        ])
+        self.assertTrue(aud.audit_firmware_integrity(log, ops=self._ON),
+                        "READ + DST-SHIFTDN 同读双 log 应各归属 ds_src_read、不报重复无指令")
+
+    def test_gate_multi_smc_shared_attribution(self):
+        """hco 多 SMC：SMC_0..7 各发 DST-SHIFTDN，单条 SMC_ID_EN-broadcast ds_src_read 指令共背。"""
+        aud, d = self._auditor(self._full_firmware())
+        log = self._write_log(d, [self._ev(s, 6, "UR-READ", "DST-SHIFTDN", 2, 4) for s in range(8)])
+        self.assertTrue(aud.audit_firmware_integrity(log, ops=self._ON),
+                        "8 SMC 的 DST-SHIFTDN 应共归属同一条广播 ds_src_read 指令")
+
+    def test_gate_catches_smc_blind_spot(self):
+        """守 SMC_1..7 盲区：仅 SMC_3 出现无指令对应的访存 → 门仍 FAIL（不只看 SMC_0）。"""
+        aud, d = self._auditor(self._full_firmware())
+        log = self._write_log(d, [
+            self._ev(0, 2, "UR-READ", "READ", 0, 0),          # SMC_0 合法
+            self._ev(3, 9, "UR-READ", "READ", 3, 7),          # SMC_3 读 (port3,bank7) 无指令
+        ])
+        self.assertFalse(aud.audit_firmware_integrity(log, ops=self._ON),
+                         "SMC_3 的无指令访存应被抓（门须扫全 SMC，非只 SMC_0）")
+
+    def test_gate_exempt_under_off(self):
+        """ON-only（hco 裁 a）：OFF（ops 无 ds_src_read flag）门豁免，即便 log 有 backdoor 形访存。"""
+        aud, d = self._auditor([i for i in self._full_firmware() if i["trace_id"] != "ds_src_read"])
+        log = self._write_log(d, [self._ev(0, 6, "UR-READ", "DST-SHIFTDN", 2, 4)])
+        off_ops = [self._ns()]   # 无 ds_src_read flag → real_gather_on False
+        self.assertTrue(aud.audit_firmware_integrity(log, ops=off_ops),
+                        "OFF 路径门豁免（已知 backdoor 参考、不挂门）")
 
 
 if __name__ == "__main__":

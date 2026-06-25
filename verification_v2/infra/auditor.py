@@ -652,6 +652,121 @@ class Auditor:
             
         return all_ok
 
+    def audit_firmware_integrity(self, log_path: str, ops: List[Any] = None) -> bool:
+        """ADR-036 S3-c block-3：固件完整性门（hco APPROVE-with-notes）。
+
+        ON real-gather 下，sim log 每个 UR 端点访存事件必能追溯到一条 emit 出的固件 UR 指令，否则
+        FAIL——抓 model-A backdoor 回归（sim 私自直读/写 storage、蒙过 golden parity；S3-a 当初靠人肉
+        VCS diff 才发现的 bank6 缺口正是这类）。
+
+        边界（hco）：仅校「UR 端点指令存在性」，**非**逐拍/逐 addr/搬运段忠实（后者是 VCS 的活）。对
+        VCS/RTL 逐拍忠实度增信≈0，定位 = **防回归哨兵**（守 S3 拆 backdoor 成果不被未来 commit 加回）。
+
+        范围（hco 裁 a）：**只在 ON 跑**（判据 = ops 带 ds_src_read flag）。OFF 是已知 backdoor 参考、
+        豁免（其 DST-SHIFTDN/DST-SHIFTUP 按定义就是 backdoor，对已知 backdoor 跑门 = 同义反复，且会破
+        A/B 的 OFF exit=0 断言）。本方法**独立顶层**，先于/独立于 fp16 truth-audit skip（DEBT-FP16-AUDITOR）
+        调用——只比对指令存在性、不解码 value，不受 FP16-only 解码缺陷影响（否则一半 DST 算子门失效）。
+
+        匹配粒度（hco）= (trace_id, port, bank)，不逐 addr：
+          规则1  UR-READ/READ + UR-WRITE/WRITE → 必有同 (port,bank) 的固件 UR 指令。
+          规则2  UR-READ/DST-SHIFTDN → 锚定**具名 ds_src_read** 指令（trace_id=='ds_src_read' 且 (port,bank)
+                 匹配），非「该 bank 有任意 UR_READ」（防无关同-bank compute 读蒙混，hco 阻断项①）。
+          规则4  SHIFTUP-BCAST/DST-SHIFTUP → datapath feed，归属 ds_transpose（SMI_DS_T 指令），不找 UR 写指令。
+          规则3  UR-WRITE/DST-SHIFTUP（OFF bank0 staging）→ ON 路径 unreachable（ON 永走 SHIFTUP-BCAST、
+                 bank0 不写）；若 ON 竟现身 = 真 backdoor → FLAG。仅 OFF 诊断态、非 ON 正常分支（hco 阻断项②）。
+        多 SMC（hco）：扫**全部 SMC_ID** 的事件，但允许它们**共同归属同一条 SMC_ID_EN-broadcast 指令**
+          （单 SMI 全局指令流 ADR-022/023，一条指令 SMC_ID_EN 覆盖 8 SMC）——故按 (port,bank) 匹配、不要求
+          per-SMC 各一条。若某 SMC 的事件无任何指令对应即 FLAG（守 SMC_1..7 盲区）。
+        """
+        import re
+        real_gather_on = any(op.metadata.get("ds_src_read") for op in (ops or []))
+        if not real_gather_on:
+            return True   # OFF / 非 SMI_DS_T 算子：门不挂
+        if not log_path or not os.path.exists(log_path):
+            return True
+        instr_path = self.output_dir / "physical_instructions.json"
+        if not instr_path.exists():
+            return True
+
+        # 1. 固件 UR 指令索引（排除 init/hdr/nop 占位）：(port,bank) -> trace_id
+        instrs = json.loads(instr_path.read_text())
+        ur_read = {}              # (port,bank) -> trace_id
+        ur_write = {}             # (port,bank) -> trace_id
+        ds_src_port_bank = None   # 具名 ds_src_read 的 (port,bank)
+        has_ds_transpose = False
+        for ins in instrs:
+            tid = ins.get("trace_id", "") or ""
+            if tid.startswith(("init", "hdr", "nop")):
+                continue
+            ot = str(ins.get("op_type", "")).upper()
+            if ot == "SMI_DS_T" or tid == "ds_transpose":
+                has_ds_transpose = True
+                continue
+            m = re.match(r"ur-[rw](\d+)", str(ins.get("iq_name", "")))
+            if not m:
+                continue
+            port = int(m.group(1))
+            bank = (ins.get("payload") or {}).get("BANK")
+            if bank is None:
+                continue
+            bank = int(bank)
+            if ot == "UR_READ":
+                ur_read[(port, bank)] = tid
+                if tid == "ds_src_read":
+                    ds_src_port_bank = (port, bank)
+            elif ot == "UR_WRITE":
+                ur_write[(port, bank)] = tid
+
+        # 2. 扫 sim log 访存事件，逐个验 instruction-backed（全 SMC_ID）
+        ev_re = re.compile(
+            r"SMC_ID:(\d+)\s+Cyc:(\d+)\s+Unit:([A-Z0-9-]+)\s+Tag:([A-Z0-9-]+)\s+Port:(\d+)\s+Bank:(\d+)")
+        violations = []
+        checked = 0
+        with open(log_path) as f:
+            for line in f:
+                if "[AUDIT-DATA]" not in line:
+                    continue
+                mm = ev_re.search(line)
+                if not mm:
+                    continue
+                smc, cyc = int(mm.group(1)), int(mm.group(2))
+                unit, tag = mm.group(3), mm.group(4)
+                port, bank = int(mm.group(5)), int(mm.group(6))
+                # 只关心 UR 端点访存 + SHIFTUP datapath feed；compute 单元（FPMUL/RTOVR）非访存、跳过
+                if unit not in ("UR-READ", "UR-WRITE", "SHIFTUP-BCAST"):
+                    continue
+                checked += 1
+                backed = False
+                if tag == "READ":
+                    backed = (port, bank) in ur_read                 # 规则1
+                elif tag == "WRITE":
+                    backed = (port, bank) in ur_write                # 规则1
+                elif tag == "DST-SHIFTDN":
+                    backed = (ds_src_port_bank == (port, bank))      # 规则2：锚定具名 ds_src_read
+                elif tag == "DST-SHIFTUP" and unit == "SHIFTUP-BCAST":
+                    backed = has_ds_transpose                        # 规则4：归属 ds_transpose
+                elif tag == "DST-SHIFTUP" and unit == "UR-WRITE":
+                    backed = False                                   # 规则3：ON unreachable，现身=backdoor
+                else:
+                    backed = True   # 未知 tag/unit 组合非本门职责，保守不报
+                if not backed:
+                    violations.append((smc, cyc, unit, tag, port, bank))
+
+        ok = len(violations) == 0
+        if self.show_review:
+            if ok:
+                print(f"  [RESULT] Firmware Integrity Gate: SUCCESS "
+                      f"({checked} UR 端点访存事件全部指令-backed，ON real-gather)")
+            else:
+                print(f"  [RESULT] Firmware Integrity Gate: FAILED "
+                      f"({len(violations)}/{checked} 访存无固件指令对应 = backdoor 嫌疑)")
+                for (smc, cyc, unit, tag, port, bank) in violations[:8]:
+                    print(f"    [FAIL] SMC{smc} Cyc{cyc} {unit}/{tag} Port{port} Bank{bank} "
+                          f"→ 无对应固件 UR 指令")
+                if len(violations) > 8:
+                    print(f"    [FAIL] ... 及另 {len(violations) - 8} 处省略")
+        return ok
+
     @staticmethod
     def to_float(hex_str):
         if not hex_str: return 0.0

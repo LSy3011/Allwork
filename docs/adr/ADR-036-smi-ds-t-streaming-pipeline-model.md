@@ -349,10 +349,50 @@ A/B 对照）。测试同步：A/B 护栏 OFF leg + S1 structural_only 测试 + 
   （DEBT-036-DST-SRC-PORT 保守模型 b + DEBT-036-DST-BCAST-FEED-TIMING）。`still_holds: proposed` 维持，
   升 Accepted 仍卡 VCS（SMC_1..7 各算对 + 列对齐源读端口/broadcast 逐拍时序的 user RTL 事实）。
 
-### S3-c 剩余（block-3）
-- **block-3（固件完整性门）**：hco 建议，auditor 扫 sim log 每 UR 读写必有固件指令对应；须识别
-  DST-SHIFTDN/DST-SHIFTUP 是 SMI_DS_T datapath 端点（非独立 UR 指令）勿误报双计。
-  physical_runner 的 loud-fail（block-2）是其前哨（cfg/hex 不一致已钉死）。
+## S3-c 实现（2026-06-25，block-3：固件完整性门；hco APPROVE-with-notes）
+
+block-1/2 后 user 裁定接 **block-3「固件完整性门」**（hco 原创建议，S3-a 待办）。triage + hco 评审后落地。
+`verification_v2/infra/auditor.py::audit_firmware_integrity` + main_verify 接入。
+
+### 门的定位与边界（hco 必须落明）
+- **定位 = 防回归哨兵**，**非增信工具**：守 S3 拆 backdoor 成果不被未来 commit 悄悄加回（如某访存走
+  storage 直读、sim-vs-golden 仍假绿——正是 S3-a 当初靠人肉 VCS diff 才发现的 bank6 缺口）。
+- **对 VCS/RTL 逐拍忠实度增信 ≈ 0**（同 ADR-021/023/036 全系列 caveat）。门只保证「sim 每个 UR 端点访存
+  都能追溯到一条 emit 的固件指令」，**不**保证 ① 该指令 addr/value 逐拍与 RTL 一致（=VCS 的活）② SHIFTDN/
+  SHIFTUP 搬运段时序（DEBT-S4）③ latency=16 是否对。`still_holds: proposed` 不变，门不改 VCS 门槛。
+- **边界 = UR 端点指令存在性**，非逐拍/逐 addr/搬运段忠实。sim 只发 DST 端点事件（搬运段未建模 debt），
+  门对中间 hops 无能为力、也不为它们造假指令。
+
+### 规则集（hco 裁定后，匹配粒度 = (trace_id, port, bank)，不逐 addr）
+- **规则1**  UR-READ/READ + UR-WRITE/WRITE → 必有同 (port,bank) 固件 UR 指令。
+- **规则2**  UR-READ/DST-SHIFTDN → 锚定**具名 ds_src_read**（trace_id=='ds_src_read' 且 (port,bank) 匹配），
+  **非**「该 bank 有任意 UR_READ」（hco 阻断项①：防无关同-bank compute 读蒙混）。
+- **规则4**  SHIFTUP-BCAST/DST-SHIFTUP → datapath feed，归属 ds_transpose（SMI_DS_T 指令），不找 UR 写指令
+  （勿坐实 RTL 不发的 UR 写 = S3-b no-go 方向）。
+- **规则3**  UR-WRITE/DST-SHIFTUP（OFF bank0 staging）→ ON 路径 **unreachable**（ON 永走 SHIFTUP-BCAST、
+  bank0 不写）；仅 OFF 诊断态、**非 ON 正常分支**（hco 阻断项②）。
+
+### 关键设计点（hco notes 全数纳入）
+- **只在 ON 跑（hco 裁 a）**：判据 = ops 带 `ds_src_read` flag（仅 ON 置）。OFF 是已知 backdoor 参考、
+  豁免——对已知 backdoor 跑门是同义反复，且 OFF 的 DST 事件按定义就是 backdoor，会破 A/B 的 OFF exit=0 断言。
+- **独立顶层方法、不被 fp16 旁路**：fp16 truth-audit 整体 skip（DEBT-FP16-AUDITOR），门若挂在其内部则一半
+  DST 算子（fp16_matmul_q_dst/_full_dst）失效。门做成独立调用、只比对指令存在性不解码 value，不受 FP16-only
+  解码缺陷影响。
+- **多 SMC 共归属（守 SMC_1..7 盲区）**：扫**全部 SMC_ID** 事件（非只 audit_smc=0），但允许它们共归属同一条
+  `SMC_ID_EN`-broadcast 指令（单 SMI 全局指令流 ADR-022/023，一条指令覆盖 8 SMC）→ 按 (port,bank) 匹配。
+- **双计豁免**：ON 下同 (smc,port,bank) 的 Tag:READ（真指令执行、填捕获寄存器）+ DST-SHIFTDN（读捕获寄存器
+  的 datapath 再标注）是**同一次物理读**，各自归属 ds_src_read、不报「重复访存无指令」。
+
+### 验收
+- pytest **146 passed / 6 skipped**（+7 门单测，含可证伪反证）。
+- 4 受影响算子默认 ON e2e exit=0 且门 SUCCESS（matmul_q_dst 136 / _k8 74 / fp16_q_dst 113 /
+  fp16_full_dst 512 UR 端点访存全 backed）；显式 OFF 门豁免、exit=0（A/B 不破）。
+- 门单测（`tests/unit/test_smi_ds_t.py::TestSmiDsTS3cIntegrityGate`）：可证伪反证（缺 ds_src_read →
+  DST-SHIFTDN FAIL）/ 具名锚定（无关同-bank UR_READ 不蒙混）/ 双计豁免 / 多 SMC 共归属 / SMC_1..7 盲区
+  抓取 / OFF 豁免，6 维全覆盖。+ 集成断言 ON fp16 路径门被调用且 PASS（不被 fp16 skip 旁路）。
+
+**S3-c 三块（block-1 翻默认 + block-2 删 backdoor + block-3 完整性门）全部落地。** 升 Accepted 仍卡 VCS
+（DEBT-036-DST-SRC-PORT / -BCAST-FEED-TIMING / -AUDIT-SENSITIVITY + SMC_1..7 各算对的 RTL 实测）。
 
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/

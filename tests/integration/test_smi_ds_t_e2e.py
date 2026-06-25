@@ -80,6 +80,10 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         rc_on, out_on = self._run({"AIACC_DST_REAL_GATHER": "1"})       # ON（真固件 gather）
         self.assertEqual(rc_on, 0, f"ON e2e 应 exit=0，得 {rc_on}\n{out_on[-1500:]}")
         self.assertIn("ALL PHYSICAL CHECKS PASSED", out_on)
+        # S3-c block-3：固件完整性门在 ON fp16（real_gather + fp16）路径**被调用且 PASS**——
+        # 防 hco note「门被 fp16 truth-audit skip 旁路」（门是独立顶层方法、不受 DEBT-FP16-AUDITOR 影响）。
+        self.assertIn("Firmware Integrity Gate: SUCCESS", out_on,
+                      "ON fp16 路径固件完整性门须被调用且 PASS（不被 fp16 skip 旁路）")
         # ON 须真走 gather 路径——验 build 产物（sim log 写文件、不在 console stdout）：
         #   ① 固件含真 BANK=6 ds_src_read 读指令（非 structural_only 被过滤）；
         #   ② sim_config 带 src_read_port（cluster 据此走端口快照 gather 而非 storage backdoor）；
