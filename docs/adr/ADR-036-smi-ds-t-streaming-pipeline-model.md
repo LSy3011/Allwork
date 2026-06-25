@@ -415,8 +415,16 @@ t_var），而是消费者上的 `rtovr_deps` 边（dependency_axioms 建 t_latc
 - ON：rt_ds_src 标 `smi_ds_t_route` → rigid 真值审计 **value-exempt**（block-1 同款，SMI_DS_T datapath 端点
   值不在 compute 读端口可见；否则读真 gather 值 3.55 vs 期望 0 假阳）。
 
+**目的 slot 修正（user 二次订正「port 应该是 34」）**：RTOVR 的 IQ 号 = 目的 producer_dvr slot（rt_a
+FPMUL_S0→rtovr-3）。rt_ds_src 初版误 emit 成 `rtovr-0`——`ucode_solver` 的 RTOVR 绑定用
+`dvr_map[消费者类型][port_names[i]]` 索引法，假设「消费者 depends_on[i] 对齐输入端口 i + 端口名经
+split('-') 可取」；对 SHIFTDN 不成立（DVR_SHIFTDN_S 是第 2 输入、modules 用下划线、ds_gather 单 dep i=0）
+→ 误算 slot 0。修：索引法**查不到时**回退节点显式 `slot_id`（rt_ds_src 带 PS.SHIFTDN_S=34）→ 正确 emit
+`rtovr-34`（= DVR_SHIFTDN_S）。dvr_map 路径优先不动（保 FPMUL/FPADD/hardsigmoid 等已 work 绑定无回归）。
+
 **验收**：5 个 SMI_DS_T 算子（matmul_q_dst/_k8/fp16_q_dst/fp16_full_dst/unit_ds_transpose）ON exit=0 +
-8 SMC bit-perfect；OFF 回归 exit=0。固件现含 `rtovr-0 SEL=源端口`（ON）路由 SHIFTDN_S。pytest 149 passed
+8 SMC bit-perfect；OFF 回归 exit=0。固件现含 **`rtovr-34 SEL=源端口`**（matmul_q_dst SEL=32 / unit_ds_transpose
+SEL=31）路由 DVR_SHIFTDN_S。pytest 149 passed
 （+可证伪 SMT 单测：ds_gather 排程晚 ds_src_read >=2 拍 = UR_lat1+RtoVR_latch1，证路由边非 no-op）。
 SMT 影响低（单 prologue 1 t_latch + 3 约束，strict 分支）。`still_holds: proposed`，升 Accepted 仍卡 VCS
 （SHIFTDN 经 slot 34 路由的真时序）。

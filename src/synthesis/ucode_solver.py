@@ -473,12 +473,21 @@ class UCodeSynthesizer:
                     else:
                         schedule[producer.trace_id] = schedule[op.trace_id] - 1
                     
-                    # 恢复物理绑定
+                    # 恢复物理绑定。dvr_map[inst][port_names[i]] 索引法优先（FPMUL/FPADD 等：消费者
+                    # depends_on[i] 对齐输入端口 i、端口名经 split('-') 可取，dvr_map 解析正确——勿动，
+                    # 否则破 hardsigmoid 等已 work 的 RTOVR 绑定）。
                     p_name = port_names[i] if i < len(port_names) else "S0"
-                    target_slot = 0
                     if inst_name in dvr_map and p_name in dvr_map[inst_name]:
                         target_slot = dvr_map[inst_name][p_name]
-                        
+                    else:
+                        # ADR-036 契约修复：索引法失败时回退节点显式 slot_id。SHIFTDN 不满足索引法前提
+                        # （DVR_SHIFTDN_S 是第 2 输入 + modules 用下划线 + ds_gather 单 dep i=0）→ 旧版误算
+                        # slot 0（rtovr-0）；rt_ds_src 带 slot_id=PS.SHIFTDN_S → 取 slot 34（rtovr-34 = DVR_SHIFTDN_S）。
+                        explicit_slot = producer.metadata.get("slot_id")
+                        if explicit_slot is not None and not isinstance(explicit_slot, int):
+                            explicit_slot = getattr(explicit_slot, "value", None)
+                        target_slot = explicit_slot if isinstance(explicit_slot, int) else 0
+
                     rt_id = base_rt + target_slot
                     
                     # 🛸 [ENGINEERING] 多端口生产者解析：根据 dep_port 找到正确的 Source ID
