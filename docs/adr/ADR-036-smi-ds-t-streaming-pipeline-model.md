@@ -441,6 +441,34 @@ SEL=31）路由 DVR_SHIFTDN_S + **`ds_gather BROADCAST=1`**。pytest 149 passed
 SMT 影响低（单 prologue 1 t_latch + 3 约束，strict 分支）。`still_holds: proposed`，升 Accepted 仍卡 VCS
 （SHIFTDN 经 slot 34 路由的真时序）。
 
+## S4 实现（2026-06-25，DEBT-S4-SHIFTDN-DRAIN 兑现：SHIFTDN gather 逐-SMC chain drain；hco APPROVE-with-notes 方案 A）
+
+user（VCS 测 matmul，硬件 authority）订正：SHIFTUP/SHIFTDN 的 chain 移位**每个 SMC 传递 = 1 latency**，
+gather N 个 SMC 跨 ~N 拍 drain，非同拍。旧 sim：`_tick_smi_ds_t_trigger` 一次性 burst 读全部 SMC、同
+cycle_count 发 DST-SHIFTDN 事件（user log 见 8 SMC 全 Cyc:2）。
+
+**方案选择（hco 裁）**：采纳**方案 A**（sim 时序层逐拍 drain 渲染 + compute lockstep drain-barrier，SMT
+一行不动）。**方案 B**（compute 也逐-SMC 错拍）BLOCK——它复活 per-SMC 指令流偏移（≈ ADR-019 INIT
+stagger），违 ADR-022/023 单 SMI 全局指令流模型，gated on VCS 证明「compute 必须逐-SMC 流水」。
+
+**实现**（`cluster.py::_tick_smi_ds_t_trigger`）：gather 的值仍在 trigger 一次性读齐（evaluate 需整 tile），
+但 DST-SHIFTDN 事件**入队 `smi_ds_t_gather_queue`、逐拍 pop 发**（每拍一个 = SHIFTDN 下行 chain hop）。
+- **守恒（hco 约束1）**：gather drain 跨 gather_cnt 拍，全在 SMI_DS_T latency(=16) 窗口内；compute barrier
+  `a_read = t[ds_transpose] + 16` **一字不改**（SMT 不动，守 ADR-021）。实测 matmul_q_dst：DST-SHIFTDN
+  Cyc 5-8（gather_cnt=4 逐拍）→ DST-SHIFTUP 输出 drain Cyc 21-24 → a_read compute Cyc 21 = 5+16。逐拍
+  drain 只把已有 16 渲染成可观测事件，**不 double-count** SHIFTDN=1 hop latency。
+- **不破 ADR-023**：逐拍 drain 全在 compute barrier 左侧（值已 trigger 读齐），compute 仍 barrier 后 lockstep
+  读 → 不重触 ADR-023 修的「广播错拍 + compute lockstep → 读 stale」bug。
+- **drain 拍数 = gather_cnt（hco 约束2）**：K=8 算子跨 8 拍 / matmul_q_dst K=4 跨 4 拍。
+- **ds_src_read smc_id_en（副）**：旧版无显式 → payload_factory 默认 PARAM_SMC_NUM-1=7 → K=4 时固件让
+  SMC4-7 也读（user log 见读零）。修为 `smc_id_en=gather_cnt-1`（固件只让持列 SMC 读）。⚠ **sim 仍不按
+  smc_id_en 门控 UR 读**（model-A 全 kernel lockstep 执行）= 遗留 DEBT-036-SMCEN-SIM-GATE，sim log 仍显 8
+  读；固件 VCS-correct，升 Accepted 须 sim 解码 smc_id_en 门控。
+
+**验收**：5 个 SMI_DS_T 算子 ON exit=0 + 8 SMC bit-perfect（方案 A 只改事件 log cycle、终值不变）；OFF 回归
+exit=0；pytest 149+2=151（+守恒/drain拍数反证）。`still_holds: proposed`，升 Accepted 仍卡 VCS（逐-SMC
+chain 真时序 + compute 是否逐-SMC 流水的 RTL 事实）。方案 B 若 VCS 证明需要则开新 ADR。
+
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/
   para1236-1246（矩阵×矩阵 + 激活矩阵排序=SMI_DS_T）/ 表542-548（SHIFTUP/SHIFTDN）/ 表593-595（SMI_IQ）/ 表596-598（SMI_DS_T）

@@ -70,6 +70,43 @@ class TestDocFlowUnitE2E(unittest.TestCase):
                       "unit_ds_transpose 应触发固件完整性门且 PASS（cross-SMC datapath 无 backdoor）")
 
 
+class TestSmiDsTChainDrain(unittest.TestCase):
+    """ADR-036 S4（方案 A，hco APPROVE-with-notes）：SHIFTDN gather 逐-SMC chain drain 时序。
+    DST-SHIFTDN 事件逐-SMC 错拍（每 hop 1 latency），非同拍 burst；总 drain 跨度守恒于 SMI_DS_T latency。"""
+
+    def _sim_log(self, op):
+        proc = subprocess.run(
+            [sys.executable, "verification_v2/main_verify.py", "--op", op, "--mode", "e2e"],
+            cwd=str(_ROOT), capture_output=True, text=True, timeout=300, env=dict(os.environ))
+        self.assertEqual(proc.returncode, 0, f"{op} e2e 应 exit=0，得 {proc.returncode}")
+        log = _ROOT / "build" / "verification_v2" / op / f"{op}_sim.log"
+        return log.read_text()
+
+    @staticmethod
+    def _cycs(text, tag):
+        return sorted({int(m) for m in re.findall(rf"Cyc:(\d+)\b[^\n]*Tag:{tag}\b", text)}) or \
+               sorted({int(re.search(r"Cyc:(\d+)", l).group(1))
+                       for l in text.splitlines() if f"Tag:{tag}" in l and "Cyc:" in l})
+
+    def test_dst_shiftdn_staggered_by_gather_cnt(self):
+        """matmul_q_dst（K=4）：DST-SHIFTDN 逐-SMC 错拍 1 拍、跨 gather_cnt=4 拍（非同拍 burst）。"""
+        text = self._sim_log("matmul_q_dst")
+        cyc = self._cycs(text, "DST-SHIFTDN")
+        self.assertEqual(len(cyc), 4, f"K=4 应 4 个 DST-SHIFTDN drain 拍（gather_cnt），得 {cyc}")
+        self.assertEqual(cyc, list(range(cyc[0], cyc[0] + 4)),
+                         f"DST-SHIFTDN 须逐拍连续错拍（每 hop 1 latency），得 {cyc}")
+
+    def test_drain_conserves_smi_ds_t_latency(self):
+        """守恒（hco 约束1）：DST-SHIFTUP 输出 drain 起点 − DST-SHIFTDN gather 起点 == SMI_DS_T latency(16)
+        —— 逐拍 drain 只把已有 16 渲染成可观测事件，不 double-count、不漂 compute barrier。"""
+        text = self._sim_log("matmul_q_dst")
+        dn = self._cycs(text, "DST-SHIFTDN")
+        up = self._cycs(text, "DST-SHIFTUP")
+        self.assertTrue(dn and up, "应有 DST-SHIFTDN + DST-SHIFTUP 事件")
+        self.assertEqual(up[0] - dn[0], 16,
+                         f"输出 drain 起点须 = gather 起点 + SMI_DS_T(16)；得 {up[0]}-{dn[0]}={up[0]-dn[0]}")
+
+
 class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
     """ADR-036 S3-a：fp16_matmul_full_dst real-gather（去 gather backdoor，走真固件 bank6 UR 读）。
     A/B 护栏（hco APPROVE-with-notes）：AIACC_DST_REAL_GATHER ON vs OFF 输出逐 bit 一致 + 均 exit=0。

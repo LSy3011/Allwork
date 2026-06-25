@@ -162,6 +162,10 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
         "depends_on": [], "iq_type": RT.UR_READ,
         "meta_name": "ds_src", "role": "input", "stride": 0,
         "logical_addr": src_bank * bank_depth + src_addr,
+        # 契约修复（user 2026-06-25「文档设计为准」）：gather 读只发在持列的 gather_cnt 个 SMC
+        #（SMC_ID<=gather_cnt-1），非全 8 SMC。旧版无显式 smc_id_en → payload_factory 默认 PARAM_SMC_NUM-1=7
+        # → K=4 时 SMC4-7 读空 bank 出零（user log 见）。显式 smc_id_en=gather_cnt-1 杜绝伪读零。
+        "smc_id_en": max(gather_cnt - 1, 0),
         "math": "smi_ds_t_src_read(col-aligned X[:,s] on SMC_s)", **prologue,
     }
     if real_gather:

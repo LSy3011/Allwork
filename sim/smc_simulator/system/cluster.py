@@ -180,6 +180,7 @@ class SystemCluster:
         self.smi_ds_t_started = False
         self.smi_ds_t_done = False
         self.smi_ds_t_fired = False
+        self.smi_ds_t_gather_queue = []   # 方案 A：DST-SHIFTDN 逐拍 drain 事件队列（每 hop 1 latency）
 
     def _audit_smi_ds_t(self, unit: str, tag: str, smc_id: int, port: int,
                         bank: int, addr: int, val: int):
@@ -219,14 +220,20 @@ class SystemCluster:
             # 非 real-gather（None）→ 维持 model-A storage 直读（A/B 护栏的 OFF 侧）。
             src_port = cfg.get("src_read_port")
             cols = []
+            gather_evs = []
             for s in range(gc):
                 if src_port is not None:
                     word = self.kernels[s]._dst_src_capture_data  # 真端口读快照（无 backdoor）
                 else:
                     word = self.kernels[s].ur_bank.storage[sb][sa]  # model-A storage backdoor
-                # S2-D1b（hco）：bank{src_bank} 读 = SMC_s 的 UR-read（占其 R 端口）；SHIFTDN 下行搬运未建模(debt)
-                self._audit_smi_ds_t("UR-READ", "DST-SHIFTDN", s, int(src_port or 0), sb, sa, word)
+                gather_evs.append((s, int(src_port or 0), sb, sa, word))  # 缓冲，逐拍发（chain hop）
                 cols.append(unit._lanes_from_word(word, ln))
+            # 方案 A（hco APPROVE-with-notes，兑现 DEBT-S4-SHIFTDN-DRAIN）：DST-SHIFTDN 逐-SMC 错拍渲染
+            # ——SHIFTDN 下行 chain 每 hop 1 latency，gather_cnt 个 SMC 跨 gather_cnt 拍 drain，非一次性同拍
+            # burst（user 2026-06-25 硬件订正）。值在 trigger 读齐（evaluate 需整 tile），事件入队、逐拍 pop 发。
+            # 约束（hco）：总跨度=gather_cnt 拍 < SMI_DS_T latency(16) → compute barrier (a_read=t[transpose]+16)
+            # 不变、不 double-count SHIFTDN=1 的 hop latency（仅把已有 16 渲染成可观测逐拍事件）→ bit-perfect 守恒。
+            self.smi_ds_t_gather_queue = gather_evs
             # ADR-036 S2：流式触发（evaluate，无 gather-gate），转置行词经固定 latency pipeline 逐拍出。
             unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)
             # 转置内部无对外可观测信号（表596 仅 DATA_OUT/INST_DONE）→ 非数据 marker（不进 AUDIT-DATA，diff 脚本天然过滤）
@@ -237,6 +244,13 @@ class SystemCluster:
             iq.tick()
             self.logger.info(
                 f"[SMI_DS_T] instruction-driven transpose started at cycle {self.cycle_count}")
+        # 方案 A：逐拍 drain — 每拍 pop 一个 buffered DST-SHIFTDN 事件（SHIFTDN chain hop，1 latency/hop）。
+        # gather drain（前 gather_cnt 拍）发生在 latency 窗口内（unit.tick 此时返 None 气泡），与 DST-SHIFTUP
+        # 输出 drain（T+16 后）不交叠 → compute barrier 之左，不破 ADR-023 lockstep（值已 trigger 读齐）。
+        if self.smi_ds_t_gather_queue:
+            s, port, sb_e, sa_e, word_e = self.smi_ds_t_gather_queue.pop(0)
+            # S2-D1b（hco）：bank{src_bank} 读 = SMC_s 的 UR-read（占其 R 端口）；逐拍 = SHIFTDN 下行搬运段
+            self._audit_smi_ds_t("UR-READ", "DST-SHIFTDN", s, port, sb_e, sa_e, word_e)
         # scatter：tick 固定 latency pipeline；DATA_OUT_VLD 拍发一个 DATA_OUT 词。
         # latency 窗口内 tick() 返 None（气泡，不写），到点后每拍发一行词（线速）。
         emit = unit.tick()
