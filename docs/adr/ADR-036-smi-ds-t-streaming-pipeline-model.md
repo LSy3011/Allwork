@@ -394,6 +394,33 @@ block-1/2 后 user 裁定接 **block-3「固件完整性门」**（hco 原创建
 **S3-c 三块（block-1 翻默认 + block-2 删 backdoor + block-3 完整性门）全部落地。** 升 Accepted 仍卡 VCS
 （DEBT-036-DST-SRC-PORT / -BCAST-FEED-TIMING / -AUDIT-SENSITIVITY + SMC_1..7 各算对的 RTL 实测）。
 
+## 契约保真订正（2026-06-25，UR_read→SHIFTDN 补 DVR_SHIFTDN_S 路由 RTOVR；hco APPROVE-with-notes）
+
+user（VCS 测 matmul 时，硬件 authority）指出：数据整理 datapath `UR read—SHIFTDN—SMI_DS_T—SHIFTUP—UR
+write` 里 **UR_read → SHIFTDN 之间漏了 RTOVR**。核 `shiftdn.yaml`：SHIFTDN 源 = `DVR_SHIFTDN_S`
+（producers_dvr slot 34，经 RtoVR 路由），语义 `CRD_SHIFTDN_O <- DVR_SHIFTDN_S`，无 data 立即数字段
+（code_bits=7）。故 UR 读出**必经一个路由到 SHIFTDN_S 的 RTOVR** 才到 SHIFTDN，`_inject_smi_ds_t_transpose`
+旧版 ds_src_read→ds_gather 直连是契约缺口（影响所有 5 个 SMI_DS_T 算子的 emit 固件 = VCS 比对面）。
+
+**不对称（spec 钦定）**：SHIFTUP 广播源经 `data` 微指令字段直读 ur-r0（前无 RTOVR、后有 RTOVR sel=29）；
+SHIFTDN 经 DVR 读源（前需 RTOVR）。仅此一处缺口（SHIFTDN→SMI_DS_T、SMI_DS_T→SHIFTUP 不缺）。
+
+**实现（hco 纠正 naive 失败）**：AIACC 里 RTOVR **不是被调度的节点**（ucode_solver 排除出 compute_ops、无
+t_var），而是消费者上的 `rtovr_deps` 边（dependency_axioms 建 t_latch 串进调度）。故：
+- 加 RTOVR 节点 `rt_ds_src_SHIFTDN_S`（slot_id=PS.SHIFTDN_S=34）**供 emit 真路由 IQ**（mirror matmul rt_b）；
+- `ds_gather.depends_on=[rt_ds_src_SHIFTDN_S]` + `rtovr_deps={ds_src_read:{dvr:34,sel:-1}}`（sel=-1 占位，
+  payload_factory 对 UR 读源解析为 UR_READ_{port}_D）——边让 dependency_axioms 重定向真生产者 + 建 t_latch；
+- naive 只加节点不加 rtovr_deps → `t_c=-1` 悬空 UNSAT；只加边不加节点 → 调度对但不 emit 路由 IQ。**两者都要**。
+- OFF：rt_ds_src 标 `structural_only`（mirror ds_src_read，仅 SMT 锚点不进 emit）；
+- ON：rt_ds_src 标 `smi_ds_t_route` → rigid 真值审计 **value-exempt**（block-1 同款，SMI_DS_T datapath 端点
+  值不在 compute 读端口可见；否则读真 gather 值 3.55 vs 期望 0 假阳）。
+
+**验收**：5 个 SMI_DS_T 算子（matmul_q_dst/_k8/fp16_q_dst/fp16_full_dst/unit_ds_transpose）ON exit=0 +
+8 SMC bit-perfect；OFF 回归 exit=0。固件现含 `rtovr-0 SEL=源端口`（ON）路由 SHIFTDN_S。pytest 149 passed
+（+可证伪 SMT 单测：ds_gather 排程晚 ds_src_read >=2 拍 = UR_lat1+RtoVR_latch1，证路由边非 no-op）。
+SMT 影响低（单 prologue 1 t_latch + 3 约束，strict 分支）。`still_holds: proposed`，升 Accepted 仍卡 VCS
+（SHIFTDN 经 slot 34 路由的真时序）。
+
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/
   para1236-1246（矩阵×矩阵 + 激活矩阵排序=SMI_DS_T）/ 表542-548（SHIFTUP/SHIFTDN）/ 表593-595（SMI_IQ）/ 表596-598（SMI_DS_T）

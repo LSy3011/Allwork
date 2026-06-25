@@ -173,12 +173,36 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
         op_type="UR_READ", logic_cycle=0, trace_id="ds_src_read",
         metadata=ds_src_meta,
     )
+    # 硬件契约（user 2026-06-25 + shiftdn.yaml + hco APPROVE-with-notes）：SHIFTDN 源 = DVR_SHIFTDN_S
+    # （producers_dvr slot 34，经 RtoVR 路由），语义 `CRD_SHIFTDN_O <- DVR_SHIFTDN_S`。故 UR_read → SHIFTDN
+    # 之间必有 RTOVR 把 ur 读出路由到 SHIFTDN_S。AIACC 里 RTOVR 不是被调度的节点（ucode_solver 排除出
+    # compute_ops、无 t_var），而是消费者上的 rtovr_deps 边——dependency_axioms 的 rtovr_deps 分支建 t_latch
+    # 串进调度。故 depends_on 保持指真生产者 ds_src_read（**勿改成指 RTOVR 节点**，否则 t_c=-1 悬空），加
+    # rtovr_deps：dvr=SHIFTDN_S(34) 目的端口；sel=源=UR_READ_{port}_D（=30+port）。ON 端口动态 → sel
+    # post-solve patch（pipeline_runner._dst_src_capture_config，mirror src_read_port）；先填 -1 占位（同
+    # b_read 惯例，payload_factory 对 UR 读源兜底解析）。SHIFTUP 不对称：其源经 data 字段直读、前无此 RTOVR。
+    # RTOVR 节点（emit 真路由 IQ：UR_read → SHIFTDN_S，mirror matmul rt_b 经 slot_id emit rtovr-N）。
+    # sel=-1 占位：payload_factory 对 UR 读源兜底解析为 UR_READ_{port}_D（同 b_read）。
+    rt_ds_src_meta = {
+        "depends_on": ["ds_src_read"], "slot_id": PS.SHIFTDN_S, "sel": -1, "dep_port": "D",
+        "smi_ds_t_route": True,   # SMI_DS_T gather 路由端点：rigid compute 审计值豁免（block-1，ON）
+        "math": "rtovr_route(UR_read → DVR_SHIFTDN_S)", **prologue,
+    }
+    if not real_gather:
+        rt_ds_src_meta["structural_only"] = True   # OFF：mirror ds_src_read，仅 SMT 锚点不进 emit
+    rt_ds_src = MIROp(
+        op_type="RTOVR", logic_cycle=0, trace_id="rt_ds_src_SHIFTDN_S",
+        metadata=rt_ds_src_meta,
+    )
     ds_gather = MIROp(
         op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather",
         metadata={
-            "depends_on": ["ds_src_read"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            # depends_on 指 RTOVR 节点（mirror matmul mul.depends_on=[rt_a]）；rtovr_deps 让
+            # dependency_axioms 重定向到真生产者 ds_src_read + 建 t_latch（否则 RTOVR 无 t_var → t_c=-1）。
+            "depends_on": ["rt_ds_src_SHIFTDN_S"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
             "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 0,
-            "math": "smi_ds_t_gather(cross-smc columns)", **prologue,
+            "rtovr_deps": {"ds_src_read": {"dvr": int(PS.SHIFTDN_S.value), "sel": -1}},
+            "math": "smi_ds_t_gather(cross-smc columns via DVR_SHIFTDN_S)", **prologue,
         },
     )
     ds_transpose = MIROp(
@@ -195,7 +219,7 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
         deps.append("ds_transpose")
     a_read.metadata["depends_on"] = deps
 
-    return list(ops) + [ds_src_read, ds_gather, ds_transpose]
+    return list(ops) + [ds_src_read, rt_ds_src, ds_gather, ds_transpose]
 
 
 class ManualMatmulParallelNOperator(BaseOperator):

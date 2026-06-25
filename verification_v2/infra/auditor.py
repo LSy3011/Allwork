@@ -474,8 +474,11 @@ class Auditor:
         real_gather_on = any(op.metadata.get("ds_src_read") for op in (ops or []))
         value_exempt_ids = set()
         if real_gather_on:
+            # ds_src_read（真 gather 读）/ broadcast_source（广播 trigger 读）/ smi_ds_t_route（UR→SHIFTDN
+            # 的 DVR_SHIFTDN_S 路由 RTOVR）均是 SMI_DS_T datapath 端点，值不在 compute 读端口可见 → 豁免。
             value_exempt_ids = {op.trace_id for op in (ops or [])
-                                if op.metadata.get("ds_src_read") or op.metadata.get("broadcast_source")}
+                                if op.metadata.get("ds_src_read") or op.metadata.get("broadcast_source")
+                                or op.metadata.get("smi_ds_t_route")}
 
         # 4. 逐个算子审计（智能分级：详情仅在失败时显示）
         for trace_id, info in theoretical_ops.items():

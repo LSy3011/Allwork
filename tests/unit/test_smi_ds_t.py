@@ -537,20 +537,47 @@ class TestSmiDsTS1FiveStage(unittest.TestCase):
     def test_five_stage_ds_src_read_structural(self):
         ops = self._build_dst_dfg()
         by_id = {o.trace_id: o for o in ops}
-        for nid in ("ds_src_read", "ds_gather", "ds_transpose"):
-            self.assertIn(nid, by_id, f"5 段缺节点 {nid}")
+        # datapath 链（含 UR→SHIFTDN 的 DVR_SHIFTDN_S 路由 RTOVR，hco 契约修复）：
+        #   ds_src_read(UR_READ) → rt_ds_src_SHIFTDN_S(RTOVR) → ds_gather(SHIFTDN) → ds_transpose(SMI_DS_T)
+        for nid in ("ds_src_read", "rt_ds_src_SHIFTDN_S", "ds_gather", "ds_transpose"):
+            self.assertIn(nid, by_id, f"datapath 缺节点 {nid}")
         src = by_id["ds_src_read"]
         self.assertEqual(src.op_type.upper(), "UR_READ")
         self.assertTrue(src.metadata.get("structural_only"),
                         "ds_src_read 必须标 structural_only（SMT 锚点、不进 emit/sim）")
-        self.assertIn("ds_src_read", by_id["ds_gather"].metadata.get("depends_on", []))
+        # UR→SHIFTDN 之间必有 RTOVR（路由 DVR_SHIFTDN_S）：rt 依赖 ds_src_read、ds_gather 依赖 rt
+        rt = by_id["rt_ds_src_SHIFTDN_S"]
+        self.assertEqual(rt.op_type.upper(), "RTOVR")
+        self.assertIn("ds_src_read", rt.metadata.get("depends_on", []))
+        self.assertTrue(rt.metadata.get("structural_only"),
+                        "OFF：rt_ds_src 须 structural_only（mirror ds_src_read，不进 emit）")
+        self.assertIn("rt_ds_src_SHIFTDN_S", by_id["ds_gather"].metadata.get("depends_on", []))
+        # ds_gather 经 rtovr_deps 重定向到真生产者 ds_src_read（dependency_axioms 建 t_latch）
+        self.assertIn("ds_src_read", by_id["ds_gather"].metadata.get("rtovr_deps", {}))
         self.assertIn("ds_gather", by_id["ds_transpose"].metadata.get("depends_on", []))
+
+    def test_ur_to_shiftdn_rtovr_adds_latency(self):
+        """hco 可证伪：UR→SHIFTDN 的 DVR_SHIFTDN_S 路由 RTOVR 真进调度链（+1 拍 RtoVR latch），
+        非静默 no-op 边。ds_gather 排程 = ds_src_read + UR_lat(1) + RtoVR_latch(1) = +2（无此边则 +1）。"""
+        sys.path.append(str(_ROOT / "src"))
+        from synthesis.ucode_solver import UCodeSynthesizer
+        from api.hw_spec import HardwareSpec
+        spec = HardwareSpec.load("hw_config")
+        ops = self._build_dst_dfg()
+        res = UCodeSynthesizer(spec).solve_with_units(ops, MII=1, MAX_II=64)
+        self.assertIsNotNone(res, "SMI_DS_T datapath（含 SHIFTDN_S 路由 RTOVR）须可调度 SAT")
+        sch = res["schedule"]
+        gap = sch["ds_gather"] - sch["ds_src_read"]
+        self.assertGreaterEqual(gap, 2,
+            f"ds_gather 须晚 ds_src_read >=2 拍（UR_lat1 + RtoVR_latch1）；得 {gap}（=1 则路由边 no-op）")
 
     def test_emit_filter_excludes_structural_only(self):
         # 镜像 pipeline_runner.py emit 前过滤：structural_only 不进 emit/assemble
         ops = self._build_dst_dfg()
         emit_ids = {o.trace_id for o in ops if not o.metadata.get("structural_only")}
         self.assertNotIn("ds_src_read", emit_ids, "structural_only 节点不该进 emit")
+        self.assertNotIn("rt_ds_src_SHIFTDN_S", emit_ids,
+                         "OFF：rt_ds_src 路由 RTOVR 也须 structural_only、不进 emit")
         self.assertIn("ds_gather", emit_ids)
         self.assertIn("ds_transpose", emit_ids)
 
