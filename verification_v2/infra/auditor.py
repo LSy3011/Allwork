@@ -464,6 +464,19 @@ class Auditor:
         structural_only_ids = {op.trace_id for op in (ops or [])
                                if op.metadata.get("structural_only")}
 
+        # ADR-036 S3-c block-1：ON real-gather 下 SMI_DS_T datapath 端点 value-exempt（仅校时序）。
+        # OFF 时 ds_src_read 是 structural_only（上面整体跳过）、a_read 从 bank0 读 scatter 后的转置数据
+        # （值可严校）。ON 时：① ds_src_read 转为真 bank{src_bank} gather 读（值=列对齐激活，经 DST-SHIFTDN
+        # datapath 流动）；② a_read 读空 bank0 作 trigger、真广播数据经 _dst_bcast_feed 入 SHIFTUP 缓冲
+        # （bank0 不写 → ur-r0 读值=0）。两者的「值」都不在 compute 读端口可见（属 SMI_DS_T datapath，由
+        # DST-SHIFTDN/DST-SHIFTUP AUDIT-DATA 事件 + 最终 y bit-perfect parity 验证），故 rigid compute 审计
+        # 仅校其时序、值作参考不报错。real_gather ON 的判据 = ds_src_read flag 存在（仅 ON 置，matmul_op.py:163）。
+        real_gather_on = any(op.metadata.get("ds_src_read") for op in (ops or []))
+        value_exempt_ids = set()
+        if real_gather_on:
+            value_exempt_ids = {op.trace_id for op in (ops or [])
+                                if op.metadata.get("ds_src_read") or op.metadata.get("broadcast_source")}
+
         # 4. 逐个算子审计（智能分级：详情仅在失败时显示）
         for trace_id, info in theoretical_ops.items():
             if trace_id in structural_only_ids:
@@ -500,38 +513,43 @@ class Auditor:
                     act_val = self.to_float(actual_values[(expected_cyc, sim_iq_name)]["data"].get("V0", "0"))
                     if (iter_idx, trace_id) in expected_val_map:
                         exp_val = expected_val_map[(iter_idx, trace_id)]
-                        
-                        # 🛸 区分组合逻辑与时序/路由单元
-                        # 组合逻辑单元（如 fpmul, fpadd, logic）是流水的、无寄存器的，其瞬态值不写入 SRAM，
-                        # 因此我们仅打印其 SMT 算法过程的期望值 (Exp) 作为参考，不对其 0.0 瞬态值报错。
-                        # 时序/路由单元（如 ur-r, ur-w, rtovr 寄存器）具有物理锁存或内存存储，必须进行严苛的 SMT 过程值强校验！
-                        is_combinatorial = (
-                            not (sim_iq_name.startswith("ur-") or sim_iq_name.startswith("rtovr"))
-                            or "_ST_" in trace_id
-                            or "_cmp" in trace_id
-                        )
-                        if is_combinatorial:
-                            val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS]"
+
+                        if trace_id in value_exempt_ids:
+                            # ADR-036 S3-c block-1：SMI_DS_T datapath 端点（ON real-gather）值豁免，仅校时序。
+                            val_info = (f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) "
+                                        f"[DATAPATH-EXEMPT] (SMI_DS_T DST-SHIFTDN/SHIFTUP，值不经 compute 读端口)")
                         else:
-                            # 🚀 [SAT-OPT-3] 分级容差：按单元类型匹配物理精度
-                            _TOLERANCES = {
-                                "ur-r":   5e-4,   # 允许 5e-4 深度累加浮点误差
-                                "ur-w":   5e-4,   
-                                "rtovr":  5e-4,   
-                                "fpmul":  1e-4,   
-                                "fpadd":  1e-4,   
-                                "logic":  0.0,    
-                            }
-                            tol = next(
-                                (v for k, v in _TOLERANCES.items() if sim_iq_name.startswith(k)),
-                                1e-4  # 默认 FP32 精度
+                            # 🛸 区分组合逻辑与时序/路由单元
+                            # 组合逻辑单元（如 fpmul, fpadd, logic）是流水的、无寄存器的，其瞬态值不写入 SRAM，
+                            # 因此我们仅打印其 SMT 算法过程的期望值 (Exp) 作为参考，不对其 0.0 瞬态值报错。
+                            # 时序/路由单元（如 ur-r, ur-w, rtovr 寄存器）具有物理锁存或内存存储，必须进行严苛的 SMT 过程值强校验！
+                            is_combinatorial = (
+                                not (sim_iq_name.startswith("ur-") or sim_iq_name.startswith("rtovr"))
+                                or "_ST_" in trace_id
+                                or "_cmp" in trace_id
                             )
-                            diff = abs(act_val - exp_val)
-                            if diff <= tol:
-                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS] (tol={tol:.0e})"
+                            if is_combinatorial:
+                                val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS]"
                             else:
-                                val_ok = False
-                                val_info = f" | Val: {act_val:.6f} (Exp: {exp_val:.6f}) [FAIL] diff={diff:.2e} > tol={tol:.0e}"
+                                # 🚀 [SAT-OPT-3] 分级容差：按单元类型匹配物理精度
+                                _TOLERANCES = {
+                                    "ur-r":   5e-4,   # 允许 5e-4 深度累加浮点误差
+                                    "ur-w":   5e-4,
+                                    "rtovr":  5e-4,
+                                    "fpmul":  1e-4,
+                                    "fpadd":  1e-4,
+                                    "logic":  0.0,
+                                }
+                                tol = next(
+                                    (v for k, v in _TOLERANCES.items() if sim_iq_name.startswith(k)),
+                                    1e-4  # 默认 FP32 精度
+                                )
+                                diff = abs(act_val - exp_val)
+                                if diff <= tol:
+                                    val_info = f" | Val: {act_val:.4f} (Exp: {exp_val:.4f}) [PASS] (tol={tol:.0e})"
+                                else:
+                                    val_ok = False
+                                    val_info = f" | Val: {act_val:.6f} (Exp: {exp_val:.6f}) [FAIL] diff={diff:.2e} > tol={tol:.0e}"
                     else:
                         val_info = f" | Val: {act_val:.4f} [PASS]"
                 elif any(x in trace_id for x in ["rd_", "mul", "add", "wr_"]):

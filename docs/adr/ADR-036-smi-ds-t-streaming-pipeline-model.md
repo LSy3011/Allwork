@@ -303,12 +303,56 @@ m=1,2,3 未覆盖 → 正确，故 7/8 + SMC_0 仅首元素错）。
   OFF+ON 双路均 **PASSED y bit-perfect**（A/B 护栏未破）。
 - 忠实度增信不变：删的是 model-A backdoor 死代码，时序仍 S4-blocked。`still_holds: proposed` 维持。
 
-### S3-c 剩余（block-1 / block-3）
-- **block-1（翻默认 OFF→ON）**：须先改 fp32 truth auditor 建模 ON datapath（触点 `verification_v2/infra/
-  auditor.py`）。matmul_q_dst_full 的 exit=1 即此 auditor gap 的实例。
+## S3-c 实现（2026-06-25，block-1：fp32 auditor 建模 ON datapath + 翻默认 OFF→ON）
+
+block-2 后续 user 裁定接 **block-1「翻默认 OFF→ON」**。前置 = fp32 truth auditor 建模 ON datapath。
+
+### 根因：fp32 rigid auditor 按 OFF datapath 建模
+ON 下 fp32 算子（matmul_q_dst / _k8）y bit-perfect 但 e2e exit=1，rigid auditor FAIL 于两个 SMI_DS_T
+datapath 节点（仅这两个，timing 'L' 已对、仅 value 失配）：
+- **ds_src_read**（ON 真 gather 读）：实际读列对齐激活（V0=X[0,0]），auditor 期望 0——因 OFF 下它是
+  structural_only（被整体跳过），auditor 无其值模型。
+- **a_read**（broadcast_source）：实际读空 bank0=0（真广播数据经 `_dst_bcast_feed` 入 SHIFTUP 缓冲），
+  auditor 期望转置后 X[m,:]——因 OFF 下转置结果 scatter 写 bank0、a_read 从 bank0 读到它。
+
+（fp16 算子 ON 已 exit=0：其 rigid audit 整体被跳过 = DEBT-FP16-AUDITOR，值按 FP32 解码对 fp16 假阳。）
+
+### auditor 改：ON real-gather 下 SMI_DS_T datapath 端点 value-exempt
+`verification_v2/infra/auditor.py`：ON（判据 = `ds_src_read` flag 存在，仅 ON 置）时把 ds_src_read +
+broadcast_source 节点列入 `value_exempt_ids` → rigid compute 审计**仅校其时序、值作参考不报错**
+（标 `[DATAPATH-EXEMPT]`，仅 failure-detail 模式打印）。理据：这两节点的「值」不在 compute 读端口可见
+（属 SMI_DS_T datapath，由 DST-SHIFTDN/DST-SHIFTUP AUDIT-DATA 事件 + 最终 y parity 兜底），rigid compute
+审计校它们的 compute 期望值是 category error——正如 OFF 下 ds_src_read 因 structural_only 被完全跳过。
+OFF 路径 `value_exempt_ids` 空、严校不变（a_read 仍校 bank0 scatter 值）。
+
+**DEBT-036-DST-AUDIT-SENSITIVITY（evaluator ACCEPT-with-caveats 实测）**：豁免后这两节点的值正确性**只剩
+y-parity 兜底**，而 y-parity 用 `atol=0.005`，比原 rigid `ur-r` 的 `5e-4` 容差宽 ~10×。evaluator 反证：
+对 datapath feed 注 gross error（常量覆写）→ y FAIL 0/8 抓得到；但注 LSB mantissa flip（`word ^ 0x1`）→
+y 仍 bit-perfect、audit SUCCESS，两层皆漏。即「y parity 验证」措辞**高估覆盖**——实际 bottoms out 在
+0.005 非 bit-exact，这两节点的检测灵敏度从 5e-4 降到 0.005。单 tile fp32 点积此 gap 偏 academic，但记债。
+未来收紧 = 精确建模 ds_src_read 的 ON 期望值（per-SMC 列对齐读 V0=列首元素）替豁免（需 evaluator 的
+`_evaluate_expected_values` 加 ds_src 列语义）。S3-b 的 bank0-not-polluted 不变量已由 A/B 测试
+（`test_on_exit0_and_bit_identical_to_off` 验 scatter_to_feed + 无 bank0 staging）覆盖，故未在 rigid
+审计另加 a_read==0 冗余严校。
+
+### 翻默认 OFF→ON
+`dst_real_gather_enabled()` 默认从 `"0"` 改 `"1"`（`matmul_op.py`）。受影响 4 算子（matmul_q_dst / _k8 /
+fp16_matmul_q_dst / fp16_matmul_full_dst）默认走真 datapath；OFF 须显式 `AIACC_DST_REAL_GATHER=0`（留作
+A/B 对照）。测试同步：A/B 护栏 OFF leg + S1 structural_only 测试 + S3a OFF 测试均改显式 `=0`（不再依赖
+默认）。flag + OFF backdoor 路径删除待 VCS（升 Accepted）。
+
+### 验收
+- pytest **139 passed / 6 skipped**（无回归）。
+- 默认（ON）：4 受影响算子 e2e 全 exit=0（含 fp32 rigid audit）。显式 OFF：matmul_q_dst /
+  fp16_matmul_full_dst 仍 exit=0（A/B 双路 + 逐 bit 一致护栏未破）。
+- 忠实度：默认现走真固件 gather 读 + SHIFTUP 广播缓冲喂（去 model-A backdoor）。时序仍 S4-blocked
+  （DEBT-036-DST-SRC-PORT 保守模型 b + DEBT-036-DST-BCAST-FEED-TIMING）。`still_holds: proposed` 维持，
+  升 Accepted 仍卡 VCS（SMC_1..7 各算对 + 列对齐源读端口/broadcast 逐拍时序的 user RTL 事实）。
+
+### S3-c 剩余（block-3）
 - **block-3（固件完整性门）**：hco 建议，auditor 扫 sim log 每 UR 读写必有固件指令对应；须识别
   DST-SHIFTDN/DST-SHIFTUP 是 SMI_DS_T datapath 端点（非独立 UR 指令）勿误报双计。
-  physical_runner 的 loud-fail 是其前哨（cfg/hex 不一致已钉死）。
+  physical_runner 的 loud-fail（block-2）是其前哨（cfg/hex 不一致已钉死）。
 
 ## References
 - v0.4.19 docx：para1148-1168（表71-77 FPADD 流水范式）/ para1193-1201（向量×矩阵，无转置）/

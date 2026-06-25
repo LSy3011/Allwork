@@ -511,7 +511,20 @@ class TestSmiDsTS2Streaming(unittest.TestCase):
 class TestSmiDsTS1FiveStage(unittest.TestCase):
     """ADR-036 S1：5 段 DFG 首段 ds_src_read(structural_only) + 「emit 过滤 = audit 过滤」不变量。
     锁死 hco a4f6b70 BLOCK 的回归点：structural_only 节点必须既被 emit 过滤、也被 truth auditor
-    过滤，否则 e2e Truth Audit 对没 emit 的节点假阳 → exit=1（假红）。"""
+    过滤，否则 e2e Truth Audit 对没 emit 的节点假阳 → exit=1（假红）。
+    （本类测 OFF/structural 路径——S3-c block-1 起默认 ON，故显式置 =0。）"""
+
+    def setUp(self):
+        import os
+        self._saved = os.environ.get("AIACC_DST_REAL_GATHER")
+        os.environ["AIACC_DST_REAL_GATHER"] = "0"   # 本类专测 OFF structural_only 路径
+
+    def tearDown(self):
+        import os
+        if self._saved is None:
+            os.environ.pop("AIACC_DST_REAL_GATHER", None)
+        else:
+            os.environ["AIACC_DST_REAL_GATHER"] = self._saved
 
     def _build_dst_dfg(self):
         sys.path.append(str(_ROOT / "src"))
@@ -553,7 +566,7 @@ class TestSmiDsTS1FiveStage(unittest.TestCase):
 class TestSmiDsTS3aRealGather(unittest.TestCase):
     """ADR-036 S3-a：env flag AIACC_DST_REAL_GATHER 控制 gather 是否走真固件 UR 读端口
     （替 cluster storage backdoor）。锁死 hco 修正后的不变量：
-      - OFF（默认）→ ds_src_read structural_only=True + 硬 pin iq_id（维持 backdoor，S1 行为）
+      - OFF（显式 =0；S3-c block-1 起默认 ON）→ ds_src_read structural_only=True + 硬 pin iq_id（维持 backdoor，S1 行为）
       - ON → ds_src_read 进 emit（去 structural_only）+ **不硬 pin iq_id**（让 solver 分配端口，
         hco BLOCK 提案 A：4 读端口已被 compute 占满，无空闲 ur-r 可静态 pin）+ 标 ds_src_read=True
         （供 pipeline_runner post-solve 回读端口）。"""
@@ -578,9 +591,9 @@ class TestSmiDsTS3aRealGather(unittest.TestCase):
             os.environ["AIACC_DST_REAL_GATHER"] = self._saved
 
     def test_off_keeps_structural_only_backdoor(self):
-        """OFF（默认）：ds_src_read structural_only + pin iq_id → 维持 model-A backdoor。"""
+        """OFF（显式 =0；S3-c block-1 起默认已 ON）：ds_src_read structural_only + pin iq_id → 维持 model-A backdoor。"""
         import os
-        os.environ.pop("AIACC_DST_REAL_GATHER", None)
+        os.environ["AIACC_DST_REAL_GATHER"] = "0"
         by_id = {o.trace_id: o for o in self._build_full_dst_dfg()}
         src = by_id["ds_src_read"]
         self.assertTrue(src.metadata.get("structural_only"),

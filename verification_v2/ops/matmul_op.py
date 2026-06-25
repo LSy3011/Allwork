@@ -7,11 +7,16 @@ from driver.hw_resource import ResourceType as RT, PortSlot as PS
 
 
 def dst_real_gather_enabled() -> bool:
-    """ADR-036 S3-a：env flag 控制 SMI_DS_T gather 是否走真固件 UR 读端口（替 cluster storage backdoor）。
+    """ADR-036 S3：env flag 控制 SMI_DS_T gather 是否走真固件 UR 读端口（替 cluster storage backdoor）。
     ON → ds_src_read 进 emit/sim（真 bank{SRC_BANK} 读指令、solver 分配空闲端口）+ cluster 经读端口捕获
-    寄存器 gather；OFF（默认）→ 维持 structural_only + storage 直读（model-A backdoor）。
-    护栏：ON vs OFF 逐 bit A/B diff 须一致（hco APPROVE-with-notes，保守模型 b，DEBT-036-DST-SRC-PORT）。"""
-    return os.environ.get("AIACC_DST_REAL_GATHER", "0").lower() in ("1", "true", "on", "yes")
+    寄存器 gather + scatter 经 SHIFTUP 广播缓冲直喂；OFF → structural_only + storage 直读 + bank0 staging
+    （model-A backdoor 残余，仅留作 A/B 护栏对照）。
+    **ADR-036 S3-c block-1（2026-06-25）：默认翻 ON**（真 datapath）——4 个受影响算子（matmul_q_dst /
+    _k8 / fp16_matmul_q_dst / fp16_matmul_full_dst）ON 全 e2e exit=0（fp32 rigid auditor 已建模 ON：
+    SMI_DS_T datapath 端点 value-exempt，auditor.py）。OFF 须显式 `AIACC_DST_REAL_GATHER=0`。
+    护栏：ON vs OFF 逐 bit A/B diff 须一致（hco APPROVE-with-notes，保守模型 b，DEBT-036-DST-SRC-PORT）。
+    flag + OFF backdoor 路径删除待 VCS（升 Accepted）。"""
+    return os.environ.get("AIACC_DST_REAL_GATHER", "1").lower() in ("1", "true", "on", "yes")
 
 
 def _inject_shiftup_broadcast(ops: List[Any], broadcast_names: set, spec: Any) -> List[Any]:
@@ -151,7 +156,7 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
     # ur-rN 可静态 pin（hco BLOCK 提案 A）。ds_src_read 是单次 prologue（shape=[1]），让 solver 在转置
     # prologue 窗口分配一个空闲端口；其实际落的端口由 pipeline_runner post-solve 回读 → patch 进
     # smi_ds_t cfg(src_read_port) + dst_src_capture（镜像 ADR-037 _broadcast_capture_config）。
-    # OFF（默认）→ structural_only=True（仅 SMT 锚点、不进 emit）+ iq_id=ur_read_iq，维持 model-A backdoor。
+    # OFF（显式 =0；S3-c block-1 起默认 ON）→ structural_only=True（仅 SMT 锚点、不进 emit）+ iq_id=ur_read_iq，维持 model-A backdoor。
     real_gather = dst_real_gather_enabled()
     ds_src_meta = {
         "depends_on": [], "iq_type": RT.UR_READ,

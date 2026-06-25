@@ -69,7 +69,7 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
     def test_on_exit0_and_bit_identical_to_off(self):
         import json
         bdir = _ROOT / "build" / "verification_v2" / "fp16_matmul_full_dst"
-        rc_off, out_off = self._run()                                  # 默认 OFF（backdoor）
+        rc_off, out_off = self._run({"AIACC_DST_REAL_GATHER": "0"})    # 显式 OFF（backdoor；S3-c block-1 起默认已 ON）
         self.assertEqual(rc_off, 0, f"OFF e2e 应 exit=0，得 {rc_off}\n{out_off[-1500:]}")
         # OFF 对称守门（hco 可选建议）：OFF 路径 scatter 仍走 bank0 staging（UR-WRITE）——验双路 else 分支未被误删。
         # 须在 ON 跑前读（ON 会覆盖同一 build 目录）。
