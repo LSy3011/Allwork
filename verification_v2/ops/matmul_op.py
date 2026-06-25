@@ -200,7 +200,13 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
             # depends_on 指 RTOVR 节点（mirror matmul mul.depends_on=[rt_a]）；rtovr_deps 让
             # dependency_axioms 重定向到真生产者 ds_src_read + 建 t_latch（否则 RTOVR 无 t_var → t_c=-1）。
             "depends_on": ["rt_ds_src_SHIFTDN_S"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
-            "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 0,
+            # 契约修复（user 2026-06-25「文档设计为准」+ docx para 2208-2213）：SHIFTDN 功能
+            #   broadcast==0 → 只 SMC_ID==smc_id_en 注入 DVR_SHIFTDN_S（单 SMC）；
+            #   broadcast==1 → SMC_ID<=smc_id_en 全注入。gather 须收集全 gather_cnt 个 SMC 的列
+            #   （doc para 4664「共 PARAM_SMC_NUM 行」）→ **broadcast=1**（旧版 =0 只 gather 1 个 SMC=错；
+            #   sim 抓不到——shift_dn_unit 忽略 broadcast/smc_id_en 走 fallback chain + gather 走 model-A
+            #   _tick_smi_ds_t_trigger 直读各 SMC，故 sim bit-perfect 但固件错位，仅 VCS 暴露）。
+            "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 1,
             "rtovr_deps": {"ds_src_read": {"dvr": int(PS.SHIFTDN_S.value), "sel": -1}},
             "math": "smi_ds_t_gather(cross-smc columns via DVR_SHIFTDN_S)", **prologue,
         },

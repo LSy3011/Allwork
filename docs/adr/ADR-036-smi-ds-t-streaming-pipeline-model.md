@@ -422,9 +422,21 @@ split('-') 可取」；对 SHIFTDN 不成立（DVR_SHIFTDN_S 是第 2 输入、m
 → 误算 slot 0。修：索引法**查不到时**回退节点显式 `slot_id`（rt_ds_src 带 PS.SHIFTDN_S=34）→ 正确 emit
 `rtovr-34`（= DVR_SHIFTDN_S）。dvr_map 路径优先不动（保 FPMUL/FPADD/hardsigmoid 等已 work 绑定无回归）。
 
+**SHIFTDN gather broadcast 修正（user 三次订正「文档设计为准」+ docx para 2208-2213）**：SHIFTDN 功能
+`broadcast==0 → 只 SMC_ID==smc_id_en 注入 DVR_SHIFTDN_S（单 SMC）`；`broadcast==1 → SMC_ID<=smc_id_en
+全注入`。gather 须收集全 gather_cnt 个 SMC 的列（para 4664「共 PARAM_SMC_NUM 行」）→ ds_gather 应
+**broadcast=1**。旧版 `broadcast=0` 只 gather SMC_{smc_id_en} 一个 → 固件错位。**sim 抓不到**：
+`shift_dn_unit.py` 忽略指令 broadcast/smc_id_en（用 fallback chain，注释自承「spec gap，完整修正=解码指令
+字段」）+ SMI_DS_T gather 走 model-A `_tick_smi_ds_t_trigger` 直读各 SMC storage → sim bit-perfect 但固件
+错、仅 VCS 暴露。修 `broadcast=0→1`（固件层；sim model-A 不受影响、bit-perfect 不破）。固件现
+`BROADCAST=1, SMC_ID_EN=gather_cnt-1`（K=8→7 全注入 / matmul_q_dst K=4→3）。⚠ 遗留债务
+**DEBT-036-SHIFTDN-BCAST-SIM**：shift_dn_unit 仍不解码 broadcast/smc_id_en（model-A），升 Accepted 须让
+sim 解码指令字段 + VCS 实测 broadcast=1 真 gather 全 SMC（注意：compute 单元 smc_id_en 无 broadcast 字段、
+语义不同 = docx para 2114/2192「与一般计算模块有差别」）。
+
 **验收**：5 个 SMI_DS_T 算子（matmul_q_dst/_k8/fp16_q_dst/fp16_full_dst/unit_ds_transpose）ON exit=0 +
 8 SMC bit-perfect；OFF 回归 exit=0。固件现含 **`rtovr-34 SEL=源端口`**（matmul_q_dst SEL=32 / unit_ds_transpose
-SEL=31）路由 DVR_SHIFTDN_S。pytest 149 passed
+SEL=31）路由 DVR_SHIFTDN_S + **`ds_gather BROADCAST=1`**。pytest 149 passed
 （+可证伪 SMT 单测：ds_gather 排程晚 ds_src_read >=2 拍 = UR_lat1+RtoVR_latch1，证路由边非 no-op）。
 SMT 影响低（单 prologue 1 t_latch + 3 约束，strict 分支）。`still_holds: proposed`，升 Accepted 仍卡 VCS
 （SHIFTDN 经 slot 34 路由的真时序）。
