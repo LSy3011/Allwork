@@ -890,5 +890,60 @@ class TestSmiDsTS3cIntegrityGate(unittest.TestCase):
                         "OFF 路径门豁免（已知 backdoor 参考、不挂门）")
 
 
+class TestADR038PairedB2Contract(unittest.TestCase):
+    """ADR-038 契约门（hco BLOCK + VCD 确证）：SMI_DS_T 必须配对 B=2 发射。
+
+    VCD 实测（tb_dst.vcd）：当前 model-A 单 gather → RTL 只填 lo slot、hi slot 饿死
+    → `hi_ready` 永 0 → `start_out` 永 0 → 输出全 0（unit_ds_transpose VCS FAIL 8/8）。
+    表598：转置每组两指令、intlv_en=1、intlv_in|intlv_out≥1。
+
+    **当前两测均 expectedFailure（= 套件绿）**；ADR-038 实现后变 unexpected-success（红），
+    提示摘掉 @expectedFailure 装饰器、契约转为强制门。详见 docs/adr/ADR-038。
+    """
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "sim", _ROOT / "verification_v2"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _dst_dfg(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        from verification_v2.ops.cross_smc_unit_op import UnitDataShuffleTransposeOperator
+        spec = HardwareSpec.load("hw_config")
+        return UnitDataShuffleTransposeOperator().get_dfg(spec=spec)
+
+    @unittest.expectedFailure
+    def test_smi_ds_t_emits_pair_b2(self):
+        """门 1（emit）：DST datapath 须 emit **两次** gather（B=2 填 lo+hi 两 slot）+
+        ds_transpose intlv_en=1 且 intlv_in|intlv_out≥1（表598）。单 gather → RTL 永不出数。"""
+        ops = self._dst_dfg()
+        gathers = [o for o in ops if o.op_type.upper() == "SHIFTDN"
+                   and "ds_" in o.trace_id]
+        self.assertEqual(len(gathers), 2,
+                         f"B=2 须 emit 两次 gather 填 lo+hi，实得 {len(gathers)}（hi slot 饿死）")
+        ds_t = next(o for o in ops if o.op_type.upper() == "SMI_DS_T")
+        self.assertEqual(ds_t.metadata.get("intlv_en"), 1, "表598：配对 intlv_en 必为 1")
+        self.assertGreaterEqual(
+            (ds_t.metadata.get("intlv_in") or 0) + (ds_t.metadata.get("intlv_out") or 0), 1,
+            "表598：intlv_in 和 intlv_out 至少一个为 1")
+
+    @unittest.expectedFailure
+    def test_sim_gates_on_both_slots(self):
+        """门 2（sim，hco BLOCK#2）：SmiDsTUnit 须镜像 RTL `start_out`——仅 lo slot（单 tile）
+        ready 时**不得出 DATA_OUT**，须等 hi slot（第二 tile）也 ready。当前一次性 transpose
+        单 tile 即出数 = model-A 静默假绿（结构性功能缺口被掩盖）。"""
+        self._paths()
+        from smc_simulator.units.smi_ds_t_unit import SmiDsTUnit
+        u = SmiDsTUnit(smc_num=8, lanes=1, word_lanes=8, element_bits=16, latency=0)
+        # 只喂一个 tile（lo slot）；B=2 配对须两个 tile 才出数
+        u.evaluate({"valid": 1, "tile": [[1.0] for _ in range(8)]}, cycle=0)
+        out = [r for r in (u.tick() for _ in range(20)) if r is not None]
+        self.assertEqual(len(out), 0,
+                         "仅 lo slot（单 tile）不得出数——须等 hi slot ready（镜像 RTL hi_ready）")
+
+
 if __name__ == "__main__":
     unittest.main()
