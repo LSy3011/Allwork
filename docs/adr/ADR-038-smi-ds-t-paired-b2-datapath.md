@@ -123,6 +123,31 @@ RTL 两 bit 精确语义（已读 `smi_ds_t.v`）：
 - `tests/unit/test_smi_ds_t.py::test_smi_ds_t_sim_gates_on_both_slots`：sim 在仅 lo ready / 仅 1 次 issue 时**不得出数**（镜像 RTL `start_out`），专杀 model-A 静默单 tile。
 - 方案 C harness：把「`smi-ds-t-*` 配对存在性 + `hi_ready` 达成」加入 VCS 逐事件 diff 断言，作该 datapath oracle。
 
+## 实现落地（2026-06-26，Stage-I，sim+pytest 绿，still_holds 仍 proposed 卡 VCS）
+
+配对 B=2 修复已落地（纯 compiler，无新 axiom、无 hw_config/iq_registry 改动）：
+
+- **DFG（`_inject_smi_ds_t_transpose`，5 算子共享）**：emit 第二条 gather `ds_gather_1`（SHIFTDN，
+  broadcast=1）填 hi slot。关键 SAT 修复：`ds_gather_1` 经**松弛 RAW 边** `depends_on=["ds_src_read"]`
+  （非 g0 的刚性 rtovr latch），复用 g0 已路由进 `DVR_SHIFTDN_S` 的同一源——SHIFTDN 微指令仅
+  vld/broadcast/smc_id_en（源走固定寄存器非立即数），故第二条 gather **无需第二条 rtovr 路由 / 无需第二
+  UR 读端口**（绕开 ADR-037 端口占满 UNSAT + 绕开「两 rtovr latch 把两 consumer 钉同拍 → 单 SHIFTDN IQ
+  资源冲突」UNSAT）。`ds_transpose` 设 `intlv_en=1, intlv_in=0, intlv_out=1`（表598 合规）。
+- **sim（`SmiDsTUnit`）**：加 `pairs=2` 配对门（默认 2），`evaluate` 累积 slot，仅填满 pairs 个 slot
+  （issue_cnt==2）才触发出数——镜像 RTL `start_out`，堵 model-A 单 tile 静默假绿（hco BLOCK#2）。
+  lo slot 决定输出行；hi slot 仅满足配对门（值复用 lo，DEBT-038-B2-GATHER）。
+- **sim（`_tick_smi_ds_t_trigger`）**：喂两次 tile 填 lo+hi 开门；hi 复用 lo 数据、**不发重复 DST-SHIFTDN
+  audit 事件**（UR 端点仍单读，与 VCS 单 broadcast 读对齐，不破固件完整性门计数）。
+- **契约门转强制**：`tests/unit/test_smi_ds_t.py::TestADR038PairedB2Contract` 两测的 `@expectedFailure`
+  已摘（现为强制门）；model-A 单 tile 流式单测改喂两 slot。
+- **验证**：pytest 154 passed / 6 skipped（原 152+2xfail）；5 个 SMI_DS_T 算子 e2e 全 `exit=0`、
+  固件完整性门 SUCCESS（unit_ds_transpose 58 / matmul_q_dst 120 / _k8 74 / fp16_q_dst 137 /
+  fp16_full_dst 536 UR 端点全指令-backed）；firmware 实测 emit 两条 SHIFTDN gather + SMI_DS_T
+  body INTLV_EN=1/INTLV_OUT=1。
+- **未闭合（VCS-gated）**：sim 终值 parity 不验跨-SMC 时序、对单 SMI 忠实度近零；升 Accepted 须 VCS 跑出
+  `unit_ds_transpose` bank5 由全 0 → golden（`hi_ready=1 → start_out → data_out` 非零）+ 5 算子全
+  bit-perfect。hi slot 真实第二半列数据 = DEBT-038-B2-GATHER；每算子 intlv 组合 = DEBT-038-INTLV-PER-OP。
+
 ## Consequences
 
 - ADR-033 的转置数值/拓扑结论、ADR-034 的指令驱动单元、ADR-036 的流式流水模型**保留**；本 ADR 只 supersede 三者的

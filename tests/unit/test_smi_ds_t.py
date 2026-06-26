@@ -432,7 +432,8 @@ class TestSmiDsTFp16(unittest.TestCase):
         a = [np.float16((s + 1) * 1.5) for s in range(8)]      # 非对称值
         u = SmiDsTUnit(smc_num=8, lanes=1, word_lanes=8, element_bits=16, latency=0)
         cols = [[a[s]] for s in range(8)]                      # 每 SMC 持 1 fp16 元素
-        u.evaluate({"valid": 1, "tile": cols}, cycle=0)
+        u.evaluate({"valid": 1, "tile": cols}, cycle=0)        # lo slot
+        u.evaluate({"valid": 1, "tile": cols}, cycle=0)        # ADR-038：hi slot 填满配对门 → 触发
         out = []
         for _ in range(4):
             r = u.tick()
@@ -465,9 +466,11 @@ class TestSmiDsTS2Streaming(unittest.TestCase):
 
     def test_streaming_transpose_no_gate(self):
         # evaluate(整 tile) → tick 逐拍出行对齐词；转置数值正确（无 is_ready/raise gate）
+        # ADR-038：配对门 pairs=2，须填 lo+hi 两 slot 才出数（lo slot 决定输出行）。
         X, tile = self._tile()
         u = SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32, latency=0)
-        u.evaluate({"valid": 1, "tile": tile}, cycle=0)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)        # lo slot
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)        # hi slot → 触发
         out = []
         for _ in range(8):
             r = u.tick()
@@ -488,7 +491,8 @@ class TestSmiDsTS2Streaming(unittest.TestCase):
         _, tile = self._tile()
         N = 16
         u = SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32, latency=N)
-        u.evaluate({"valid": 1, "tile": tile}, cycle=0)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)        # lo slot
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)        # ADR-038：hi slot → 触发 latency pipeline
         first_word_tick = None
         for c in range(N + 8):
             r = u.tick()
@@ -500,12 +504,15 @@ class TestSmiDsTS2Streaming(unittest.TestCase):
         self.assertEqual(first_word_tick, N, f"第一个 DATA_OUT 应在第 {N} 次 tick（0-based）出")
 
     def test_evaluate_idempotent_until_done(self):
-        # 已触发后重复 valid 不重置（幂等）；transpose_tile 纯核可独立验证（既有 test_transpose_numeric）
+        # ADR-038：填满 pairs=2 个 slot 触发后，再来 valid 不重置（幂等）；transpose_tile 纯核可独立验证。
         _, tile = self._tile()
         u = SmiDsTUnit(smc_num=4, lanes=4, word_lanes=4, element_bits=32, latency=0)
-        u.evaluate({"valid": 1, "tile": tile}, cycle=0)
+        u.evaluate({"valid": 1, "tile": tile}, cycle=0)   # lo slot：尚未填满配对门 → 不触发
+        self.assertEqual(len(u._out_words), 0, "仅 lo slot 不应触发（hi_ready=0）")
+        u.evaluate({"valid": 1, "tile": tile}, cycle=1)   # hi slot：填满 → 触发装 FIFO
         n0 = len(u._out_words)
-        u.evaluate({"valid": 1, "tile": tile}, cycle=1)   # 重复触发应被忽略
+        self.assertGreater(n0, 0, "lo+hi 两 slot 满应触发")
+        u.evaluate({"valid": 1, "tile": tile}, cycle=2)   # 已触发后重复 valid 应被忽略
         self.assertEqual(len(u._out_words), n0, "已触发后重复 valid 不应重装 FIFO")
 
 
@@ -897,8 +904,8 @@ class TestADR038PairedB2Contract(unittest.TestCase):
     → `hi_ready` 永 0 → `start_out` 永 0 → 输出全 0（unit_ds_transpose VCS FAIL 8/8）。
     表598：转置每组两指令、intlv_en=1、intlv_in|intlv_out≥1。
 
-    **当前两测均 expectedFailure（= 套件绿）**；ADR-038 实现后变 unexpected-success（红），
-    提示摘掉 @expectedFailure 装饰器、契约转为强制门。详见 docs/adr/ADR-038。
+    **ADR-038 实现后（2026-06-26）：配对 B=2 已落地，两门转为强制门（@expectedFailure 已摘）。**
+    详见 docs/adr/ADR-038。
     """
 
     @staticmethod
@@ -915,7 +922,6 @@ class TestADR038PairedB2Contract(unittest.TestCase):
         spec = HardwareSpec.load("hw_config")
         return UnitDataShuffleTransposeOperator().get_dfg(spec=spec)
 
-    @unittest.expectedFailure
     def test_smi_ds_t_emits_pair_b2(self):
         """门 1（emit）：DST datapath 须 emit **两次** gather（B=2 填 lo+hi 两 slot）+
         ds_transpose intlv_en=1 且 intlv_in|intlv_out≥1（表598）。单 gather → RTL 永不出数。"""
@@ -930,7 +936,6 @@ class TestADR038PairedB2Contract(unittest.TestCase):
             (ds_t.metadata.get("intlv_in") or 0) + (ds_t.metadata.get("intlv_out") or 0), 1,
             "表598：intlv_in 和 intlv_out 至少一个为 1")
 
-    @unittest.expectedFailure
     def test_sim_gates_on_both_slots(self):
         """门 2（sim，hco BLOCK#2）：SmiDsTUnit 须镜像 RTL `start_out`——仅 lo slot（单 tile）
         ready 时**不得出 DATA_OUT**，须等 hi slot（第二 tile）也 ready。当前一次性 transpose

@@ -76,14 +76,17 @@ class SmiDsTUnit:
     """
 
     def __init__(self, smc_num: int, lanes: int = 4, word_lanes: int = 4, element_bits: int = 32,
-                 latency: int = 0):
+                 latency: int = 0, pairs: int = 2):
         """smc_num = PARAM_IN_LINE_NUM = PARAM_SMC_NUM；
         lanes = PARAM_IN_LINE_BYTE_CNT / ELEMENT_BYTE_NUM（fp32: 16/4 = 4，即每 UR 行的元素数）；
         element_bits = 元素位宽（fp32=32 / fp16=16，ADR-035 D2 codec dispatch）；
         word_lanes = 每个 128-bit DATA_OUT 词的元素数（= 128//element_bits：fp32=4 / fp16=8）——
         表596 DATA_OUT=128b，一个转置行（smc_num 元素）拆 ceil(smc_num/word_lanes) 个词发出（para959）。
         latency = ADR-036 S2 流式接口：转置触发到第一个 DATA_OUT 词的固定延迟拍数（取
-        pipeline_delays.yaml 的 SMI_DS_T；0 = 现状即时，Phase B 设 PARAM_SMC_NUM*2=16）。"""
+        pipeline_delays.yaml 的 SMI_DS_T；0 = 现状即时，Phase B 设 PARAM_SMC_NUM*2=16）。
+        pairs = ADR-038（hco BLOCK#2）：配对槽数 = RTL smi_ds_t.v 的 issue_cnt 门（V1.0 无条件
+        配对 → pairs=2）。镜像 start_out=both_issued(issue_cnt==pairs)：须填满 pairs 个 slot
+        （lo+hi）才出 DATA_OUT；仅 lo slot ready 时 hi_ready=0 → 不出数，堵 model-A 单 tile 假绿。"""
         if smc_num < 1:
             raise ValueError(f"smc_num must be >= 1, got {smc_num}")
         if lanes < 1:
@@ -98,6 +101,7 @@ class SmiDsTUnit:
         self.word_lanes = word_lanes
         self.element_bits = element_bits
         self.latency = max(0, int(latency))
+        self.pairs = max(1, int(pairs))   # ADR-038：镜像 RTL issue_cnt 配对门（V1.0=2）
         self._lanes_from_word, self._word_from_lanes = _lane_codec(element_bits)
         # ADR-034 S2-D1：表596 接口寄存器（替 apply_smi_ds_t backdoor 的真 step-driven 实体）
         self.data_out = 0          # 表596 DATA_OUT(128b)：当前发出的转置行词
@@ -110,6 +114,7 @@ class SmiDsTUnit:
         self._out_words: List = []     # 转置产出的 (off, word) 待发队列（经 latency 后逐拍出）
         self._latency_ctr = -1         # -1 = 空闲未触发；>=0 = latency 倒计时中
         self._stream_started = False   # 本条指令的转置已触发
+        self._slots: List = []         # ADR-038：累积的配对 tile（lo, hi, ...）；满 pairs 才触发
         self.data_out = 0
         self.data_out_vld = 0
         self.inst_done = 0
@@ -127,14 +132,22 @@ class SmiDsTUnit:
     #   固定延迟后**每拍发 1 个 DATA_OUT 词**（线速行片输出）。真 SHIFTDN 逐拍 drain 列片 = DEBT-S4，
     #   本阶段输入整 tile 提供、由 latency pipeline 建模时序（S4 VCS 校准精确拍数）。
     def evaluate(self, inputs: dict, cycle: int = 0):
-        """流式驱动：inputs={'valid':bool, 'tile':columns}。valid 触发时转置整 tile（无 gate）→
-        装填行词 FIFO + 启动 latency 倒计时。非触发拍无副作用（幂等，已触发则忽略重复 valid）。"""
+        """流式驱动：inputs={'valid':bool, 'tile':columns}。每个 valid tile = 一次 issue 填一个 slot
+        （lo, hi, ...）。**ADR-038（镜像 RTL start_out）：须填满 pairs(=2) 个 slot 才触发出数**——
+        仅 lo slot 时 hi_ready=0 → start_out=0 → 不出 DATA_OUT（堵 model-A 单 tile 假绿）。
+        触发后转置 lo slot 整 tile → 装填行词 FIFO + 启动 latency 倒计时；已触发则忽略重复 valid（幂等）。"""
         if self._stream_started or not inputs.get("valid"):
             return
         tile = inputs.get("tile")
         if tile is None:
             return
-        rows = self.transpose_tile(tile)          # 纯转置核，无 is_ready/raise gate
+        self._slots.append(tile)
+        if len(self._slots) < self.pairs:         # lo 已填、hi 未到 → hi_ready=0，不触发
+            return
+        # 填满 pairs 个 slot（issue_cnt==pairs）→ start_out。lo slot(slots[0]) 决定输出行；
+        # hi slot 仅满足配对门（unit_ds_transpose hi 不进 golden；真 matmul hi 第二半列 = DEBT-038-B2-GATHER）。
+        lo_tile = self._slots[0]
+        rows = self.transpose_tile(lo_tile)       # 纯转置核，无 is_ready/raise gate
         nword = (self.smc_num + self.word_lanes - 1) // self.word_lanes
         self._out_words = []
         for m in range(self.lanes):

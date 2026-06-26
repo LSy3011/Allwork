@@ -235,7 +235,12 @@ class SystemCluster:
             # 不变、不 double-count SHIFTDN=1 的 hop latency（仅把已有 16 渲染成可观测逐拍事件）→ bit-perfect 守恒。
             self.smi_ds_t_gather_queue = gather_evs
             # ADR-036 S2：流式触发（evaluate，无 gather-gate），转置行词经固定 latency pipeline 逐拍出。
-            unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)
+            # ADR-038（hco BLOCK#2）：SmiDsTUnit 现镜像 RTL start_out（须 pairs=2 个 slot 才出数）。
+            # 喂两次 tile 填 lo+hi 两 slot 开门：lo=真 gather（决定输出行）；hi=配对门 gate-filler——
+            # model-A 不建模第二次物理读（DEBT-038-B2-GATHER），故 hi 复用 lo 数据、**不发重复
+            # DST-SHIFTDN audit 事件**（UR 端点仍单读，与 VCS 单 broadcast 读对齐 + 不破 audit 计数）。
+            unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)   # lo slot（issue 1）
+            unit.evaluate({"valid": 1, "tile": cols}, cycle=self.cycle_count)   # hi slot（issue 2）→ 开门
             # 转置内部无对外可观测信号（表596 仅 DATA_OUT/INST_DONE）→ 非数据 marker（不进 AUDIT-DATA，diff 脚本天然过滤）
             self.logger.info(
                 f"[SMI_DS_T] Cyc{self.cycle_count} TRANSPOSE shape {gc}x{ln} (streaming lat={unit.latency})")

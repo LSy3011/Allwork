@@ -215,12 +215,39 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
             "math": "smi_ds_t_gather(cross-smc columns via DVR_SHIFTDN_S)", **prologue,
         },
     )
+    # ADR-038（hco BLOCK + VCD 确证）：V1.0 RTL smi_ds_t.v 是**无条件配对引擎**——
+    #   start_out = both_issued(issue_cnt==2) & both_open & lo_ready & hi_ready & ~out_phase。
+    #   单条 SMI_DS_T + 单 gather 只填 lo slot、hi slot 饿死 → hi_ready 永 0 → 输出全 0
+    #   （unit_ds_transpose VCS FAIL 8/8，model-A sim 8/8 是自洽假绿）。
+    # 修复 = emit **第二条 gather**（B=2 双读 SHIFTDN）供第二个 tile 填 hi slot。VCD 实证：配对靠同一
+    #   SMI_DS_T IQ 的两拍 cri_vld（非两个 IQ 桶）→ **无需 iq_smi-ds-t-1 第二桶 / hw_config / hco 二轮**。
+    #   两条 gather 复用同一 ds_src_read + 同一 DVR_SHIFTDN_S 路由（单条 SMC_ID_EN-broadcast 读共背
+    #   两次 gather，与 audit「单条广播 ds_src_read 共归属多 SMC DST-SHIFTDN」一致；不另加 UR 读端口
+    #   → 不触发 ADR-037 端口占满 UNSAT）。SHIFTDN 微指令仅 vld/broadcast/smc_id_en（modules.yaml:269
+    #   「data 走源寄存器 DVR_SHIFTDN_S 非立即数」）→ 第二条 gather 读的就是 g0 的 rtovr 已路由进
+    #   DVR_SHIFTDN_S 的同一源，**无需第二条 rtovr 路由指令**。关键：ds_gather_1 经**松弛 RAW 边**
+    #   依赖 ds_src_read（非 g0 的刚性 rtovr latch），故可排到比 g0 晚一拍——绕开「rtovr latch 把两个
+    #   consumer 都钉到 t[src]+delay 同拍 → 单 SHIFTDN IQ 资源冲突 UNSAT」。hi slot 的真实第二半列
+    #   数据 + 精确第二读时序 = DEBT-038-B2-GATHER（VCS-gated）。
+    ds_gather_hi = MIROp(
+        op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather_1",
+        metadata={
+            "depends_on": ["ds_src_read"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 1,
+            "math": "smi_ds_t_gather_hi(B=2 second read of same DVR_SHIFTDN_S → fill hi slot)",
+            **prologue,
+        },
+    )
+    # 表598（docx para4649/4719）：配对组 intlv_en 必为 1、intlv_in|intlv_out 至少一个为 1。
+    #   intlv_in=0：VCD 实测 RTL write-router「!lo_ready→lo else hi」= 先填满 lo 再 hi，与顺序填一致。
+    #   intlv_out=1：满足表598 约束（intlv_in|intlv_out≥1）。每算子精确 intlv 组合按 golden 存储格式
+    #   定（连续 vs 间插，para5130）= DEBT-038-INTLV-PER-OP（实现期 golden-match 钉死）。
     ds_transpose = MIROp(
         op_type="SMI_DS_T", logic_cycle=0, trace_id="ds_transpose",
         metadata={
-            "depends_on": ["ds_gather"], "iq_type": RT.SMI_DS_T, "iq_id": smi_ds_t_iq,
-            "VALID": 1, "intlv_en": 0, "intlv_grp": 0, "intlv_in": 0, "intlv_out": 0,
-            "math": "smi_ds_t_transpose(gather_cnt x lanes)", **prologue,
+            "depends_on": ["ds_gather", "ds_gather_1"], "iq_type": RT.SMI_DS_T, "iq_id": smi_ds_t_iq,
+            "VALID": 1, "intlv_en": 1, "intlv_grp": 0, "intlv_in": 0, "intlv_out": 1,
+            "math": "smi_ds_t_transpose(B=2 paired, gather_cnt x lanes)", **prologue,
         },
     )
     # scatter-after-transpose：现有 broadcast shiftup 消费 a_read → 令 a_read 依赖转置
@@ -229,7 +256,7 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
         deps.append("ds_transpose")
     a_read.metadata["depends_on"] = deps
 
-    return list(ops) + [ds_src_read, rt_ds_src, ds_gather, ds_transpose]
+    return list(ops) + [ds_src_read, rt_ds_src, ds_gather, ds_gather_hi, ds_transpose]
 
 
 class ManualMatmulParallelNOperator(BaseOperator):
