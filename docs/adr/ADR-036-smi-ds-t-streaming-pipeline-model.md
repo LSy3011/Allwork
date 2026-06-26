@@ -461,9 +461,13 @@ stagger），违 ADR-022/023 单 SMI 全局指令流模型，gated on VCS 证明
   读 → 不重触 ADR-023 修的「广播错拍 + compute lockstep → 读 stale」bug。
 - **drain 拍数 = gather_cnt（hco 约束2）**：K=8 算子跨 8 拍 / matmul_q_dst K=4 跨 4 拍。
 - **ds_src_read smc_id_en（副）**：旧版无显式 → payload_factory 默认 PARAM_SMC_NUM-1=7 → K=4 时固件让
-  SMC4-7 也读（user log 见读零）。修为 `smc_id_en=gather_cnt-1`（固件只让持列 SMC 读）。⚠ **sim 仍不按
-  smc_id_en 门控 UR 读**（model-A 全 kernel lockstep 执行）= 遗留 DEBT-036-SMCEN-SIM-GATE，sim log 仍显 8
-  读；固件 VCS-correct，升 Accepted 须 sim 解码 smc_id_en 门控。
+  SMC4-7 也读（user log 见读零）。修为 `smc_id_en=gather_cnt-1`（固件只让持列 SMC 读）。
+- **DEBT-036-SMCEN-SIM-GATE 已兑现（2026-06-26）**：sim 的 kernel 旧版全 kernel lockstep 执行 UR 读写、不按
+  smc_id_en 门控 → 即便固件 smc_id_en=3，sim log 仍显 8 读。修 `kernel.py` 真读/写路径（line ~615/626，
+  非 Phase-2 死路）：解码 `smc_id_en`，`self.smc_id > smc_id_en` 时本 SMC 跳过该读/写（ADR-031：smc_id_en
+  >= SMC_ID 才使能，除 RTOVR 外全单元一致 docx para 637）。缺省 smc_id_en=7 → 全 8 SMC 不变（compute 算子
+  matmul_parallel_n 仍 8/8 读写，bit-perfect 不破）；ds_src_read(=3) → sim log 只 SMC 0-3 读 bank4。sim
+  与固件 smc_id_en 一致。
 
 **验收**：5 个 SMI_DS_T 算子 ON exit=0 + 8 SMC bit-perfect（方案 A 只改事件 log cycle、终值不变）；OFF 回归
 exit=0；pytest 149+2=151（+守恒/drain拍数反证）。`still_holds: proposed`，升 Accepted 仍卡 VCS（逐-SMC

@@ -607,7 +607,13 @@ class ParallelKernel:
                 decoded = decoder.decode(inst_r)
                 d_dict = decoded.to_dict()
                 vld = d_dict.get('VLD') or d_dict.get('VALID') or d_dict.get('re') or d_dict.get('we')
-                if vld in ["VALID", "VLD", 1, "1", True]: 
+                # ADR-031 smc_id_en 门控（DEBT-036-SMCEN-SIM-GATE 兑现）：smc_id_en >= SMC_ID 才使能本 SMC
+                # （除 RTOVR 外全单元一致，docx para 637）。旧版全 kernel lockstep 不门控 → ds_src_read
+                # (smc_id_en=3) 时 SMC4-7 也读出零（user log 见）。门控后未使能 SMC 不发读、与固件 smc_id_en
+                # 一致。缺省 smc_id_en=7 → 全 8 SMC 使能不变（bit-perfect 不破）。
+                _sen = d_dict.get('smc_id_en')
+                _gated = _sen is not None and self.smc_id > int(_sen)
+                if vld in ["VALID", "VLD", 1, "1", True] and not _gated:
                     bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))
                     addr = int(get_field(decoded, 'ADDR', get_field(decoded, 'waddr')))
                     ur_inputs[f'R{i}'] = {'en': True, 'bank': bank, 'addr': addr}
@@ -621,7 +627,10 @@ class ParallelKernel:
                 decoded = decoder.decode(inst_w)
                 d_dict = decoded.to_dict()
                 vld = d_dict.get('VLD') or d_dict.get('VALID') or d_dict.get('we') or d_dict.get('re')
-                if vld in ["VALID", "VLD", 1, "1", True]:
+                # ADR-031 smc_id_en 门控（同读侧）：未使能 SMC 不写。缺省 7 → 全 8 SMC 写不变。
+                _sen_w = d_dict.get('smc_id_en')
+                _gated_w = _sen_w is not None and self.smc_id > int(_sen_w)
+                if vld in ["VALID", "VLD", 1, "1", True] and not _gated_w:
                     # 恢复正式数据路径：从 RtoVR 收割
                     data_val = self.rtovr.get_output(getattr(RtoVROutput, f"UVR_WDATA_{i}"))
                     bank = int(get_field(decoded, 'BANK', get_field(decoded, 'wbank')))

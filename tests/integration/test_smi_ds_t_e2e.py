@@ -106,6 +106,21 @@ class TestSmiDsTChainDrain(unittest.TestCase):
         self.assertEqual(up[0] - dn[0], 16,
                          f"输出 drain 起点须 = gather 起点 + SMI_DS_T(16)；得 {up[0]}-{dn[0]}={up[0]-dn[0]}")
 
+    def test_smc_id_en_gates_ds_src_read(self):
+        """DEBT-036-SMCEN-SIM-GATE：ds_src_read(smc_id_en=gather_cnt-1=3) 时 sim 只让 SMC 0-3 读 bank4
+        （不再 SMC4-7 读零）；compute 算子(smc_id_en=7) 仍全 8 SMC 读写（缺省不门控）。"""
+        import re as _re
+        text = self._sim_log("matmul_q_dst")
+        bank4 = sorted({int(m.group(1)) for l in text.splitlines() if "Tag:READ" in l and "Bank:4 " in l
+                        for m in [_re.search(r"SMC_ID:(\d+)", l)] if m})
+        self.assertEqual(bank4, [0, 1, 2, 3],
+                         f"K=4 时 ds_src_read 只应 SMC 0-3 读 bank4（smc_id_en=3 门控），得 {bank4}")
+        text2 = self._sim_log("matmul_parallel_n")
+        bank5 = sorted({int(m.group(1)) for l in text2.splitlines() if "Tag:WRITE" in l and "Bank:5 " in l
+                        for m in [_re.search(r"SMC_ID:(\d+)", l)] if m})
+        self.assertEqual(bank5, list(range(8)),
+                         f"compute 算子(smc_id_en=7) 仍全 8 SMC 写，得 {bank5}")
+
 
 class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
     """ADR-036 S3-a：fp16_matmul_full_dst real-gather（去 gather backdoor，走真固件 bank6 UR 读）。
