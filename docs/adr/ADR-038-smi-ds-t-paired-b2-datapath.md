@@ -148,6 +148,27 @@ RTL 两 bit 精确语义（已读 `smi_ds_t.v`）：
   `unit_ds_transpose` bank5 由全 0 → golden（`hi_ready=1 → start_out → data_out` 非零）+ 5 算子全
   bit-perfect。hi slot 真实第二半列数据 = DEBT-038-B2-GATHER；每算子 intlv 组合 = DEBT-038-INTLV-PER-OP。
 
+### VCS 实测（2026-06-26，方案 C 波形 diff，tb_dst.vcd）——B=2 门已证、暴露两层下游 bug
+
+跑 `unit_ds_transpose`（fresh build 含两条 SHIFTDN gather）→ VCS → `timing_diff --bank 5`：
+
+- **✅ ADR-038 核心机制 VCS 证实**：`u_ds_t` 内部信号 **由全死翻活**——`hi_ready`=1@7115ns、`start_out`=1@7115ns、
+  `data_out_vld`=1@7145ns、`data_out` 输出**非零转置数据**（前为 `hi_ready/start_out/data_out` 永 0、bank5 全 0）。
+  **配对 B=2（第二条 SHIFTDN gather 填 hi slot）就是 `hi_ready` assert 的 load-bearing 修复，VCS 波形级坐实。**
+- **🔴 仍未 bit-perfect（bank5 全 0）= 两层独立下游 bug（非 B=2 机制问题）**：
+  1. **[DEBT-036-DST-BCAST-FEED-TIMING：data_out→bank5 scatter 完全不落]** —— bank5 `bram_bank_inst[5].dina`
+     **全程字面零**：smi_ds_t 在 7265-7295ns 产出 4 个非零 data_out 词，但从未到达 bank5 写端口。SHIFTUP
+     广播→UR-write 喂数路径（或其时序：data_out_vld@7145ns 领先实际数据词@7265ns ~12 拍）在 RTL 未打通。
+     这是 bank5=0 的**直接主因**，比 hi-slot 数据更上游。
+  2. **[DEBT-038-B2-GATHER：hi slot 须携 low-16 半字，现为 high-16 重复]** —— data_out 按 8×16-bit 解
+     （smi_ds_t.v 头注：8×16-byte tile = 8×8 的 16-bit 元素矩阵）= `3f88,3f88,3f94,3f94,...`，golden
+     间插 = `3f88,764f,3f94,fa7b,...`：**偶位(high-16)对、奇位(low-16)错成 high-16 重复**。`intlv_out=1`
+     令输出间插 lo/hi 两 slot 行——lo 携各 fp32 high-16、**hi 须携 low-16**（para5143「连续两读」读连续 16-bit
+     半字），gate-filler 复制 lo 无法供给。即便下游打通，hi 内容仍须修对才 bit-perfect。
+- **结论**：ADR-038 的 B=2 配对修复**对症且 VCS 证实有效**（dead→alive）；`still_holds` 仍 `proposed`，
+  升 Accepted 须先闭合上述两层（先 #1 喂数路径打通见 bank5 收到 data_out，再 #2 hi 半字修对）。
+  方案 C 时序 diff 在此精确定位到 bug 层级与坐标（信号/拍/16-bit 偶奇位），印证其作 cross-SMC oracle 的价值。
+
 ## Consequences
 
 - ADR-033 的转置数值/拓扑结论、ADR-034 的指令驱动单元、ADR-036 的流式流水模型**保留**；本 ADR 只 supersede 三者的
