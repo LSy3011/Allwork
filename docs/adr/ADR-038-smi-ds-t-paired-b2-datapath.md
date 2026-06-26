@@ -95,15 +95,26 @@ RTL 两 bit 精确语义（已读 `smi_ds_t.v`）：
 - **[BLOCK]** model-A sim `sim/smc_simulator/units/smi_ds_t_unit.py`（一次性转置、无 2-slot 门）必须改成镜像 RTL
   `start_out`（lo+hi 双 ready + issue_cnt==2 才出数），否则下次配对回归仍静默假绿。
 
-## 修复方向（APPROVE-with-conditions，本 ADR 仅定方向不改代码）
+## 修复方向（APPROVE-with-conditions）
 
-动 emitter/DFG/sim，**无需新 axiom**（无新物理约束；Bank 冲突/端口/延迟常量不变，配对+2 拍 stagger 仍可静态 latency 对齐）：
+### 实现期 VCD 确证机制（2026-06-26，追 tb_dst.vcd 锁死）
+追 `u_ds_t` 内部信号逐拍（cyc550-560）确证修法，**比 ADR 初稿的"发配对桶"更窄更准**：
+- **配对（两次 issue）已发生**：`cri_ds_t=00001` 在 cyc550-551 连两拍 cri_vld=1 → `issue_cnt` 0→1→2、`both_open`=1。
+  **配对靠同一 SMI_DS_T IQ 的两拍 cri_vld（IQ93 单流），不是两个 IQ 桶** → **无需改 hw_config/iq_registry、无需 `iq_smi-ds-t-1` 第二桶、无 hco 二轮**。
+- **真缺口 = gather 数据只够一个 tile**：`wr_vld0` 填 lo slot 8 beats（cyc551-559）后 `crd_vld` 数据流枯竭，
+  `wr_vld1`（hi slot）cyc560 才起、拿不满 8 beats → `br1/hi_ready` 永 0 → `start_out` 永 0。
+- **`intlv_in=0` 顺序填已对**（RTL write-router「!lo_ready→lo else hi」= 先填 lo 再 hi，与实测一致）。
+- → **核心修复 = emit 第二次 gather（B=2 双读 SHIFTDN，供第二个 tile 填 hi slot）**。对 `unit_ds_transpose`，hi slot 数据
+  甚至不进 golden（2 词 UR 写只取 lo 转置前 2 词），只需让 `hi_ready` 能 assert；真 matmul 的 hi tile 携真实第二半列。
 
-- `verification_v2/ops/matmul_op.py`（`_inject_smi_ds_t_transpose`）：发配对 T0/T1 + B=2 双 gather / 双 ds_src_read 填 lo/hi。
-- `src/driver/payload_factory.py`：`INTLV_EN/GRP/IN/OUT` 从硬编码 0 改为配对取值（intlv_en=1、同组 grp、in/out 按算子存储格式）。
-- `src/driver/emitter.py`：产出 `iq_smi-ds-t-1` 配对桶。
-- `sim/smc_simulator/units/smi_ds_t_unit.py` + `system/cluster.py`：2-slot 配对门 + 双 ready 输出，镜像 RTL。
-- 可能 `src/synthesis/ucode_solver.py`：配对 + 2 拍 stagger 排程（latency 静态对齐，无需新 axiom）。
+### 改动点（动 DFG/sim，**无需新 axiom、无需 hw_config/hco 二轮**）
+- `verification_v2/ops/matmul_op.py`（`_inject_smi_ds_t_transpose`）：**emit 第二次 ds_src_read + RTOVR + SHIFTDN gather（B=2）**
+  填 hi slot；`ds_transpose` 设 `intlv_en=1`（表598 合规；RTL 不解码但据 spec 置位）。
+- `sim/smc_simulator/system/cluster.py`（`_tick_smi_ds_t_trigger`）+ `units/smi_ds_t_unit.py`：模型升 2-tile→2-slot +
+  **输出门控 lo+hi 双 ready（镜像 RTL `start_out`）**，专杀 model-A 单 tile 静默假绿（hco BLOCK#2）。
+- `src/driver/payload_factory.py`：确认 `intlv_en=1` 经 metadata→payload 传到（physical_instructions 现示 INTLV_EN）。
+- `src/synthesis/ucode_solver.py`（可能）：第二 gather 的排程 + 2 拍 stagger（latency 静态对齐，无新 axiom）。
+- **不需要**：`iq_smi-ds-t-1` 第二 IQ 桶（配对是同 IQ 两拍）、hw_config iq_registry 改动。
 
 ## 建议测试（可证伪）
 
