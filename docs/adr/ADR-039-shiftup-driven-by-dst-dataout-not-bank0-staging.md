@@ -90,6 +90,14 @@ ds_src_read(UR_READ 列对齐) → SHIFTDN gather ×2(B=2, ADR-038) → ds_trans
   **采纳选项 (a)**：为 unit_ds_transpose 写**独立注入**（锚在 ds_transpose/SMI_DS_T 节点，产 SHIFTUP(dep=
   ds_transpose)+RTOVR(sel=29)+UR_WRITE），`_inject_shiftup_broadcast` **一字不改**。⚠ 绝不走选项 (b) 改共享
   helper（那等于动 matmul/fma、须撤 D3 并补 fma/matmul 回归）。
+  **⚠ 深层耦合（落码前必知，比 hco C2 初版更深）**：`_inject_smi_ds_t_transpose`（matmul_op.py:102，亦 5 算子
+  共享）**自身也锚 a_read**——line 134-139 `a_read = next(... meta_name=="a" && role=="input"); if a_read is
+  None: return ops`，且 line 226-230 把 `ds_transpose` append 进 `a_read.depends_on` 实现 scatter-after-
+  transpose。故删 a_read 会让 **两个** shared helper（broadcast + smi_ds_t）都失效/早退。选项 (a) 的独立注入
+  须**整条自建**（gather+transpose+shiftup+rtovr+write 不经任一 shared helper 的 a_read 锚），或把 a_read 锚
+  替换成 ds_transpose 锚但仅在 unit_ds_transpose 分支——**不得改两 helper 的共享签名/默认行为**（matmul/fma 仍
+  靠 a_read 锚）。建议：unit_ds_transpose 走专用 builder，B=2 gather 逻辑从 `_inject_smi_ds_t_transpose` 提取
+  为**不锚 a_read 的纯函数**供两边复用（重构 = 行为不变的等价抽取，须 fma/matmul byte 回归门守）。
 - **[C3 · smc_id_en 广播门]** shift_up.v:44 捕获门 = `vld & broadcast & (SMC_ID[4:0] <= smc_id_en)`。8 SMC 全
   捕获须 `broadcast=1 & smc_id_en=PARAM_SMC_NUM-1`。`PARAM_SMC_NUM=8 → smc_id_en=7`（承 ADR-031 全单元 emit
   N-1）；须确认 spec 链把 8 传进注入器（非默认 32→31）。
