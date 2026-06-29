@@ -114,6 +114,26 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
     16 连续拍），但**现 sim 时序盲、无法验证/承载**，强行落只换一种退化。故已回退 emit、保 II-spaced。
     完整修需：① emit 16 连续 BODY（已验证可行，见上）+ ② sim SMI_DS_T 升真流式 latency pipeline（feed 逐拍
     就绪与 SHIFTUP 消费对齐，= DEBT-038-B2-GATHER/spec §6 同源）+ ③ VCS 逐拍 bank5 bit-match 验收。三者同改。
+  - 🔬 **VCS 实证（2026-06-29，proposed 固件跑 `tb_dst_fp16`，VPD→VCD）：bank5 仍全 0，DEBT 坐实**。波形：
+    `u_ds_t.data_out_vld` 窗口 = cyc **662–678**（16 拍）；BLOCK-3 EXACT 锚定**有效果**——首个 `o_cru_shiftup`
+    活动移到 cyc **668（窗口内）**，比旧固件 689（窗口尾后 11）早；**但** 16-beat 主流落在 cyc **692–723**
+    （`smc_*.u_shift_up.cru_shiftup_out` 每隔一拍 NZ/zero 交替 = II=2 strided，跨 ~32 拍），**整段在 data_out
+    窗口（662–678）关闭后**才发 → 广播窗口外零 → bank5=0。**双重病灶**：(a) II-strided 非 DLY=1 连续；
+    (b) 流起拍（~692）比窗口首真数据（~668）晚 ~24 拍——`delays["SMI_DS_T"]=19` 的 SMT-拍锚定未对齐 RTL
+    实际 collect+drain 窗口相位。修 ① 须同时校准**流起拍 == data_out 窗口首 beat**（不只连续，还要对相位）。
+  - 🔬🔬 **深挖实测（2026-06-29，①②③ 攻坚，VCS×4 全 bank5=0，已回退）——crux = RTL issue→execute 时序模型**：
+    1. **1-slot HDR-loop emit**：sim 复制成 16 连续 beat（7/8 行对，仅 off-by-one），但 **RTL 不复制**
+       （`o_cru_shiftup` 仅 3 跳变）——RTL IQ 引擎不把 1-slot loop 当连续流。⇒ 必须**显式 unroll**。
+    2. **显式 unroll（16 条真 BODY，HDR LOOPS=0）**：RTL 确产 16 beat，但**分裂** = 2 拍在窗口内
+       (1578-1579) + 14 拍在窗口后(1602-1615)、中间 ~22 拍 gap；bank5 仍 0。
+    3. **窗口绝对拍随固件大小漂移**（proposed 662 → 1-slot 597 → unroll 1572）⇒ **TB 的指令 AXI 加载延迟
+       主导绝对时序**，加载 gap 打断流。即此 TB 绝对时序 load-dominated、不直接代表真 datapath 相对相位。
+    4. **sim 侧另有 off-by-one**（连续 emit 下 feed[0] 被流水线吞、bank5[k]=feed[k] for k≥1）；**不能**靠
+       改共享 `_dst_bcast_feed_beat` 路径修（实测 prime hack **打破 matmul_q_dst/fp16_matmul_full_dst**）。
+    5. ③ feed eager-fill（cluster 触发即填满 feed）单独无害但不足以解 off-by-one。
+    **结论**：② 相位对齐是真 crux，非编译器 SMT-拍锚定能控——需 **RTL issue→execute 时序模型**（ds_transpose
+    issue 拍 ↔ shiftup issue 拍 ↔ data_out 窗口，扣除 IQ/AXI 加载延迟）+ **TB 全 IQ 预加载后再执行**（消除
+    load-gap），很可能需 RTL/TB 设计者输入。已全部回退到 proposed（II-strided，回归绿）；不留半成品代码。
 - **DEBT-041-ADDR-MAP（VCS-gated）**：16-beat→bank5 地址映射 + golden hi slot 8 行真值（含 spec §6 12 前导零 beat 结构）；
   现 golden 只忠实 lo slot 8 行。
 - **DEBT-041-WINDOW-ELEMWIDTH（当前无害）**：`SMI_DS_T_WINDOW=16` 是单常数，spec 说应 = OUT_ROWS×2 跟元素宽度
