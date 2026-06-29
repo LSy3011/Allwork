@@ -87,7 +87,15 @@ class PhysicalAssembler:
             max_t_global = max(op.metadata.get("global_t", 0) for op in ops)
             total_iterations_needed = (max_t_global // II) + num_iterations
             loops_val = total_iterations_needed - skip_iterations - 1
-            
+
+            # ADR-038/039：SMI_DS_T 是 RTL 无条件配对引擎（start_out 要 issue_cnt==2 + lo/hi 双 slot），
+            # 其 issue 次数 = 配对(B=2)，**不能依赖 num_iterations(输出词数)**。fp16(8 元素=1 词)下
+            # num_iterations=1 → loops_val=0 → 只 1 次 issue → issue_cnt=1 → both_open=0 → 永不出数
+            # （VCS 实证 tb_dst_fp16）。fp32(2 词)是 num_iterations=2 巧合给 2 issue。强制 SMI_DS_T
+            # loops_val>=1（≥2 次 body fire = 2 拍 cri_vld = 配对成立），与输出词数解耦。
+            if "smi-ds-t" in iq_name.lower():
+                loops_val = max(loops_val, 1)
+
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=l_init, trace_id=f"hdr_{iq_name}",
                 header=SMIHeader(vld=1, level=1, loops=loops_val, inc=iq_max_stride, inc_embed=hdr_inc_embed), 
