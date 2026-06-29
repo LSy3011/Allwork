@@ -165,7 +165,11 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
         →UR_WRITE bank5`。C2 选项(a)：用 a_read-无关的 `_build_smi_ds_t_chain` 建前缀链 + 自建广播/写回，
         **不调共享 `_inject_shiftup_broadcast`/`_inject_smi_ds_t_transpose`**（matmul/fma 不受影响）。"""
         # 1) gather+transpose 前缀链（不锚 a_read；含 ADR-038 B=2 双 gather）
-        chain_nodes, ds_transpose = _build_smi_ds_t_chain(self.smi_ds_t_config(spec), spec)
+        cfg = self.smi_ds_t_config(spec)
+        chain_nodes, ds_transpose = _build_smi_ds_t_chain(cfg, spec)
+        # 转置行 = K 元素，按 word_lanes 拆成 n_words 个 128b 词（fp32 word_lanes=4→2 词；fp16=8→1 词）
+        word_lanes = int(cfg.get("word_lanes", 4))
+        n_words = max(1, self.K // word_lanes)
 
         # 2) 广播 + 写回，锚在 ds_transpose（C1 保留 RTOVR sel=29；C3 smc_id_en=PARAM_SMC_NUM-1）
         smc_num = self._get_hw_param(spec, "PARAM_SMC_NUM", 8)
@@ -187,9 +191,9 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
                   dst_datapath_value=True,
                   math="ur_write(broadcast row → bank5)")
         bcast_ops = b.get_dfg()
-        # 转置行 = K 元素 = K//4 词，inner_loops=K//4-1（K=8 → 2 词 → 1）
+        # 转置行 = K 元素 = n_words 词（fp32:2 / fp16:1），inner_loops=n_words-1
         for op in bcast_ops:
-            op.metadata.update({"shape": [self.K], "inner_loops": self.K // 4 - 1,
+            op.metadata.update({"shape": [self.K], "inner_loops": n_words - 1,
                                 "outer_loops": 0, "inner_inc": 1, "outer_inc": 0})
         # rtovr_deps：消费者 out 经 RTOVR(sel=29) 从 SHIFTUP 取数（dependency_axioms 建 t_latch）
         for op in bcast_ops:
@@ -204,3 +208,51 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
                                 "sel": op.metadata.get("sel", -1),
                             }
         return chain_nodes + bcast_ops
+
+
+class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
+    """ADR-039（user 2026-06-29 选 fp16 最小载体先闭合 bank5）：unit_ds_transpose 的 fp16 版。
+
+    fp16 = 1 个 16-bit element = SMI_DS_T 转置的天然粒度（无 fp32「2 element 拆成两行」复杂度）：
+    8 SMC 各持 1 fp16（列对齐于 src_bank）→ SHIFTDN gather → SMI_DS_T 转置 1×8 → **1 个 128b 词
+    （8 lane×16-bit）** → SHIFTUP 广播 → 各 SMC 写 bank5 1 词。**golden：每 SMC = 8 fp16 行 [a0..a7]**。
+    用来端到端验证 D1 硬连 datapath（SHIFTUP←SMI_DS_T→bank5）能否收到正确广播数据，绕开 fp32 的
+    高/低半字拆分 + Q2 hi-slot 复杂度（DEBT-038-B2-GATHER）。"""
+
+    @property
+    def element_bits(self) -> int:
+        return 16   # fp16：输出按 8 lane×16-bit 解码（base.py 默认从 DFG 读，本 op 节点无 precision → 显式覆盖）
+
+    @property
+    def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "a": {"bank": 0, "offset": 0, "role": "input", "precision": "fp16",
+                  "stride": 1, "smc_layout": "broadcast"},
+            "y": {"bank": 5, "offset": 0, "role": "output", "precision": "fp16",
+                  "smc_layout": "partitioned"},
+        }
+
+    def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
+        # fp16：8 lane×16-bit/词 → 8 元素恰 1 词（word_lanes=8）；element_bits=16 选 fp16 codec。
+        return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+                "gather_smc_cnt": self.K, "lanes": 1, "word_lanes": 8, "element_bits": 16}
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        self._smc_num = smc_num
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.K).astype(np.float16)   # 8 个 fp16，列对齐分散到 8 SMC
+        return {"a": a}
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"].astype(np.float16)
+        golden = np.tile(a, (self._smc_num, 1))                # 每 SMC 拿完整 8 fp16 行
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"].astype(np.float16)
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        src_logical = self.SRC_BANK * bank_depth
+        for k, prog in enumerate(programs):
+            if k < self.K:
+                prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float16), stride=1)

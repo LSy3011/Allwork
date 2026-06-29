@@ -347,7 +347,8 @@ def _verify_multi_smc_per_smc(case_path, config, cluster, smc_num: int, goldens)
         if ref.ndim != 2:
             # 单 SMC 形状 fallback：仅比对 SMC_0
             kernel = cluster.kernels[0]
-            sim_np = _read_sim_output(kernel, bank, addr, len(ref.flatten()))
+            sim_np = _read_sim_output(kernel, bank, addr, len(ref.flatten()),
+                                      element_bits=ref.dtype.itemsize * 8)
             ok = np.allclose(sim_np, ref.flatten(), atol=atol, equal_nan=True)
             print(f"{'PASSED' if ok else 'FAILED'} {name} (1D golden, SMC_0 only)")
             all_passed = all_passed and ok
@@ -362,7 +363,7 @@ def _verify_multi_smc_per_smc(case_path, config, cluster, smc_num: int, goldens)
         first_fail_detail = None
         for k in range(smc_num):
             kernel = cluster.kernels[k]
-            sim_np = _read_sim_output(kernel, bank, addr, n_rows)
+            sim_np = _read_sim_output(kernel, bank, addr, n_rows, element_bits=ref.dtype.itemsize * 8)
             ref_k = ref[k]
             if np.any(np.isnan(sim_np) & ~np.isnan(ref_k)):
                 if first_fail_detail is None:
@@ -385,7 +386,8 @@ def _verify_multi_smc_per_smc(case_path, config, cluster, smc_num: int, goldens)
             sample = min(3, smc_num)
             for k in range(sample):
                 ref_k = ref[k]
-                sim_k = _read_sim_output(cluster.kernels[k], bank, addr, n_rows)
+                sim_k = _read_sim_output(cluster.kernels[k], bank, addr, n_rows,
+                                         element_bits=ref.dtype.itemsize * 8)
                 print(f"      [SMC_{k}] Golden={ref_k[:min(3,n_rows)].tolist()} | "
                       f"SMC={sim_k[:min(3,n_rows)].tolist()}")
         else:
@@ -393,8 +395,19 @@ def _verify_multi_smc_per_smc(case_path, config, cluster, smc_num: int, goldens)
     return all_passed
 
 
-def _read_sim_output(kernel, bank: int, addr: int, n_rows: int) -> np.ndarray:
-    """从 kernel.ur_bank.storage[bank] 读 n_rows 个 fp32 值（128-bit words 解包）."""
+def _read_sim_output(kernel, bank: int, addr: int, n_rows: int, element_bits: int = 32) -> np.ndarray:
+    """从 kernel.ur_bank.storage[bank] 读 n_rows 个值（128-bit words 解包）。
+    element_bits=32→fp32（4 lane/词）；16→fp16（8 lane/词，ADR-039 fp16 载体）。
+    精度从 golden dtype 推（caller 传 ref.dtype.itemsize*8），避免对 fp16 输出按 fp32 错解码（lane 数 + 位宽全错）。"""
+    if element_bits == 16:
+        from smc_simulator.units.smi_ds_t_unit import fp16_lanes_from_word
+        lanes_per_word = 8
+        n_words = (n_rows + lanes_per_word - 1) // lanes_per_word
+        sim_flat = []
+        for wi in range(n_words):
+            word = int(kernel.ur_bank.storage[bank][addr + wi])
+            sim_flat.extend(fp16_lanes_from_word(word, lanes_per_word))
+        return np.array(sim_flat[:n_rows], dtype=np.float32)
     n_words = (n_rows + 3) // 4
     sim_words = [int(kernel.ur_bank.storage[bank][addr + i]) for i in range(n_words)]
     sim_flat = []
