@@ -134,6 +134,19 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
     **结论**：② 相位对齐是真 crux，非编译器 SMT-拍锚定能控——需 **RTL issue→execute 时序模型**（ds_transpose
     issue 拍 ↔ shiftup issue 拍 ↔ data_out 窗口，扣除 IQ/AXI 加载延迟）+ **TB 全 IQ 预加载后再执行**（消除
     load-gap），很可能需 RTL/TB 设计者输入。已全部回退到 proposed（II-strided，回归绿）；不留半成品代码。
+  - 🧭 **追加根因（2026-06-29，读 TB+RTL FSM 定位）——16 条指令方案物理不可行**：
+    - **TB 已预加载**（`tb_aiacc_top_v04_f.v:2080 g_load_event` → `:2096 smi_apply_iq_en_and_rdi_trigger`，
+      加载在 trigger 前完成）⇒「TB load-dominated」假设**证伪**，窗口绝对漂移只是 trigger 随加载量后移。
+    - **但 SMI IQ 引擎逐条 fetch**（`smi_iq_inst_queen.v` 状态机 `WAIT_RD_REQ→WAIT_SEND`，每指令 2 状态）⇒
+      issue cadence ≈ **fetch-paced 2 拍/指令**，非 1 拍/指令（proposed II-strided 流 692-723 的 2 拍间距
+      其实就是 fetch cadence，非编译器 II）。
+    - **根本矛盾**：SMI_DS_T data_out = 16 beat/16 拍（1 拍/beat 流）；SHIFTUP 用 **16 条指令** 只能 ~32 拍
+      发完 → **追不上窗口**。∴ 显式 unroll 16 指令物理上无法匹配 16 拍窗口（VCS 实测 unroll 流 1602-1615
+      落窗口 1572-1588 后）。
+    - **正解方向**：一条 SHIFTUP 指令令 **vld 持续高 16 拍**（`shift_up.v` 透明寄存器，spec：vld 连续高 +
+      data_in 逐拍变即逐拍广播），而非 16 条指令；1-slot LOOPS=15 试过但 RTL 把 loop 当 fetch-replay（2 拍/次）
+      非连续 vld。**给 RTL 设计者的精确问题**：固件如何表达「单 SHIFTUP 指令 vld 连续高 N 拍」（有无 duration/
+      hold 字段，或 RDI subq 连发模式）？这是 ② 的真正解锁点，超出编译器层。
 - **DEBT-041-ADDR-MAP（VCS-gated）**：16-beat→bank5 地址映射 + golden hi slot 8 行真值（含 spec §6 12 前导零 beat 结构）；
   现 golden 只忠实 lo slot 8 行。
 - **DEBT-041-WINDOW-ELEMWIDTH（当前无害）**：`SMI_DS_T_WINDOW=16` 是单常数，spec 说应 = OUT_ROWS×2 跟元素宽度
