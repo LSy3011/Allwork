@@ -118,11 +118,15 @@ ds_src_read(UR_READ 列对齐) → SHIFTDN gather ×2(B=2, ADR-038) → ds_trans
 而是「复用本 ADR 的 DST datapath 重建」**。向量×矩阵「不需转置即广播」的 SMI_DS_T 透传/旁路细节 = 待 RTL 定。
 
 ## 待 hco / 实现期钉死的开放问题
-- **[Q1 时序]** data_out 流式出 N 行（latency=16 后每拍一行），SHIFTUP 须逐行广播、UR_write 逐行写 bank5
-  consecutive addr。SHIFTUP 指令发射拍 vs data_out_vld 窗口 vs r_data FIFO（DATAQ_DEPTH=128）的精确对齐——
-  VCS 实测 `o_cru_shiftup`@7435ns 在 data_out 词(7265-7295ns)之后，靠 r_data 缓冲。**含 C4 systolic passthrough：
-  广播指令字沿 SMC 链每 hop 1 拍透传，整链 broadcast 延迟 ≠ SHIFTUP 单 hop=1**（pipeline_delays.yaml:16）
-  （DEBT-036-DST-BCAST-FEED-TIMING）。
+- **[Q1 时序 = COND 同步，已由 doc 988 定（2026-06-29）]** data_out 流式出 N 行（latency=16 后每拍一行），
+  SHIFTUP 须逐行广播、UR_write 逐行写 bank5 consecutive addr。**机制 = COND 同步、非固定 DLY**：doc 988
+  「矩阵乘从 UR 读广播数据往往几十个时钟周期…让读广播数据的 SMI_IQ **先行执行**，其他模块用 **COND** 等待
+  广播数据取回、数据整理完毕、进入对应 SMI_IQ 的数据队列，再开始同步执行」。= VCS 实测 `o_cru_shiftup`@7435ns
+  在 data_out(7265-7295ns)之后的原因：SHIFTUP IQ 用 COND 等 ds_t_data_out 进它的 EXTRA_DATA 队列（r_data
+  FIFO，DATAQ_DEPTH=128）再广播。**编译器排程 SHIFTUP/UR-write 须用 COND-wait 语义**（消费广播数据的 IQ
+  COND-等数据入队），不是固定 DLY（DEBT-036-DST-BCAST-FEED-TIMING）。含 C4 systolic passthrough：广播指令字
+  沿 SMC 链每 hop 1 拍透传（pipeline_delays.yaml:16）。⚠ 现编译器 DLY-based 排程须确认能表达 COND-wait，
+  否则 SHIFTUP 发射拍与数据入队拍解耦 → 广播 stale/零（实现期 spike）。
 - **[Q2 hi 半字]** ADR-038 DEBT-038-B2-GATHER：data_out 现 = high-16 重复（gate-filler hi 复制 lo），hi slot
   须携各 fp32 low-16。即便 D1 喂数路径打通，hi 内容仍须修对才 bit-perfect。**两 bug 正交，先 D1（喂数）
   见 bank5 收到 high-16-dup 数据，再修 Q2 hi 半字。**
