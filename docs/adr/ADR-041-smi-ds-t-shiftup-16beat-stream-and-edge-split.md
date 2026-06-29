@@ -106,7 +106,14 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
 ## 风险 / 债务
 - **DEBT-041-STREAM-DLY（hco 二审 catch，VCS-gated，升 Accepted 必修）**：当前 emit 走 IQ-LOOPS@II（II=2）→
   SHIFTUP 每 2 拍发一次（strided），**未达 D2 的 DLY=1 连续 16 拍**。sim model-A 不建模连续流故 proposed 不可见；
-  VCS 逐拍 bank5 16 行 bit-match 会撞墙。修法 = emit 16 连续 BODY（非 HDR-LOOP@II）。
+  VCS 逐拍 bank5 16 行 bit-match 会撞墙。修法（hco）= emit 16 连续 BODY（非 HDR-LOOP@II）。
+  - ⚠ **实测（2026-06-29）：修法不只是 emit 改动，还卡 sim 流式模型**。试过最小 emit 修（stream IQ 用
+    1-slot kernel：真 op 不补 nop 到 II → HDR level-1 loop 每拍回跳 = 连续 DLY=1，`assembler.py` 已验证
+    emit 出连续 abs_t + LOOPS=15 + UR_W0 INC=1）——但 **model-A sim 全 0 FAIL**：sim 的 SMI_DS_T scatter 逐拍填
+    `_dst_bcast_feed` 的时序非真，连续 beat 在 feed 填好前就广播 → 取零。即 emit 修法本身正确（结构上达成
+    16 连续拍），但**现 sim 时序盲、无法验证/承载**，强行落只换一种退化。故已回退 emit、保 II-spaced。
+    完整修需：① emit 16 连续 BODY（已验证可行，见上）+ ② sim SMI_DS_T 升真流式 latency pipeline（feed 逐拍
+    就绪与 SHIFTUP 消费对齐，= DEBT-038-B2-GATHER/spec §6 同源）+ ③ VCS 逐拍 bank5 bit-match 验收。三者同改。
 - **DEBT-041-ADDR-MAP（VCS-gated）**：16-beat→bank5 地址映射 + golden hi slot 8 行真值（含 spec §6 12 前导零 beat 结构）；
   现 golden 只忠实 lo slot 8 行。
 - **DEBT-041-WINDOW-ELEMWIDTH（当前无害）**：`SMI_DS_T_WINDOW=16` 是单常数，spec 说应 = OUT_ROWS×2 跟元素宽度

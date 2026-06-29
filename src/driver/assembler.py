@@ -113,6 +113,12 @@ class PhysicalAssembler:
                 payload={}, stage="HDR", op_type=str(ops[0].op_type)
             ))
             
+            # ADR-041 DEBT-041-STREAM-DLY（hco 二审 catch，**VCS-gated，不在此修**）：D2 要求 stream IQ
+            #   产「同一窗口内连续拍 DLY=1」。本想用 1-slot kernel（真 op 不补 nop 到 II → HDR loop 每拍回跳
+            #   = 连续）实现，但实测：model-A sim 不忠实建模 SMI_DS_T 16 拍连续 data_out 流（feed 逐拍填充
+            #   时序非真），连续 beat 会在 scatter 填 feed 前就读 → 取零、sim 全 0 FAIL。即此修法无法在
+            #   现 sim 验证（sim 时序盲），强行落只会换一种假绿/真退化。故保持 II-slot kernel（II-spaced
+            #   strided），DEBT-041-STREAM-DLY 留待 VCS + sim 流式模型升级（DEBT-038-B2-GATHER/spec §6）一并解。
             kernel_map: Dict[int, Any] = {op.metadata["global_t"] % II: op for op in ops}
             for k in range(II):
                 if k in kernel_map:
