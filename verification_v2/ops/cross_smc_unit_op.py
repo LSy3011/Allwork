@@ -19,7 +19,9 @@ from typing import List, Dict, Any
 from .base import BaseOperator
 from ir.mir.builder import MIROpBuilder
 from driver.hw_resource import ResourceType as RT, PortSlot as PS
-from .matmul_op import _inject_shiftup_broadcast, _inject_smi_ds_t_transpose
+from .matmul_op import (
+    _inject_shiftup_broadcast, _inject_smi_ds_t_transpose, _build_smi_ds_t_chain,
+)
 
 
 class UnitFpAddOperator(BaseOperator):
@@ -156,30 +158,49 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
                 prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float32), stride=1)
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
-        b = MIROpBuilder()
-        # a_read = 广播读转置结果（SHIFTUP 喂）；8 元素 = 2 词 → inner_loops=1
-        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
-                       meta_name="a", logical_addr=0 * 256 + 0, stride=1, role="input", iq_id=30)
-        rt = b.make_op("RTOVR", "rt_a_UR_W0_S", PS.UR_W0_S, [ar])  # sel→SHIFTUP_D=29 by inject
-        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt],
-                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35)
+        """ADR-039 D1：按硬连 DST datapath 重建（弃 bank0 a_read staging）。
+        硬件契约（[[shiftup-shiftdn-only-dst-datapath]] + RTL smi_top.v:384）：SHIFTUP 广播负载硬连
+        = SMI_DS_T.data_out（唯一源），编译器不得用「a_read 读 bank0 → 独立 SHIFTUP 广播」虚构 staging。
+        真链：`ds_src_read→SHIFTDN×2(B=2)→ds_transpose(SMI_DS_T data_out)→SHIFTUP(广播)→RTOVR(sel=29)
+        →UR_WRITE bank5`。C2 选项(a)：用 a_read-无关的 `_build_smi_ds_t_chain` 建前缀链 + 自建广播/写回，
+        **不调共享 `_inject_shiftup_broadcast`/`_inject_smi_ds_t_transpose`**（matmul/fma 不受影响）。"""
+        # 1) gather+transpose 前缀链（不锚 a_read；含 ADR-038 B=2 双 gather）
+        chain_nodes, ds_transpose = _build_smi_ds_t_chain(self.smi_ds_t_config(spec), spec)
 
-        ops = b.get_dfg()
-        for op in ops:
+        # 2) 广播 + 写回，锚在 ds_transpose（C1 保留 RTOVR sel=29；C3 smc_id_en=PARAM_SMC_NUM-1）
+        smc_num = self._get_hw_param(spec, "PARAM_SMC_NUM", 8)
+        smc_id_en = max(int(smc_num) - 1, 0)        # C3：广播到全 SMC（shift_up.v:44 门 SMC_ID<=smc_id_en）
+        SHIFTUP_D_SEL = 29                          # C1：dr_shiftup_out→UR 写口唯一通路 = RTOVR sel=29
+        b = MIROpBuilder()
+        # SHIFTUP 广播 SMI_DS_T.data_out（硬件 wrd_data 硬连，dep=ds_transpose；非 a_read/bank0）
+        # dst_datapath_value：值经 SMI_DS_T data_out→SHIFTUP 广播 datapath 流入，非 compute 公式可算
+        # → rigid 逐-op truth audit 值豁免（仅校时序）；正确性由最终 y bit-perfect parity + VCS 验证。
+        sup = b.make_op("SHIFTUP", "shiftup_ds_t", RT.SHIFTUP, [ds_transpose.trace_id],
+                        broadcast=1, smc_id_en=smc_id_en, smc_id=0, dep_port="D",
+                        dst_datapath_value=True,
+                        math="shiftup_broadcast(SMI_DS_T.data_out)")
+        rt = b.make_op("RTOVR", "rt_ds_t_UR_W0_S", PS.UR_W0_S, [sup],
+                       sel=SHIFTUP_D_SEL, dep_port="D", dst_datapath_value=True,
+                       math="rtovr_route(SHIFTUP_D → UR_W0_S)")
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt],
+                  logical_addr=5 * 256 + 0, stride=1, role="output", is_output=True, iq_id=35,
+                  dst_datapath_value=True,
+                  math="ur_write(broadcast row → bank5)")
+        bcast_ops = b.get_dfg()
+        # 转置行 = K 元素 = K//4 词，inner_loops=K//4-1（K=8 → 2 词 → 1）
+        for op in bcast_ops:
+            op.metadata.update({"shape": [self.K], "inner_loops": self.K // 4 - 1,
+                                "outer_loops": 0, "inner_inc": 1, "outer_inc": 0})
+        # rtovr_deps：消费者 out 经 RTOVR(sel=29) 从 SHIFTUP 取数（dependency_axioms 建 t_latch）
+        for op in bcast_ops:
             if op.op_type.upper() == "RTOVR":
                 prod_ids = op.metadata.get("depends_on", [])
                 if prod_ids:
                     prod_id = prod_ids[0]
-                    for consumer in ops:
+                    for consumer in bcast_ops:
                         if op.trace_id in consumer.metadata.get("depends_on", []):
                             consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
                                 "dvr": op.metadata.get("dvr", -1),
                                 "sel": op.metadata.get("sel", -1),
                             }
-        # 转置行 = 8 元素 = 2 词，inner_loops=1
-        for op in ops:
-            op.metadata.update({"shape": [self.K], "inner_loops": self.K // 4 - 1,
-                                "outer_loops": 0, "inner_inc": 1, "outer_inc": 0})
-        ops = _inject_shiftup_broadcast(ops, {"a"}, spec)
-        ops = _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
-        return ops
+        return chain_nodes + bcast_ops

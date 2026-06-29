@@ -476,9 +476,13 @@ class Auditor:
         if real_gather_on:
             # ds_src_read（真 gather 读）/ broadcast_source（广播 trigger 读）/ smi_ds_t_route（UR→SHIFTDN
             # 的 DVR_SHIFTDN_S 路由 RTOVR）均是 SMI_DS_T datapath 端点，值不在 compute 读端口可见 → 豁免。
+            # ADR-039：unit_ds_transpose 弃 bank0 a_read staging 后，SHIFTUP/RTOVR/UR_WRITE 的值经
+            # SMI_DS_T data_out → SHIFTUP 广播 datapath 流入（非 compute 公式可算、非 compute 读端口可见），
+            # 由最终 y bit-perfect parity + VCS 验证 → rigid 逐-op 审计豁免值（仅校时序）。`dst_datapath_value`
+            # 只打在 unit_ds_transpose 的广播/写回 op（matmul 的 out 是 compute 结果，仍严校）。
             value_exempt_ids = {op.trace_id for op in (ops or [])
                                 if op.metadata.get("ds_src_read") or op.metadata.get("broadcast_source")
-                                or op.metadata.get("smi_ds_t_route")}
+                                or op.metadata.get("smi_ds_t_route") or op.metadata.get("dst_datapath_value")}
 
         # 4. 逐个算子审计（智能分级：详情仅在失败时显示）
         for trace_id, info in theoretical_ops.items():

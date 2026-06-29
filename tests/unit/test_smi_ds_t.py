@@ -950,5 +950,83 @@ class TestADR038PairedB2Contract(unittest.TestCase):
                          "仅 lo slot（单 tile）不得出数——须等 hi slot ready（镜像 RTL hi_ready）")
 
 
+class TestADR039HardwiredDstDatapath(unittest.TestCase):
+    """ADR-039 D1 结构契约门（hco APPROVE-with-conditions C1/C2/C3）：unit_ds_transpose 弃 bank0 a_read
+    staging，按硬连 DST datapath 重建——SHIFTUP 广播负载硬连=SMI_DS_T.data_out（smi_top.v:384）。
+    防回退 a_read round-trip + 守 RTOVR sel=29（dr_shiftup_out→UR 写口唯一通路）。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "verification_v2"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _dst_dfg(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        from verification_v2.ops.cross_smc_unit_op import UnitDataShuffleTransposeOperator
+        spec = HardwareSpec.load("hw_config")
+        return UnitDataShuffleTransposeOperator().get_dfg(spec=spec)
+
+    def test_no_bank0_a_read_staging(self):
+        """C2：无 a_read / broadcast_source 节点（bank0 staging round-trip 已删）。"""
+        ops = self._dst_dfg()
+        self.assertFalse(any(o.trace_id == "a_read" for o in ops),
+                         "不应有 a_read（bank0 staging 虚构，ADR-039 已删）")
+        self.assertFalse(any(o.metadata.get("broadcast_source") for o in ops),
+                         "不应有 broadcast_source（广播源是 SMI_DS_T.data_out，非 bank0 读）")
+
+    def test_shiftup_anchored_on_smi_ds_t(self):
+        """C2：SHIFTUP 依赖 SMI_DS_T(ds_transpose)、broadcast=1（广播 data_out，非 a_read）。"""
+        ops = self._dst_dfg()
+        by_id = {o.trace_id: o for o in ops}
+        sup = next(o for o in ops if o.op_type.upper() == "SHIFTUP")
+        deps = sup.metadata.get("depends_on", [])
+        self.assertTrue(any(by_id.get(d) and by_id[d].op_type.upper() == "SMI_DS_T" for d in deps),
+                        f"SHIFTUP 须依赖 SMI_DS_T(ds_transpose)，实得 deps={deps}")
+        self.assertEqual(sup.metadata.get("broadcast"), 1, "广播负载=data_out → broadcast=1")
+
+    def test_rtovr_sel29_and_write_via_rtovr(self):
+        """C1：dr_shiftup_out→UR 写口唯一物理通路 = RTOVR sel=29(SHIFTUP_D)；UR_WRITE 经该 RTOVR。"""
+        ops = self._dst_dfg()
+        by_id = {o.trace_id: o for o in ops}
+        out = next(o for o in ops if o.op_type.upper() == "UR_WRITE")
+        rt_id = (out.metadata.get("depends_on") or [None])[0]
+        rt = by_id.get(rt_id)
+        self.assertIsNotNone(rt, "UR_WRITE 须经一个 producer")
+        self.assertEqual(rt.op_type.upper(), "RTOVR", "UR_WRITE 须经 RTOVR(C1)")
+        self.assertEqual(rt.metadata.get("sel"), 29, "RTOVR sel 须=29(SHIFTUP_D)，否则 shiftup→UR 无通路")
+        # RTOVR 上游 = SHIFTUP（链路 ds_transpose→SHIFTUP→RTOVR→UR_WRITE）
+        up = by_id.get((rt.metadata.get("depends_on") or [None])[0])
+        self.assertEqual(up.op_type.upper(), "SHIFTUP", "RTOVR 上游须 SHIFTUP")
+
+    def test_smc_id_en_broadcast_to_all_smc(self):
+        """C3：广播 smc_id_en = PARAM_SMC_NUM-1（shift_up.v:44 门 SMC_ID<=smc_id_en → 达全 SMC）。"""
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        spec = HardwareSpec.load("hw_config")
+        n = int(getattr(spec.params, "PARAM_SMC_NUM", 8))
+        sup = next(o for o in self._dst_dfg() if o.op_type.upper() == "SHIFTUP")
+        self.assertEqual(sup.metadata.get("smc_id_en"), n - 1,
+                         f"广播 smc_id_en 须=PARAM_SMC_NUM-1={n-1}（达全 SMC，非仅 SMC_0）")
+
+    def test_shared_helper_unpolluted_matmul_still_anchors_a_read(self):
+        """C2 选项(a) 回归：matmul（共享 `_inject_shiftup_broadcast`/`_inject_smi_ds_t_transpose`）仍
+        锚 a_read（broadcast_source + a_read 依赖 ds_transpose）——证 unit_ds_transpose 的独立注入
+        **没污染共享 helper**。破此 = D1 误改了 shared helper（须撤 D3「不动 matmul」）。"""
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        from verification_v2.ops.matmul_op import ManualMatmulQDsTOperator
+        spec = HardwareSpec.load("hw_config")
+        ops = ManualMatmulQDsTOperator().get_dfg(spec=spec)
+        a_read = next((o for o in ops if o.trace_id == "a_read"), None)
+        self.assertIsNotNone(a_read, "matmul 共享路径仍须有 a_read（shared helper 未被污染）")
+        self.assertTrue(a_read.metadata.get("broadcast_source"),
+                        "matmul a_read 仍须 broadcast_source")
+        self.assertIn("ds_transpose", a_read.metadata.get("depends_on", []),
+                      "matmul a_read 仍须依赖 ds_transpose（_inject_smi_ds_t_transpose 锚 a_read 不变）")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -99,20 +99,17 @@ def _inject_shiftup_broadcast(ops: List[Any], broadcast_names: set, spec: Any) -
     return new_ops
 
 
-def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -> List[Any]:
-    """ADR-034 D3/D4 Stage-I 2a：把跨-SMC 转置前缀作 DFG 真节点注入——
-    `ds_gather(SHIFTDN) → ds_transpose(SMI_DS_T) → [现有 broadcast SHIFTUP 作 scatter] → a_read`。
+def _build_smi_ds_t_chain(cfg: Dict[str, int], spec: Any):
+    """ADR-039 C2 选项(a)：把 B=2 gather+transpose 链构建从 `_inject_smi_ds_t_transpose` **等价抽取**为
+    **不锚 a_read 的纯函数**，供两条注入路径复用：
+      - `_inject_smi_ds_t_transpose`（matmul/fma 共享）：调本函数 + 保留其 a_read 锚（行为不变）；
+      - `UnitDataShuffleTransposeOperator.get_dfg`（unit_ds_transpose 独立注入）：调本函数 + 自建
+        SHIFTUP(dep=ds_transpose)→RTOVR(sel=29)→UR_WRITE（弃 bank0 a_read staging，按硬连 DST datapath）。
 
-    令 broadcast 激活读 `a_read` 依赖 `ds_transpose`，于是 SMT 看见 **scatter(广播 SHIFTUP)
-    在 transpose 之后、transpose 在 gather 之后** 的依赖边（ADR-033 B-BLOCK-1 (a) 路径）。
-    复用现有 `shiftup_a_read`（广播）作 scatter，**不另建第二个 SHIFTUP**（避开 sim 单 shiftup
-    实例 + multi-broadcast 限制）。
-
-    **2a 边界（hco D5 caveat）**：sim 数值由指令驱动的流式 SMI_DS_T 单元提供（ADR-034 2b
-    起替 ADR-033 的 `cluster.apply_smi_ds_t` run-前 model-A backdoor，该 backdoor 已删 S3-c）——
-    `ds_transpose`(iq40) 经 `get_iq_name`→"smi_ds_t-0"，sim 无同名 IQ → `load_program` 跳过（不扰动）；
-    `ds_gather`(SHIFTDN) 单次 fire、smc_id_en 门控 gather_cnt，不写 compute 输入 bank0。本注入只验「结构」
-    （DFG 拓扑 + SMT 依赖边 + emit 表598 微指令进流），step-driven 真数据流是 2b/Stage-II。"""
+    返回 `(chain_nodes, ds_transpose)`：
+      chain_nodes = [ds_src_read(UR_READ 列对齐), rt_ds_src(RTOVR→SHIFTDN_S),
+                     ds_gather(SHIFTDN), ds_gather_1(SHIFTDN, B=2 hi slot), ds_transpose(SMI_DS_T)]。
+    链拓扑 `ds_src_read→rt→{ds_gather, ds_gather_1}→ds_transpose`。本函数**不碰任何 a_read/外部节点**。"""
     from ir.mir.mir_op import MIROp
 
     smc_num = 32
@@ -130,13 +127,6 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
         shiftdn_iq = reg.get("SHIFTDN", 34)
         smi_ds_t_iq = reg.get("SMI_DS_T", 40)
         ur_read_iq = reg.get("UR_READ", 30)
-
-    a_read = next((o for o in ops
-                   if o.op_type.upper() == "UR_READ"
-                   and o.metadata.get("meta_name") == "a"
-                   and o.metadata.get("role") == "input"), None)
-    if a_read is None:
-        return ops
 
     # 单次 prologue 元数据（known-risk ①：转置一次产 M 行，非随 a_read 的 M-loop 复发）
     prologue = {"shape": [1], "inner_loops": 0, "outer_loops": 0,
@@ -250,13 +240,30 @@ def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -
             "math": "smi_ds_t_transpose(B=2 paired, gather_cnt x lanes)", **prologue,
         },
     )
+    return ([ds_src_read, rt_ds_src, ds_gather, ds_gather_hi, ds_transpose], ds_transpose)
+
+
+def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -> List[Any]:
+    """ADR-034 D3/D4 Stage-I 2a（matmul/fma 共享）：注入跨-SMC 转置前缀 DFG 真节点，并令现有 broadcast
+    激活读 `a_read` 依赖 `ds_transpose`——SMT 看见 **scatter(广播 SHIFTUP) > transpose > gather** 依赖边。
+    复用现有 `shiftup_a_read`（广播）作 scatter，**不另建第二个 SHIFTUP**。
+
+    ADR-039 C2：链构建已抽到 `_build_smi_ds_t_chain`（不锚 a_read）；本函数 = 调它 + **保留 a_read 锚**
+    （matmul/fma 行为不变）。unit_ds_transpose 走独立注入（自建 SHIFTUP→RTOVR→UR_WRITE，弃 bank0），
+    不经本函数。删 a_read **同时破本函数与 broadcast helper 两个锚** → 故 unit_ds_transpose 另起路径。"""
+    a_read = next((o for o in ops
+                   if o.op_type.upper() == "UR_READ"
+                   and o.metadata.get("meta_name") == "a"
+                   and o.metadata.get("role") == "input"), None)
+    if a_read is None:
+        return ops
+    chain_nodes, _ = _build_smi_ds_t_chain(cfg, spec)
     # scatter-after-transpose：现有 broadcast shiftup 消费 a_read → 令 a_read 依赖转置
     deps = list(a_read.metadata.get("depends_on", []))
     if "ds_transpose" not in deps:
         deps.append("ds_transpose")
     a_read.metadata["depends_on"] = deps
-
-    return list(ops) + [ds_src_read, rt_ds_src, ds_gather, ds_gather_hi, ds_transpose]
+    return list(ops) + chain_nodes
 
 
 class ManualMatmulParallelNOperator(BaseOperator):

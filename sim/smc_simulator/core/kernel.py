@@ -142,8 +142,10 @@ class ParallelKernel:
         # SHIFTUP data 三分支优先级（NOTE-Q3-B）：_dst_bcast_feed > _bcast_capture_data > live read。
         # None → 维持 bank0 staging（OFF 默认）。
         self._dst_bcast_feed = None      # {row_addr: word} 或 None（enable 时 = {}）
-        self._dst_bcast_feed_bank = -1   # a_read 读哪个 bank 触发取行（= scatter dst_bank）
-        self._dst_bcast_feed_cur = 0     # 本拍 a_read 选中的转置行（下一拍 SHIFTUP 消费，1 拍流水同 _bcast_capture）
+        self._dst_bcast_feed_bank = -1   # a_read 读哪个 bank 触发取行（= scatter dst_bank）；ADR-039 弃 a_read 后 -1
+        self._dst_bcast_feed_cur = 0     # 本拍广播的转置行（SHIFTUP 消费）
+        # ADR-039 C5：弃 a_read 后 SHIFTUP 按自身广播 beat 遍历转置行 feed（替 a_read decode-addr 选行）。
+        self._dst_bcast_feed_beat = 0    # 广播 beat 计数器（每 valid broadcast 拍 +1，取 feed[beat]）
 
     def set_broadcast_capture(self, port_idx: int, bank: int):
         """启用 DEBT-032 H2 广播源快照：当 port_idx 读 bank 时锁存广播激活。"""
@@ -154,11 +156,24 @@ class ParallelKernel:
         self._dst_src_capture = (int(port_idx), int(bank))
 
     def set_dst_bcast_feed(self, bank: int):
-        """ADR-036 S3-b：启用 SMI_DS_T 转置结果广播输入缓冲。bank = a_read 读的触发 bank（= scatter dst_bank）。
-        cluster scatter 经 _dst_bcast_feed[row_addr]=word 填行；广播源（port0 a_read）读该 bank addr=m 时
-        取第 m 行喂 SHIFTUP data。"""
+        """ADR-036 S3-b / ADR-039 C5：启用 SMI_DS_T 转置结果广播输入缓冲。cluster scatter 经
+        `_dst_bcast_feed[row_addr]=word` 填行；ADR-039 弃 a_read 后 **SHIFTUP 按自身广播 beat 遍历 feed**
+        （`_dst_bcast_feed_cur = feed[beat]`，beat 随广播推进），与 UR_write 的 addr 循环经调度对齐。
+        bank 参数保留（向后兼容签名）但弃 a_read 触发后不再用作选行 bank。"""
         self._dst_bcast_feed = {}
         self._dst_bcast_feed_bank = int(bank)
+        self._dst_bcast_feed_beat = 0
+
+    @staticmethod
+    def _is_valid_broadcast(shiftup_unit, ctrl_code) -> bool:
+        """ADR-039 C5：本拍 shiftup ctrl 是否 valid broadcast beat（驱动 feed beat 推进）。"""
+        try:
+            instr = shiftup_unit.decoder.decode(ctrl_code)
+            bc = getattr(instr, "broadcast", 0)
+            return (getattr(instr, "VALID", None) == "VALID"
+                    and ((bc == 1) or (bc == "BROADCAST")))
+        except Exception:
+            return False
 
     def enable_trace(self):
         """Enable trace recording"""
@@ -566,6 +581,16 @@ class ParallelKernel:
             's1_valid': get_port_valid(RtoVROutput.DVR_INT8TOFP16_S1)
         })
         
+        # ADR-039 C5：弃 a_read 后 SHIFTUP 自驱遍历转置行 feed。每个 valid broadcast 拍取 feed[beat] 作
+        # 广播数据、beat+1（替 a_read decode-addr 选行）。仅 head（feed 非空）驱动；follower 的 dr_d 由
+        # cluster._broadcast_shiftup_fanout 覆盖，其 feed_cur 不参与。与 UR_write addr 循环经调度对齐
+        # （write 在 broadcast 后 pipeline 拍消费同一 beat 行）。
+        if self._dst_bcast_feed:                       # truthy = head（非空 feed）
+            su_ctrl = controls.get('shiftup', 0)
+            if su_ctrl and self._is_valid_broadcast(self.units['shiftup'], su_ctrl):
+                self._dst_bcast_feed_cur = self._dst_bcast_feed.get(self._dst_bcast_feed_beat, 0)
+                self._dst_bcast_feed_beat += 1
+
         # Shift Units（ADR-019 D3/D4：跨 SMC chain 支持；N=1 模式 chain_inputs 默认 0 等价旧本地直通）
         self.units['shiftup'].evaluate({
             'ctrl': controls.get('shiftup', 0),
