@@ -97,14 +97,16 @@ class TestSmiDsTChainDrain(unittest.TestCase):
                          f"DST-SHIFTDN 须逐拍连续错拍（每 hop 1 latency），得 {cyc}")
 
     def test_drain_conserves_smi_ds_t_latency(self):
-        """守恒（hco 约束1）：DST-SHIFTUP 输出 drain 起点 − DST-SHIFTDN gather 起点 == SMI_DS_T latency(16)
-        —— 逐拍 drain 只把已有 16 渲染成可观测事件，不 double-count、不漂 compute barrier。"""
+        """守恒（hco 约束1）：DST-SHIFTUP 输出 drain 起点 − DST-SHIFTDN gather 起点 == SMI_DS_T RAW 边权
+        —— 逐拍 drain 只把已有延迟渲染成可观测事件，不 double-count、不漂 compute barrier。
+        ADR-041 D3（hco 二轮 RTL 取证 + VCS 对账）：RAW 边权 = collect(B×WR_BEATS=2×8=16) + drain(3) = 19；
+        订正旧 16（那是**输出窗口** SMI_DS_T_WINDOW=OUT_ROWS×2，被误当 RAW latency）。"""
         text = self._sim_log("matmul_q_dst")
         dn = self._cycs(text, "DST-SHIFTDN")
         up = self._cycs(text, "DST-SHIFTUP")
         self.assertTrue(dn and up, "应有 DST-SHIFTDN + DST-SHIFTUP 事件")
-        self.assertEqual(up[0] - dn[0], 16,
-                         f"输出 drain 起点须 = gather 起点 + SMI_DS_T(16)；得 {up[0]}-{dn[0]}={up[0]-dn[0]}")
+        self.assertEqual(up[0] - dn[0], 19,
+                         f"输出 drain 起点须 = gather 起点 + SMI_DS_T RAW 边权(19)；得 {up[0]}-{dn[0]}={up[0]-dn[0]}")
 
     def test_smc_id_en_gates_ds_src_read(self):
         """DEBT-036-SMCEN-SIM-GATE：ds_src_read(smc_id_en=gather_cnt-1=3) 时 sim 只让 SMC 0-3 读 bank4

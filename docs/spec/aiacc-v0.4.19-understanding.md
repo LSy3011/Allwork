@@ -217,14 +217,13 @@ UR_RDATA_0..3）选到 39 路输出（各计算单元 DVR/UVR S 输入 + DVR_VIN
 - **性质**：🟡 缺口（半个 matmul 谱系缺失）。
 - **建议**：纳入 matmul 路线图 backlog，独立 ADR；非当前 SMI_DS_T 任务前置。
 
-### D-07 🟡 matmul 广播时序靠 COND 等待，未建模
-- **文档**：matmul 从 UR 读广播数据「往往几十个时钟周期」，靠 **COND** 让广播 SMI_IQ 先行、其他模块等
-  「广播数据取回、数据整理完毕、进入对应 SMI_IQ 数据队列」再同步`[seq990]`。SMI_DS_T 输出送的 SHIFTUP SMI_IQ
-  具 `EXTRA_DATA``[seq1050]`。
-- **我们现状**：SMT 调度用 II/latency 逻辑链，未建模 COND 数据就绪等待（ADR-032 的 DEBT-032-RESIDENT-TIMING、
-  ADR-026 DEBT-026-DS-CTRL 都绕开了时序）。
-- **性质**：🟡 缺口（model-A 终值 parity 不验时序，对 RTL 增信近零）。
-- **建议**：SMI_DS_T datapath 落地时，COND/EXTRA_DATA 就绪等待是「忠实度里程碑」，非首期；显式记债务。
+### D-07 ✅ ~~matmul 广播时序靠 COND 等待，未建模~~ —— superseded by [ADR-040](../adr/ADR-040-smt-single-stream-timing-broadcast-cancels-gather-needs-2n-edge.md)（2026-06-29, hco APPROVE-w-cond）
+- **订正**：① 激活广播的 `2·PARAM_SMC_NUM`（=16）是 **SMI_DS_T 节点内在 latency、已在 SMT 建模**
+  （`matmul_op.py:237` ds_transpose op_type=SMI_DS_T；`s1_smt_check.py` 在验），其下游消费=每-SMC 本地点积
+  → 属「广播偏移相消」类，**单流 SMT 本就正确**，非「未建模」。② 文档 §988(`[seq990]`) 把此路径列为 **COND**
+  例，但 user 2026-06-29 override 改判 **DLY 静态确定边权**（V1.0 全片上、延迟确定；COND 留待将来 DRAM 源）。
+- **真正未建模的**：P2 真 gather-to-sink/concat（§1204 Matmul_QK）的 **≈N 单向边**（DEBT-040-SINK-EDGE，**不复用 2N**）。
+- **bank5=0 归因**：emit/lowering 下游 bug（DLY 未标定完整流水），**非 SMT 边缺失**；详见 ADR-040 + [[timing-verify-strategy-plan-c]]。
 
 ### D-08 🟡 VIN/VOUT/MIN/MOUT 流水寄存器 + RtoVR 字段建模深度（spec_doc_align 已证缺口）
 - **文档**：VIN0/1·VOUT0·MIN0/1·MOUT0 是 6 个真实 PR 单元`[表567-584]`；RtoVR 是 34→39 全交叉选通矩阵

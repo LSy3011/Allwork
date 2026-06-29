@@ -15,10 +15,16 @@ pipeline_delays:
   LOGIC:               1    # 逻辑运算延迟
   SHIFTUP:             1    # 上移延迟（单 hop/单元延迟，非整链；广播链全长另计）
   SHIFTDN:             1    # 下移延迟（单 hop/单元延迟，非整链）
-  SMI_DS_T:            16   # 激活矩阵排序(流式转置)级固定 latency = PARAM_SMC_NUM*2（para1194/1237
-                           #   一次广播读延迟，含一半气泡 B=2 填）。ADR-036 Q2 模型：转置 latency=gather
-                           #   完成点（para1039「前两指令完成读取后立即输出」→转置级近 0 额外延迟、主延迟在
-                           #   gather）。PARAM_SMC_NUM=8 实例→16。仍 proposed，升 Accepted 待 VCS 逐拍校准。
+  SMI_DS_T:            19   # ds_transpose→SHIFTUP 的 RAW 边权 = collect(16) + drain(3)。
+                           #   collect = B×WR_BEATS = 2×8 = 16（输入 tile 填充：B=2 配对×每 unit 8 beat 串行，
+                           #     smi_ds_t.v:268/305-309 + :107-110；**与 PARAM_SMC_NUM 和元素宽度(fp16/fp32)无关**，
+                           #     仅随 TILE_BYTES/B）。drain = ready→data_out_vld 3 寄存器级（smi_ds_t.v:88/167/134/179）。
+                           #   ADR-041 D3（hco 二轮 RTL 取证 + VCS tb_dst.vcd 全链对账 cri_vld@641+gather_fill2+
+                           #     collect16+drain3=662 窗口开）。⚠ 订正旧「16=PARAM_SMC_NUM*2」——那是**输出吞吐窗口**
+                           #     (OUT_ROWS×2)被误当 RAW latency，见下 SMI_DS_T_WINDOW。仍 DRAFT，升 Accepted 待 VCS 逐拍。
+  SMI_DS_T_WINDOW:     16   # = OUT_ROWS×2（smi_ds_t.v:58/26，跟元素宽度走 fp32→8）。SMI_DS_T data_out_vld 持续拍数 =
+                           #   SHIFTUP/UR_W0 16-beat 流广播持续拍 + RTOVR latch lifecycle + 资源占用窗口。
+                           #   **不进 add_latency_axiom**（非 RAW latency）。ADR-041 D2。
   INT8toFP16:          1    # INT8转FP16延迟
   VIN0:                0    # 向量输入流水线寄存器0
   VIN1:                0    # 向量输入流水线寄存器1
