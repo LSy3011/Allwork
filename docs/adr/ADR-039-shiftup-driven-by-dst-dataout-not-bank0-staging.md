@@ -118,15 +118,15 @@ ds_src_read(UR_READ 列对齐) → SHIFTDN gather ×2(B=2, ADR-038) → ds_trans
 而是「复用本 ADR 的 DST datapath 重建」**。向量×矩阵「不需转置即广播」的 SMI_DS_T 透传/旁路细节 = 待 RTL 定。
 
 ## 待 hco / 实现期钉死的开放问题
-- **[Q1 时序 = COND 同步，已由 doc 988 定（2026-06-29）]** data_out 流式出 N 行（latency=16 后每拍一行），
-  SHIFTUP 须逐行广播、UR_write 逐行写 bank5 consecutive addr。**机制 = COND 同步、非固定 DLY**：doc 988
-  「矩阵乘从 UR 读广播数据往往几十个时钟周期…让读广播数据的 SMI_IQ **先行执行**，其他模块用 **COND** 等待
-  广播数据取回、数据整理完毕、进入对应 SMI_IQ 的数据队列，再开始同步执行」。= VCS 实测 `o_cru_shiftup`@7435ns
-  在 data_out(7265-7295ns)之后的原因：SHIFTUP IQ 用 COND 等 ds_t_data_out 进它的 EXTRA_DATA 队列（r_data
-  FIFO，DATAQ_DEPTH=128）再广播。**编译器排程 SHIFTUP/UR-write 须用 COND-wait 语义**（消费广播数据的 IQ
-  COND-等数据入队），不是固定 DLY（DEBT-036-DST-BCAST-FEED-TIMING）。含 C4 systolic passthrough：广播指令字
-  沿 SMC 链每 hop 1 拍透传（pipeline_delays.yaml:16）。⚠ 现编译器 DLY-based 排程须确认能表达 COND-wait，
-  否则 SHIFTUP 发射拍与数据入队拍解耦 → 广播 stale/零（实现期 spike）。
+- **[Q1 时序 = 固定 DLY 排布（user 2026-06-29 定：V1.0 用 DLY，不用 COND）]** data_out 流式出 N 行
+  （latency=16 后每拍一行），SHIFTUP 逐行广播、UR_write 逐行写 bank5 consecutive addr。**V1.0 片上广播
+  latency 是固定确定的（SMI_DS_T=16 + 固定流水/systolic 延迟，全片上无 DRAM）→ 用 DLY 排布即可，现有
+  SMT+DLY 排程就是对的工具**。doc 988 的 COND 是给「延迟很长**或不确定**」（几十拍 / 广播数据来自 DRAM）
+  的场景，**V1.0 片上 matmul 不碰 COND**（COND 不确定性大，留待将来 DRAM 源）。→ bank5=0 **不是缺 COND，
+  是固定 latency 没标定对**：编译器的 DLY 没覆盖完整 `SMI_DS_T(16)→SHIFTUP→systolic 广播链` 流水延迟，
+  SHIFTUP/UR-write 发射拍早于 data_out 数据词窗口（VCS：o_cru_shiftup@7435 vs data_out@7265-7295）。
+  实现期任务 = **把这条链的固定 DLY/latency 标定到位**（SMI_DS_T=16 + SHIFTUP + C4 systolic 每 hop 1 拍 +
+  r_data FIFO 入队拍），让 SHIFTUP/UR-write DLY 落进 data_out 窗口（DEBT-036-DST-BCAST-FEED-TIMING）。
 - **[Q2 hi 半字]** ADR-038 DEBT-038-B2-GATHER：data_out 现 = high-16 重复（gate-filler hi 复制 lo），hi slot
   须携各 fp32 low-16。即便 D1 喂数路径打通，hi 内容仍须修对才 bit-perfect。**两 bug 正交，先 D1（喂数）
   见 bank5 收到 high-16-dup 数据，再修 Q2 hi 半字。**
