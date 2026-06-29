@@ -3,16 +3,17 @@ adr_id: ADR-041
 title: SMI_DS_T 输出 = 16-beat 流 —— SHIFTUP/UR_W0 改持续广播 + SMI_DS_T 边权拆「首 beat latency / 窗口 16」（修 unit_ds_transpose bank5=0）
 decided: 2026-06-29
 last_verified: 2026-06-29
-still_holds: DRAFT（BLOCK-1 已落地 2026-06-29：SMI_DS_T=19 + WINDOW=16；剩 BLOCK-2/3 闭合后升 proposed）
+still_holds: proposed（BLOCK-1/2/3 全落地 2026-06-29，hco APPROVE 可升 proposed；Accepted 仍卡 VCS：DEBT-041-STREAM-DLY + ADDR-MAP）
 builds_on: ADR-038, ADR-039, ADR-040
 implements: ADR-040 DEBT-040-DST-EDGE-SEMANTICS
-hco_review: APPROVE-方向（2026-06-29）—— 3 BLOCK（verifier 同步 / 门控按 producer / exact 对齐）必闭才可实现
+hco_review: APPROVE-方向（2026-06-29）+ APPROVE-可升 proposed（2026-06-29 二审，3 BLOCK 全闭/门控精确/SMT SAT/pytest 不破；DLY=1 未达成记 DEBT-041-STREAM-DLY）
 ---
 
 # ADR-041 · SMI_DS_T 输出 16-beat 流 + SHIFTUP 持续广播 + 边权拆分
 
-> **状态：DRAFT**（hco 方向 APPROVE，但 **3 个 BLOCK 必须闭合才可从 DRAFT 升 proposed→实现**）。
-> 动 `hw_config/pipeline_delays.yaml` + `src/synthesis` 边权语义 + emit 节点生成 → 已过 hco 一轮。
+> **状态：proposed**（BLOCK-1/2/3 全落地，hco 二审 APPROVE-可升 proposed）。
+> 动 `hw_config/pipeline_delays.yaml` + `src/synthesis` 边权语义 + emit 节点生成 → 已过 hco 两轮。
+> Accepted 仍卡 VCS（DEBT-041-STREAM-DLY 逐拍连续 + DEBT-041-ADDR-MAP 16 行真值）。
 >
 > **一句话**：RTL+VCS 实证（[SMI_DS_T datapath 时序](../spec/smi-ds-t-datapath-timing.md)）——SMI_DS_T 一条配对
 > 指令内部自动吐 **16-beat 流**，但编译器把 `ds_transpose→shiftup_ds_t→ur-w0` 建成**单 op 单拍**、且把「窗口
@@ -43,11 +44,19 @@ RTL 关键事实（hco 复核）：
 ### D2. SHIFTUP/RTOVR/UR_W0 改 16-beat 流〔hco ✓ 选 A〕
 **选项 A（LOOPS 展开）**：保留单节点、加 `stream_beats=WINDOW`，emit 展开成 `LOOPS=WINDOW` 连续发射
 （复用 `ur-r0` LOOPS=16 先例 + `assembler.py:95-101` IQ 级循环覆盖）。SHIFTUP `INC=0`（data 硬连）、UR_W0 `INC=1`（连续行）。
-- 🔴 **BLOCK-2（必修，硬约束）**：`stream_beats` 门控**必须按 producer.op_type==SMI_DS_T**（gate on
-  `dst_datapath_value` + producer 为 SMI_DS_T），**绝不能按 `op_type==SHIFTUP && broadcast==1`**——后者命中
-  fma/matmul compute-broadcast SHIFTUP（`dependency_axioms.py:88-92` resident 谓词同款）→ 把 fma 单值广播展成
-  16 拍流、打爆 fma 8/8。门控来源 = `cross_smc_unit_op.py:183-185` 建 ds datapath 节点时打标。
-- 条件：emit 须产**同一 II 窗口内连续拍（DLY=1 back-to-back）**，非跨迭代 strided。
+- 🔴 **BLOCK-2（必修，硬约束）✅ 已闭（2026-06-29，hco APPROVE）**：`stream_beats` 门控**按 producer.op_type==SMI_DS_T**
+  ——在 `cross_smc_unit_op.py:200-217` 建 ds datapath 节点时给 shiftup_ds_t/rt/out 打 `stream_beats=WINDOW`（这些节点
+  明证 depends_on `ds_transpose`==SMI_DS_T）；`assembler.py:100-107` 见 `stream_beats>0` 即 `eff_num_iter=stream_beats`
+  覆盖 IQ 级 LOOPS（HDR LOOPS=WINDOW-1）。**绝不按 `op_type==SHIFTUP && broadcast==1`**——fma/matmul 的
+  compute-broadcast SHIFTUP 走 `matmul_op.py:_inject_shiftup_broadcast`，**无** stream_beats 标记 → 不展开（hco 实证
+  fma/matmul/matmul_q_dst 三算子 SHIFTUP 节点无标记 + LOOPS=63 未被覆盖；`test_stream_beats_tagged_only_on_dst_datapath`
+  作回归防线）。SHIFTUP INC=0（data 硬连 data_out）/ UR_W0 INC=1（连续行）。
+- ⚠ **条件「同一 II 窗口内连续拍（DLY=1 back-to-back）」未达成 → DEBT-041-STREAM-DLY（hco 二审 catch）**：
+  当前 `eff_num_iter=stream_beats` 走 **IQ 级 LOOPS@II 间距**机制——II=2（B=2 配对驱动）下 SHIFTUP 实际在
+  t=22,24,26,… 每 **2 拍**发一次、跨 16 迭代 ≈ 32 拍，恰是 D2 说「非跨迭代 strided」的那种 strided 发射，与
+  RTL `data_out_vld` 连续 16 拍窗口（spec §3 cyc662-677）相悖。sim model-A 不精确建模 16 拍连续流（spec §6 存疑区 +
+  DEBT-038-B2-GATHER）故 proposed 观察不到、pytest 全过；但**直接威胁 Accepted**（VCS 逐拍 bank5 16 行 bit-match——
+  每 2 拍取一次会跳 beat/越窗）。修法 = emit 16 连续 BODY（非 HDR-LOOP@II），VCS-gated。
 
 ### D3. 时序分三量〔实测订正 hco 的 FIRST_BEAT=11 估值〕
 VCS 实测（`tb_dst.vcd`：`cri_vld` issue@cyc641/643 配对、`data_out_vld` 窗口开@662、首真数据@674）→ **issue→窗口开
@@ -69,12 +78,19 @@ VCS 实测（`tb_dst.vcd`：`cri_vld` issue@cyc641/643 配对、`data_out_vld` �
   边类型确认 ✓：`shiftup_ds_t` 走 `depends_on`(直连 RAW)、非 rtovr_deps（`cross_smc_unit_op.py:183`）。
   **剩 BLOCK-2（stream_beats 门控按 producer）+ BLOCK-3（D5 emit EXACT 锚定）未落。**
 
-### D4. 完整 16-beat 流〔user 2026-06-29 裁定 = 写 16 行〕
+### D4. 完整 16-beat 流〔user 2026-06-29 裁定 = 写 16 行；**实现订正 = lo slot 8 行诚实子集**，hco APPROVE 偏离〕
 fp16 **不走 1 词特例，走完整 16-beat 流**（与 fp32/matmul 统一）：
-- fp16 输入从 1 元素/SMC **扩到 8 元素/SMC**（每 SMC 一整行 16 字节）；
-- golden 从 1 词 **改 16 行**（配对 2 指令各 8 行转置）；UR_W0 `INC` 写 16 连续行。
-- → 改 `cross_smc_unit_op.py` `UnitDataShuffleTransposeFp16Operator` 的 `prepare_input`/`get_golden`/
-  `inject_data_per_smc`（行240-258）+ `bcast` `inner_loops`（行196）。
+- fp16 输入从 1 元素/SMC **扩到 8 元素/SMC**（每 SMC 一整行 16 字节）✅ 落地（`prepare_input` → 8×8 矩阵）；
+- SMI_DS_T `lanes` 1→8 → **真 8×8 转置**（旧 8 SMC×1 元素是退化单行，无法捕获转置 bug）；UR_W0 `INC=1` 写连续行；
+- **golden 订正 = lo slot 8 行（X.T 展平 64 fp16）诚实子集，非字面 16 行**（hco 二审 APPROVE 偏离）：
+  字面 16 行 = lo(8)+hi(8)，但 **hi slot 第二 tile 真值 model-A 无法忠实导出**（DEBT-038-B2-GATHER）+ spec §6 的
+  12 前导零 beat 结构「勿当定论」→ 写 16 行 golden 会断言无 RTL 依据的造数 = **更高级的假绿，违反反假绿原则**。
+  firmware 仍走 16-beat 流（WINDOW=16）供 VCS 校全 lo+hi 16 beat；sim+golden 只忠实校 lo 8 行。hi 8 行真值收编
+  DEBT-041-ADDR-MAP（VCS-gated）。
+- → 改 `cross_smc_unit_op.py` `UnitDataShuffleTransposeFp16Operator`（`smi_ds_t_config` lanes=8 / `prepare_input`
+  8×8 / `get_golden` X.T 展平 / `inject_data_per_smc` 整行）+ 父类 `get_dfg` 输出词数泛化 `n_words=lanes×nword_per_row`
+  （lanes=1 旧行为不变）。验收：`unit_ds_transpose_fp16` e2e 8 SMC bit-perfect（真 8×8 转置）+
+  `test_fp16_golden_is_real_8x8_transpose`（含 transpose-as-noop 反证）。
 
 ### D5. exact 对齐验收〔hco BLOCK-3，必修〕
 SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，早/晚 1 拍即取窗口外零 = bank5=0 机理）。
@@ -88,8 +104,16 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
 - `WINDOW` 新概念需接 emit(LOOPS) + **SHIFTUP/UR_W0 16 拍占用进 modulo/resource 约束**（否则 matmul loop 场景与下一迭代发射撞 slot）。
 
 ## 风险 / 债务
-- **DEBT-041-ADDR-MAP**：16-beat→bank5 地址映射 + golden 16 行真值（含前导零 beat）；
-- 回归：fma/matmul_parallel_n 走 `_inject_shiftup_broadcast`（广播相消路径），由 **BLOCK-2 门控**隔离守住。
+- **DEBT-041-STREAM-DLY（hco 二审 catch，VCS-gated，升 Accepted 必修）**：当前 emit 走 IQ-LOOPS@II（II=2）→
+  SHIFTUP 每 2 拍发一次（strided），**未达 D2 的 DLY=1 连续 16 拍**。sim model-A 不建模连续流故 proposed 不可见；
+  VCS 逐拍 bank5 16 行 bit-match 会撞墙。修法 = emit 16 连续 BODY（非 HDR-LOOP@II）。
+- **DEBT-041-ADDR-MAP（VCS-gated）**：16-beat→bank5 地址映射 + golden hi slot 8 行真值（含 spec §6 12 前导零 beat 结构）；
+  现 golden 只忠实 lo slot 8 行。
+- **DEBT-041-WINDOW-ELEMWIDTH（当前无害）**：`SMI_DS_T_WINDOW=16` 是单常数，spec 说应 = OUT_ROWS×2 跟元素宽度
+  （fp32=8/fp16=16）。fp32 unit_ds_transpose 用 16 仅多写无害零行（golden 只校真行）；matmul 被 BLOCK-2 门控挡在
+  stream_beats 外、不展 → ADR「待厘清」的「matmul loop 撞下一迭代 slot」**当前不适用**。元素宽度派生 WINDOW 重构推迟。
+- 回归：fma/matmul_parallel_n 走 `_inject_shiftup_broadcast`（广播相消路径），由 **BLOCK-2 门控**隔离守住
+  （hco 实证 + `test_stream_beats_tagged_only_on_dst_datapath` 防线，fma 8/8 不破）。
 
 ## 验证 + 测试（升 still_holds 前置）
 - `test_smt_adversarial`：① ds_transpose→SHIFTUP RAW 边 = FIRST_BEAT（非 16）+ 排程拍 exact 对齐；
@@ -98,4 +122,7 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
   payload → bank5 dina 非零 + golden 16 行 bit-match。
 
 ## still_holds 阶梯
-DRAFT（本稿，3 BLOCK 未闭）→ proposed（BLOCK-1/2/3 实现且 pytest 不破）→ Accepted（VCS unit_ds_transpose_fp16 bank5 非零 + golden 16 行 bit-match）。
+~~DRAFT（3 BLOCK 未闭）~~ → **proposed（当前，2026-06-29：BLOCK-1/2/3 全实现 + pytest 164 pass/6 skip + fma/matmul 8/8
+不破 + unit_ds_transpose(_fp16) e2e bit-perfect，hco 二审 APPROVE）** → Accepted（VCS：① unit_ds_transpose_fp16 bank5
+非零 + lo 8 行 bit-match；② DEBT-041-STREAM-DLY 修后 16 拍 DLY=1 连续；③ DEBT-041-ADDR-MAP hi 8 行真值）。
+- Accepted 前置补测（方案 C 逐拍）：`o_cru_shiftup` 起拍 == `data_out` 窗口首 beat **且后续 15 拍连续（非 II-strided）**。

@@ -167,9 +167,14 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
         # 1) gather+transpose 前缀链（不锚 a_read；含 ADR-038 B=2 双 gather）
         cfg = self.smi_ds_t_config(spec)
         chain_nodes, ds_transpose = _build_smi_ds_t_chain(cfg, spec)
-        # 转置行 = K 元素，按 word_lanes 拆成 n_words 个 128b 词（fp32 word_lanes=4→2 词；fp16=8→1 词）
+        # 转置行 = K 元素，按 word_lanes 拆成 nword_per_row 个 128b 词（fp32 word_lanes=4→2 词；fp16=8→1 词）。
+        # ADR-041 D4：输出**总词数** = SMI_DS_T 输出行数(lanes) × 每行词数。lanes=1（退化单行转置）时
+        # 总词数 == nword_per_row（fp32 2 词 / fp16 1 词，旧行为不变）；lanes>1（8×8 真转置）时
+        # 输出 lanes 个转置行 → 总词数 = lanes×nword_per_row，UR_W0 须 INC 写这么多连续行。
         word_lanes = int(cfg.get("word_lanes", 4))
-        n_words = max(1, self.K // word_lanes)
+        out_lanes = max(1, int(cfg.get("lanes", 1)))
+        nword_per_row = max(1, (self.K + word_lanes - 1) // word_lanes)
+        n_words = out_lanes * nword_per_row
 
         # 2) 广播 + 写回，锚在 ds_transpose（C1 保留 RTOVR sel=29；C3 smc_id_en=PARAM_SMC_NUM-1）
         smc_num = self._get_hw_param(spec, "PARAM_SMC_NUM", 8)
@@ -191,10 +196,25 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
                   dst_datapath_value=True,
                   math="ur_write(broadcast row → bank5)")
         bcast_ops = b.get_dfg()
-        # 转置行 = K 元素 = n_words 词（fp32:2 / fp16:1），inner_loops=n_words-1
+        # ADR-041 BLOCK-2/D2（option A LOOPS 展开）：SMI_DS_T 输出 = 16-beat 流（OUT_ROWS×2）。
+        #   SHIFTUP/RTOVR/UR_W0 须**持续广播 WINDOW 拍**逐拍取不同 data_out beat（shift_up.v 透明 1 拍
+        #   寄存器，vld 持续 16 拍 + data_in 逐拍变 → 逐拍广播不同 beat），非单脉冲（单脉冲取窗口尾后空
+        #   ds_t_data_out → bank5=0）。emit 把 stream_beats 展成 IQ 级 LOOPS（assembler eff_num_iter 覆盖）。
+        # 🔴 BLOCK-2 硬门控（hco）：stream_beats 只打在**本 dst-datapath 节点**（sup 明证 depends_on
+        #   ds_transpose==SMI_DS_T）→ 绝不命中 fma/matmul 的 compute-broadcast SHIFTUP（走 matmul_op
+        #   `_inject_shiftup_broadcast`，无 stream_beats 标记 + 无 SMI_DS_T producer）。门控来源 = 此处建
+        #   节点时打标，**非** assembler 按 `op_type==SHIFTUP && broadcast==1`（后者会误伤 fma 单值广播）。
+        window = int(self._get_hw_param(spec, "SMI_DS_T_WINDOW", n_words)) if spec is not None else n_words
+        if spec is not None and hasattr(spec, "delays"):
+            window = int(spec.delays.get("SMI_DS_T_WINDOW", window))
+        window = max(window, n_words)
+        # 转置行 = K 元素 = nword_per_row 词，输出 n_words = lanes×nword_per_row 个真行词；
+        # inner_loops=n_words-1 记真行数（auditor/地址映射）；stream_beats=window 驱动 emit 持续广播拍数
+        # （window ≥ n_words：真行 + B=2/前导零 beat 补齐到硬件输出窗口，sim 多写的零行不进 golden 校验）。
         for op in bcast_ops:
             op.metadata.update({"shape": [self.K], "inner_loops": n_words - 1,
-                                "outer_loops": 0, "inner_inc": 1, "outer_inc": 0})
+                                "outer_loops": 0, "inner_inc": 1, "outer_inc": 0,
+                                "stream_beats": window})
         # rtovr_deps：消费者 out 经 RTOVR(sel=29) 从 SHIFTUP 取数（dependency_axioms 建 t_latch）
         for op in bcast_ops:
             if op.op_type.upper() == "RTOVR":
@@ -232,20 +252,34 @@ class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
                   "smc_layout": "partitioned"},
         }
 
+    # ADR-041 D4（user 2026-06-29 裁定）：fp16 不走 1 词特例，走完整 16-beat 流。
+    # 每 SMC 持**整行 8 fp16**（= 16 byte = 1 词），8 SMC 组成 8×8 fp16 矩阵 → SMI_DS_T 真转置
+    # 8×8 → 8 个转置行（lanes=8，非旧 1）→ 每 SMC bank5 写 8 连续行（UR_W0 INC=1）。
+    # 这是比旧「8 SMC 各 1 元素 → 1 行」**严格更强**的 sim 验收（退化 1 元素无法捕获转置 bug，
+    # 8×8 非对称矩阵能）。golden = X.T 展平 64 fp16（sim 忠实建模 lo slot 8 行）。
+    # ⚠ DEBT-041-ADDR-MAP（VCS-gated）：RTL B=2 配对吐 16 beat（lo 8 + hi 8）+ spec §6 的 12 前导
+    #   零 beat 结构未定论；model-A 只忠实 lo slot 8 行，hi slot 第二 tile 真值 = DEBT-038-B2-GATHER。
+    #   故 golden 取忠实的 8 行（64 fp16），firmware 走 16-beat 流（BLOCK-2）供 VCS 校 lo+hi 全 16 beat。
+    ROWS = 8                     # SMI_DS_T 转置输出行数 = 每 SMC 的元素数（8 fp16/行）
+
     def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
-        # fp16：8 lane×16-bit/词 → 8 元素恰 1 词（word_lanes=8）；element_bits=16 选 fp16 codec。
+        # fp16：8 lane×16-bit/词 → 每转置行 8 元素恰 1 词（word_lanes=8）；element_bits=16 选 fp16 codec。
+        # lanes=ROWS=8：8×8 真转置 → 8 个输出行（旧 lanes=1 是 8 SMC×1 元素的退化单行）。
         return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
-                "gather_smc_cnt": self.K, "lanes": 1, "word_lanes": 8, "element_bits": 16}
+                "gather_smc_cnt": self.K, "lanes": self.ROWS, "word_lanes": 8, "element_bits": 16}
 
     def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
         self._smc_num = smc_num
         rng = np.random.default_rng(0)
-        a = rng.uniform(1.0, 5.0, self.K).astype(np.float16)   # 8 个 fp16，列对齐分散到 8 SMC
+        # 8 SMC × 8 fp16 = 8×8 矩阵；a[s] = SMC s 持有的整行（列对齐于 src_bank 的 1 词）
+        a = rng.uniform(1.0, 5.0, (self.K, self.ROWS)).astype(np.float16)
         return {"a": a}
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
-        a = input_data["a"].astype(np.float16)
-        golden = np.tile(a, (self._smc_num, 1))                # 每 SMC 拿完整 8 fp16 行
+        a = input_data["a"].astype(np.float16)                 # (K=8 SMC, ROWS=8 elem)
+        # 转置：转置行 m = [a[s][m] for s in K] = 矩阵第 m 列 → 行对齐激活，广播达全 SMC。
+        rows = a.T.astype(np.float16)                          # (ROWS=8, K=8)
+        golden = np.tile(rows.reshape(-1), (self._smc_num, 1))  # 每 SMC = 8 行展平 64 fp16
         return {"y": golden, "intermediates": []}
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
@@ -255,4 +289,4 @@ class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
         src_logical = self.SRC_BANK * bank_depth
         for k, prog in enumerate(programs):
             if k < self.K:
-                prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float16), stride=1)
+                prog.inject_vector(src_logical, a[k], stride=1)   # SMC k 整行 8 fp16（1 词）

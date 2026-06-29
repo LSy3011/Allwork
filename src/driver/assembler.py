@@ -92,7 +92,18 @@ class PhysicalAssembler:
             # num_iterations=2 巧合凑够。故对这些 IQ 用 eff_num_iter=max(num_iterations,2)，与输出词数解耦。
             is_smi_ds_t_dp = ("smi-ds-t" in iq_name.lower()
                               or any(op.metadata.get("smi_ds_t_gather") for op in ops))
-            eff_num_iter = max(num_iterations, 2) if is_smi_ds_t_dp else num_iterations
+            # ADR-041 BLOCK-2/D2：SMI_DS_T 输出 16-beat 流——SHIFTUP/RTOVR/UR_W0 须持续广播 WINDOW 拍
+            #   （逐拍取不同 data_out beat）。这些 IQ 的节点带 stream_beats（cross_smc_unit_op 在 dst-datapath
+            #   建节点时打标，门控 producer=SMI_DS_T；fma/matmul broadcast SHIFTUP 无此标记 → 不受影响）。
+            #   用 stream_beats 覆盖 IQ 级 LOOPS（与输出词数 num_iterations 解耦：fp16 num_iterations=1 但
+            #   须广播 8/16 拍逐行）。SHIFTUP INC=0（data 硬连 data_out）、UR_W0 INC=1（连续行）由各 op stride 定。
+            stream_beats = max((int(op.metadata.get("stream_beats", 0)) for op in ops), default=0)
+            if stream_beats > 0:
+                eff_num_iter = stream_beats
+            elif is_smi_ds_t_dp:
+                eff_num_iter = max(num_iterations, 2)
+            else:
+                eff_num_iter = num_iterations
             total_iterations_needed = (max_t_global // II) + eff_num_iter
             loops_val = total_iterations_needed - skip_iterations - 1
 

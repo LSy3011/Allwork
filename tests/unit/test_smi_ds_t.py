@@ -1028,5 +1028,99 @@ class TestADR039HardwiredDstDatapath(unittest.TestCase):
                       "matmul a_read 仍须依赖 ds_transpose（_inject_smi_ds_t_transpose 锚 a_read 不变）")
 
 
+class TestADR041StreamAndExactAnchor(unittest.TestCase):
+    """ADR-041 BLOCK-2（16-beat 流 + producer=SMI_DS_T 门控）+ BLOCK-3/D5（SMI_DS_T→SHIFTUP EXACT 锚定）
+    + D4（fp16 8 元素/SMC 真 8×8 转置）的可证伪门。"""
+
+    @staticmethod
+    def _paths():
+        for p in (_ROOT, _ROOT / "src", _ROOT / "sim", _ROOT / "verification_v2"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.append(sp)
+
+    def _spec(self):
+        self._paths()
+        from api.hw_spec import HardwareSpec
+        return HardwareSpec.load("hw_config")
+
+    def _ops(self, op_key):
+        self._paths()
+        from verification_v2.main_verify import OPERATOR_MAP
+        return OPERATOR_MAP[op_key]().get_dfg(spec=self._spec())
+
+    # ---- BLOCK-3/D5：EXACT 锚定 ----
+    def test_shiftup_exact_anchored_on_smi_ds_t(self):
+        """SMI_DS_T→dst-datapath SHIFTUP 的排程拍 **恰好** = ds_transpose + delays[SMI_DS_T]（== 非 >= 松弛）。
+        shift_up 无握手——早/晚 1 拍即取 data_out 窗口外零 → bank5=0（spec §5）。松弛解（旧 +20）即错窗。"""
+        self._paths()
+        from synthesis.ucode_solver import UCodeSynthesizer
+        spec = self._spec()
+        ops = self._ops("unit_ds_transpose_fp16")
+        res = UCodeSynthesizer(spec).solve_with_units(ops, MII=1, MAX_II=64)
+        self.assertIsNotNone(res, "unit_ds_transpose_fp16 须可调度 SAT")
+        sch, lat = res["schedule"], int(spec.delays["SMI_DS_T"])
+        self.assertEqual(sch["shiftup_ds_t"] - sch["ds_transpose"], lat,
+                         f"SHIFTUP 须**恰好** ds_transpose+{lat}（EXACT 锚定）；松弛解错窗→bank5=0")
+
+    def test_exact_gate_spares_matmul_a_read(self):
+        """反证（门控精确）：matmul 的 a_read 也依赖 ds_transpose(SMI_DS_T)，但**无** dst_datapath_value
+        → **不**被 == 钉死（仍 >=，保 compute datapath 的 SAT slack）。误把 == 加到 a_read 会过约束 matmul。"""
+        ops = self._ops("matmul_q_dst")
+        a_read = next(o for o in ops if o.trace_id == "a_read")
+        self.assertIn("ds_transpose", a_read.metadata.get("depends_on", []),
+                      "matmul a_read 仍依赖 ds_transpose")
+        self.assertFalse(a_read.metadata.get("dst_datapath_value"),
+                         "matmul a_read 不得带 dst_datapath_value（否则被 EXACT == 误伤 → 过约束）")
+
+    # ---- BLOCK-2：16-beat 流门控 ----
+    def test_stream_beats_tagged_only_on_dst_datapath(self):
+        """🔴 BLOCK-2 硬门控：stream_beats 只打 unit_ds_transpose 的 SHIFTUP/RTOVR/UR_W0（producer=SMI_DS_T）。
+        fma/matmul 的 compute-broadcast SHIFTUP（走 _inject_shiftup_broadcast）**绝不**带 stream_beats——
+        否则单值广播被展成 16 拍流 → 打爆 fma 8/8（ADR-041 D2 门控来源 = 建节点时打标，非 op_type==SHIFTUP）。"""
+        win = int(self._spec().delays["SMI_DS_T_WINDOW"])
+        for key in ("unit_ds_transpose", "unit_ds_transpose_fp16"):
+            sup = next(o for o in self._ops(key) if o.trace_id == "shiftup_ds_t")
+            self.assertEqual(int(sup.metadata.get("stream_beats", 0)), win,
+                             f"{key} 的 shiftup_ds_t stream_beats 须=WINDOW({win})")
+        for key in ("fma_parallel_n", "matmul_parallel_n", "matmul_q_dst"):
+            for o in self._ops(key):
+                if o.op_type.upper() == "SHIFTUP":
+                    self.assertFalse(o.metadata.get("stream_beats"),
+                                     f"{key} 的 {o.trace_id} 绝不应带 stream_beats（compute 单值广播被误展爆 fma）")
+
+    def test_emit_stream_loops_equals_window(self):
+        """BLOCK-2 emit：stream IQ（shiftup/ur-w0）HDR LOOPS == WINDOW-1（IQ 级 LOOPS 展开 = 持续广播 WINDOW 拍），
+        与输出词数 num_iterations 解耦（fp16 num_iterations=1 但须广播 WINDOW 拍逐行）。UR_W0 INC=1（连续行）。"""
+        import json
+        bdir = _ROOT / "build" / "verification_v2" / "unit_ds_transpose_fp16"
+        instrs = json.loads((bdir / "physical_instructions.json").read_text())
+        win = int(self._spec().delays["SMI_DS_T_WINDOW"])
+        for iq, exp_inc in (("shiftup", 0), ("ur-w0", 1)):
+            hdr = next(i for i in instrs if i["iq_name"] == iq and i["stage"] == "HDR")
+            self.assertEqual(hdr["header"]["LOOPS"], win - 1,
+                             f"{iq} HDR LOOPS 须=WINDOW-1({win-1})（16-beat 流）")
+            self.assertEqual(hdr["header"]["INC"], exp_inc,
+                             f"{iq} INC 须={exp_inc}（SHIFTUP data 硬连 INC=0 / UR_W0 连续行 INC=1）")
+
+    # ---- D4：fp16 真 8×8 转置 ----
+    def test_fp16_golden_is_real_8x8_transpose(self):
+        """D4：fp16 扩 8 元素/SMC → golden = X.T 展平 64 fp16（真 8×8 转置，非退化 1 元素 1 行）。
+        反证：非对称输入下 golden != 平铺输入（旧 1 元素版无法捕获转置 bug）。"""
+        self._paths()
+        import numpy as np
+        from verification_v2.ops.cross_smc_unit_op import UnitDataShuffleTransposeFp16Operator
+        op = UnitDataShuffleTransposeFp16Operator()
+        data = op.prepare_input(n_rows=8, smc_num=8)
+        self.assertEqual(data["a"].shape, (8, 8), "fp16 输入须 8 SMC×8 元素（8×8 矩阵）")
+        golden = op.get_golden(data, vector_lanes=8)["y"]
+        self.assertEqual(golden.shape, (8, 64), "golden 须 (smc_num, 64)=8 转置行展平")
+        expect = np.tile(data["a"].astype(np.float16).T.reshape(-1), (8, 1))
+        self.assertTrue(np.array_equal(golden, expect), "golden 须 = X.T 展平广播全 SMC")
+        # 非平凡：转置 != 原矩阵展平（专杀 no-op/view 退化）
+        self.assertFalse(np.array_equal(golden[0], data["a"].astype(np.float16).reshape(-1)),
+                         "非对称 8×8 转置后 != 原序展平（捕获 transpose-as-noop 回归）")
+
+
 if __name__ == "__main__":
     unittest.main()

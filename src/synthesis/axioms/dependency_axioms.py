@@ -38,10 +38,27 @@ class DependencyAxioms(AxiomBase):
                 else:
                     lat = spec.delays.get(op_type, 1)
                 
+                # ADR-041 D5/BLOCK-3 (EXACT 锚定)：SMI_DS_T → dst-datapath SHIFTUP 的 RAW 边必须
+                #   是**等式**而非 >= 下界。RTL `shift_up` 无握手——SHIFTUP vld 早/晚 1 拍即取 SMI_DS_T
+                #   data_out 窗口外的零（bank5=0 机理，spec smi-ds-t-datapath-timing.md §5）。`>=` 允许
+                #   SMT 加 slack 把 SHIFTUP 排到窗口尾后（实测 ds_transpose+20 而非 +19）→ 重新错窗。
+                #   故对该边钉死 `==`：consumer 排程拍 == ds_transpose + delays[SMI_DS_T](=collect16+drain3=19)。
+                #   ⚠ 门控精确到「producer 是 SMI_DS_T **且** consumer 带 dst_datapath_value」——只命中
+                #   unit_ds_transpose 的 shiftup_ds_t；matmul/fma 的 a_read 也依赖 ds_transpose 但**无**
+                #   dst_datapath_value，仍走 >= 保留 slack（钉死会过约束 matmul → 破 SAT）。
+                #   counter-verifier 维度6 是区间 [t+lat, t+lat+II) 检查，== 落在区间内 → 无需同步改
+                #   （区别 ADR-021 fold：那是 axiom/verifier 算的 lat 值不同；此处仅收紧到下界，verifier 仍过）。
                 label = f"lat_{op.trace_id}_{dep_id}_{mode}"
-                DependencyAxioms._add_constraint(
-                    solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label
-                )
+                if (op_type == "SMI_DS_T"
+                        and op.metadata.get("dst_datapath_value")):
+                    DependencyAxioms._add_constraint(
+                        solver, t_vars[op.trace_id] == t_vars[dep_id] + lat,
+                        f"smi_ds_t_exact_{op.trace_id}_{dep_id}_{mode}"
+                    )
+                else:
+                    DependencyAxioms._add_constraint(
+                        solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label
+                    )
 
             # === RTOVR 增广边约束（Step 2）===
             latch_vars = kwargs.get("latch_vars")
