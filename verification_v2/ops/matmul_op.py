@@ -194,6 +194,7 @@ def _build_smi_ds_t_chain(cfg: Dict[str, int], spec: Any):
             # depends_on 指 RTOVR 节点（mirror matmul mul.depends_on=[rt_a]）；rtovr_deps 让
             # dependency_axioms 重定向到真生产者 ds_src_read + 建 t_latch（否则 RTOVR 无 t_var → t_c=-1）。
             "depends_on": ["rt_ds_src_SHIFTDN_S"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            "smi_ds_t_gather": True,   # ADR-038：SMI_DS_T B=2 datapath gather → assembler 给 2-slot 迭代
             # 契约修复（user 2026-06-25「文档设计为准」+ docx para 2208-2213）：SHIFTDN 功能
             #   broadcast==0 → 只 SMC_ID==smc_id_en 注入 DVR_SHIFTDN_S（单 SMC）；
             #   broadcast==1 → SMC_ID<=smc_id_en 全注入。gather 须收集全 gather_cnt 个 SMC 的列
@@ -223,6 +224,7 @@ def _build_smi_ds_t_chain(cfg: Dict[str, int], spec: Any):
         op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather_1",
         metadata={
             "depends_on": ["ds_src_read"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            "smi_ds_t_gather": True,   # ADR-038：SMI_DS_T B=2 datapath gather（hi slot）
             "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 1,
             "math": "smi_ds_t_gather_hi(B=2 second read of same DVR_SHIFTDN_S → fill hi slot)",
             **prologue,

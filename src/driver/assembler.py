@@ -85,16 +85,16 @@ class PhysicalAssembler:
             hdr_inc_embed = max(iq_max_stride, 1) if is_memory_iq else 0
             
             max_t_global = max(op.metadata.get("global_t", 0) for op in ops)
-            total_iterations_needed = (max_t_global // II) + num_iterations
+            # ADR-038/039：SMI_DS_T B=2 配对 datapath（SMI_DS_T 指令 IQ + 喂它的 SHIFTDN gather IQ）须
+            # 始终做 **2 slot（B=2）** 迭代——issue_cnt==2 才出数 + 两 slot 各须 8 beat 填满。这与输出词数
+            # （num_iterations）**无关**：fp16(8 元素=1 词)num_iterations=1 → 只 1 issue + gather 只送 1 slot
+            # → hi 槽 open 不 fill → hi_ready=0 → 永不出数（VCS tb_dst_fp16 实证）。fp32(2 词)是
+            # num_iterations=2 巧合凑够。故对这些 IQ 用 eff_num_iter=max(num_iterations,2)，与输出词数解耦。
+            is_smi_ds_t_dp = ("smi-ds-t" in iq_name.lower()
+                              or any(op.metadata.get("smi_ds_t_gather") for op in ops))
+            eff_num_iter = max(num_iterations, 2) if is_smi_ds_t_dp else num_iterations
+            total_iterations_needed = (max_t_global // II) + eff_num_iter
             loops_val = total_iterations_needed - skip_iterations - 1
-
-            # ADR-038/039：SMI_DS_T 是 RTL 无条件配对引擎（start_out 要 issue_cnt==2 + lo/hi 双 slot），
-            # 其 issue 次数 = 配对(B=2)，**不能依赖 num_iterations(输出词数)**。fp16(8 元素=1 词)下
-            # num_iterations=1 → loops_val=0 → 只 1 次 issue → issue_cnt=1 → both_open=0 → 永不出数
-            # （VCS 实证 tb_dst_fp16）。fp32(2 词)是 num_iterations=2 巧合给 2 issue。强制 SMI_DS_T
-            # loops_val>=1（≥2 次 body fire = 2 拍 cri_vld = 配对成立），与输出词数解耦。
-            if "smi-ds-t" in iq_name.lower():
-                loops_val = max(loops_val, 1)
 
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=l_init, trace_id=f"hdr_{iq_name}",
