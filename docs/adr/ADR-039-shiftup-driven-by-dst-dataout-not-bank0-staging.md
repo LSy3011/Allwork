@@ -106,12 +106,16 @@ ds_src_read(UR_READ 列对齐) → SHIFTDN gather ×2(B=2, ADR-038) → ds_trans
   勿把「单 hop=1」与「整链 broadcast 延迟」混算。
 - **[C5 · sim 触发改写]** 见 D2：SHIFTUP 按 decode addr 选行 + 删 bank0 读端点 + 完整性门豁免无源 SHIFTUP。
 
-### D3.【牵连，本 ADR 仅 flag 不解】matmul/fma SHIFTUP 广播激活疑非物理
-SHIFTUP 既只能广播 DS_T 转置输出，则 ADR-023(fma_parallel_n)/ADR-025(matmul_parallel_n) 的「SHIFTUP 广播
-激活向量」在 RTL `wrd_data`/`shift_up.data_in` 层**无源**（evaluator 推论 2 PASS）。其 8/8 bit-perfect 是
-sim 自洽（sim SHIFTUP 广播任意 `dr_d`，RTL 不能）。**激活若要经 SHIFTUP 广播，必须先过 SMI_DS_T（会转置）。**
-→ 记 **DEBT-039-MATMUL-BCAST-NONPHYS**，单独 ADR + hco 评审「multi-SMC matmul 激活分发到底怎么在硬件上做」
-（与 DEBT-023-B 真 fabric 同根）。本 ADR 不在此动 ADR-023/025。
+### D3.【牵连，本 ADR 仅 flag 不解】matmul/fma 激活广播必经 SMI_DS_T 路由
+**（2026-06-29 由 v0.4.19 文档 §「基于加法树的向量/矩阵乘法」订正，user 确认；见
+[[matmul-addtree-dataflow-authoritative]]）**：文档 §1187-1195/1237-1240 明确 matmul 激活广播 =
+`读(B=2)→ SMI_DS_T(排序/透传)→ SHIFTUP`，与 RTL 硬连 `ds_t_data_out` **自洽**——激活本就必须经 SMI_DS_T
+才能上 SHIFTUP。故 ADR-023(fma_parallel_n)/ADR-025(matmul_parallel_n) 的「裸 `a_read(bank0)→SHIFTUP` 广播
+激活」**跳过了 SMI_DS_T**，那才是非物理的部分（其 8/8 是 sim 自洽，sim SHIFTUP 广播任意 `dr_d`）。
+→ 记 **DEBT-039-MATMUL-BCAST-VIA-DST**（措辞由「NONPHYS」订正）：matmul 激活广播须按 DST datapath 重建
+（读 B=2 → SMI_DS_T 排序/透传 → SHIFTUP），**与 D1 / unit_ds_transpose 同一修法** → 修好 unit_ds_transpose
+= 打通 matmul 激活广播机制。单独 ADR 处理 ADR-023/025 迁移；本 ADR 不在此动它们，但**方向已不是「另寻机制」
+而是「复用本 ADR 的 DST datapath 重建」**。向量×矩阵「不需转置即广播」的 SMI_DS_T 透传/旁路细节 = 待 RTL 定。
 
 ## 待 hco / 实现期钉死的开放问题
 - **[Q1 时序]** data_out 流式出 N 行（latency=16 后每拍一行），SHIFTUP 须逐行广播、UR_write 逐行写 bank5
