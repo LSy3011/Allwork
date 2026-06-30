@@ -50,6 +50,23 @@ class TestLLMMatmulTiles(unittest.TestCase):
             self.assertLess(r.max_rel_err, 1e-2,
                             f"{r.gemm.name}: fp16 量化 rel-err {r.max_rel_err:.2e} 超 1e-2")
 
+    def test_real_checkpoint_weights_fp16_safe(self):
+        """真 checkpoint 权重路径：仅当权重已缓存（build/llm_weights_cache/，gitignore、本地 fetch 过）才跑——
+        CI 离线不触发下载、自动 skip。守：真权重 tile 也 bit-exact + 无溢出（真 LLM 权重含离群仍 fp16-safe）。
+        本地补缓存：python3 verification_v2/tools/llm_checkpoint_weights.py --model tinyllama-1.1b"""
+        from verification_v2.tools.llm_checkpoint_weights import CACHE_DIR
+        if not (CACHE_DIR / f"{self.MODEL}.npz").exists():
+            self.skipTest("真权重未缓存（离线/CI）；本地跑 llm_checkpoint_weights.py 补缓存后启用")
+        reports = run(self.MODEL, seq_len=128, decode=True, n_samples=self.SAMPLES,
+                      seed=0, real_weights=True)
+        real_gemms = [r for r in reports if r.real_w]
+        self.assertGreaterEqual(len(real_gemms), 8, "应有 ≥8 个 GEMM 用真权重（q/k/v/o/gate/up/down/lm_head）")
+        for r in real_gemms:
+            self.assertEqual(r.bit_exact_fail, 0, f"{r.gemm.name}(real): 须 bit-exact")
+            self.assertEqual(r.nan + r.overflow, 0,
+                             f"{r.gemm.name}(real): 真权重 fp16 dot 不应溢出/NaN")
+            self.assertLess(r.max_rel_err, 1e-2, f"{r.gemm.name}(real): rel-err 超界")
+
 
 if __name__ == "__main__":
     unittest.main()

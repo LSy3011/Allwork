@@ -141,16 +141,18 @@ class GemmReport:
     overflow: int
     nan: int
     bit_exact_fail: int
+    real_w: bool = False
 
 
 def validate_gemm(g: Gemm, n_samples: int, rng: np.random.Generator,
-                  op: ManualFp16MatmulOperator) -> GemmReport:
+                  op: ManualFp16MatmulOperator, wsampler=None) -> GemmReport:
     max_rel = 0.0
     max_abs = 0.0
     overflow = nan = bitfail = 0
+    real_w = wsampler is not None and wsampler.has(g.name)
     for _ in range(n_samples):
         a = sample_vec(g.a_role, rng)
-        b = sample_vec(g.w_role, rng)
+        b = wsampler.sample(g.name, rng) if real_w else sample_vec(g.w_role, rng)
         if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
             overflow += 1                       # fp16 输入已溢出（离群 × 大 → inf）
             continue
@@ -166,7 +168,7 @@ def validate_gemm(g: Gemm, n_samples: int, rng: np.random.Generator,
         denom = abs(truth) if abs(truth) > 1e-6 else 1.0
         max_rel = max(max_rel, abs(hw - truth) / denom)
         max_abs = max(max_abs, abs(hw))
-    return GemmReport(g, n_samples, max_rel, max_abs, overflow, nan, bitfail)
+    return GemmReport(g, n_samples, max_rel, max_abs, overflow, nan, bitfail, real_w)
 
 
 def _balanced_tree_ref(a: np.ndarray, b: np.ndarray) -> np.float32:
@@ -178,11 +180,18 @@ def _balanced_tree_ref(a: np.ndarray, b: np.ndarray) -> np.float32:
     return f32(f32(l0 + l1) + f32(l2 + l3))
 
 
-def run(model_key: str, seq_len: int, decode: bool, n_samples: int, seed: int) -> List[GemmReport]:
+def run(model_key: str, seq_len: int, decode: bool, n_samples: int, seed: int,
+        real_weights: bool = False) -> List[GemmReport]:
     cfg = MODELS[model_key]
     rng = np.random.default_rng(seed)
     op = ManualFp16MatmulOperator()
     gemms = enumerate_gemms(cfg, seq_len, decode)
+    wsampler = None
+    if real_weights:
+        from verification_v2.tools.llm_checkpoint_weights import load_sampler
+        wsampler = load_sampler(model_key)
+        if wsampler is None:
+            print("[warn] 真权重不可用（网络/权限），回退合成分布")
 
     mode = "decode (M=1)" if decode else f"prefill (M={seq_len})"
     print(f"\n=== {cfg.name} · {mode} · ctx={seq_len} · fp16 tile(K={K_TILE},N={N_TILE},M≤{M_TILE}) ===")
@@ -196,15 +205,16 @@ def run(model_key: str, seq_len: int, decode: bool, n_samples: int, seed: int) -
     print(f"{'—'*64}\n单层 weight+attn GEMM 总 tile 数 ≈ {total_tiles:,}（多-tile 编排 DEBT-025 未实现，"
           f"现仅验单 tile compute）")
 
-    print(f"\n--- fp16 tile compute 验证（每 GEMM 采样 {n_samples} 个 K=8 tile）---")
-    print(f"{'GEMM':<11}{'samples':>8}{'max_rel_err':>13}{'max|out|':>11}{'overflow':>9}"
+    wsrc = "真 checkpoint 权重" if wsampler else "合成分布"
+    print(f"\n--- fp16 tile compute 验证（每 GEMM 采样 {n_samples} 个 K=8 tile；权重={wsrc}，激活=合成）---")
+    print(f"{'GEMM':<11}{'w_src':>7}{'samples':>8}{'max_rel_err':>13}{'max|out|':>11}{'overflow':>9}"
           f"{'nan':>5}{'bit_fail':>9}")
     reports = []
     for g in gemms:
-        r = validate_gemm(g, n_samples, rng, op)
+        r = validate_gemm(g, n_samples, rng, op, wsampler)
         reports.append(r)
-        print(f"{g.name:<11}{r.samples:>8}{r.max_rel_err:>13.2e}{r.max_abs_out:>11.2f}"
-              f"{r.overflow:>9}{r.nan:>5}{r.bit_exact_fail:>9}")
+        print(f"{g.name:<11}{'real' if r.real_w else 'synth':>7}{r.samples:>8}{r.max_rel_err:>13.2e}"
+              f"{r.max_abs_out:>11.2f}{r.overflow:>9}{r.nan:>5}{r.bit_exact_fail:>9}")
     return reports
 
 
@@ -215,8 +225,10 @@ def main():
     ap.add_argument("--prefill", action="store_true", help="prefill（M=seq）；默认 decode（M=1）")
     ap.add_argument("--samples", type=int, default=2000, help="每 GEMM 采样 tile 数")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--real-weights", action="store_true",
+                    help="用真 checkpoint 权重（range-read HF safetensors，缓存 build/）；激活仍合成")
     args = ap.parse_args()
-    run(args.model, args.seq, not args.prefill, args.samples, args.seed)
+    run(args.model, args.seq, not args.prefill, args.samples, args.seed, args.real_weights)
 
 
 if __name__ == "__main__":
