@@ -44,6 +44,30 @@ class TestSmiDsTE2EExitCode(unittest.TestCase):
         self.assertEqual(rc, 0, f"fp16_matmul_q_dst --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
 
 
+class TestMatmulMultiChannelDenseGolden(unittest.TestCase):
+    """ADR-026 Stage-2 / ADR-036 S3：多通道 dense matmul（M 行 → addtree 独立 lane S0..S{M-1}，
+    破 matmul_q 的 pipeline-depth M≤4 hack）的**最终 golden parity** 守门。
+
+    `matmul_q_dst_full`（K=8、M=4、cumulative 跨 2 tile、4 通道 dense 输出 [Q0..Q3]）compute
+    bit-perfect，但 `--mode e2e` **exit=1**——per-op Truth Audit 对多通道中间值假阳（FP32-only +
+    非拓扑序求值，CLAUDE.md「正确性以最终 golden parity 为准」+ fma bug#4 同源）。故本测**不**断言
+    exit=0，断言**项目真验收标准 = 最终 8/8 SMC golden bit-perfect**（physical_runner 输出行）。
+    专杀：若多通道 compute/通道串扰回归 → golden parity 转 FAILED，本测立挂。
+    （注：M>4 真数据通路受「多行激活驻留交付」墙，非本测范围；见会话分析 + DEBT-036-K8COMPUTE。）"""
+
+    def _run_e2e(self, op: str):
+        proc = subprocess.run(
+            [sys.executable, "verification_v2/main_verify.py", "--op", op, "--mode", "e2e"],
+            cwd=str(_ROOT), capture_output=True, text=True, timeout=300, env=dict(os.environ))
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_matmul_q_dst_full_golden_bit_perfect(self):
+        _rc, out = self._run_e2e("matmul_q_dst_full")
+        self.assertIn("PASSED y: All 8 SMC outputs bit-perfect", out,
+                      f"matmul_q_dst_full 多通道 dense compute 应 8/8 SMC golden bit-perfect\n{out[-2500:]}")
+        self.assertNotIn("FAILED y:", out, f"golden parity 不应 FAILED（多通道串扰回归）\n{out[-2500:]}")
+
+
 class TestDocFlowUnitE2E(unittest.TestCase):
     """文档钦定流程的 8-SMC 功能测例 e2e 守护（VCS 对齐基础，自底向上）。
     - unit_fpadd：Flow A 单一计算指令（FPADD，文档 para 4828）；每 SMC Bank0+Bank1→Bank2。
