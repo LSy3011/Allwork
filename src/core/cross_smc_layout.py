@@ -101,3 +101,35 @@ def ur_vec_tran_inte(smc_num: int, ur_byte_cnt: int = 16, element_byte: int = 2)
     """§1092 转置间插 UR_Vec_Tran_Inte_D3inner：W 维 D3 间插展开，典型 B=2·UR_BYTE_CNT/ELEMENT_BYTE。"""
     B = 2 * ur_byte_cnt // element_byte
     return CrossSmcLayout(smc_num=smc_num, mode=Unroll.INTERLEAVE, B=B)
+
+
+# ---- sim/emitter 整合：按 layout 跨-SMC 分散注入 per-SMC programs ----
+def inject_distributed(programs: List, tensor: np.ndarray, layout: CrossSmcLayout,
+                       logical_addr: int, stride: int = 1) -> List[np.ndarray]:
+    """把 1D 张量按 `layout`（§1071/1073 连续/间插展开）**分散注入** per-SMC programs 的独立 bank。
+    = 算子声明跨-SMC 存储格式后由框架自动放置，替代 inject_data_per_smc 里手搓的 SMC 分散逻辑。
+    programs[smc] = SMC smc 的 MockProgram（须有 inject_vector(logical_addr, data, stride)）。
+    返回每 SMC 切片（= layout.distribute），便于校验/建 golden。"""
+    if len(programs) < layout.smc_num:
+        raise ValueError(f"programs 须 ≥{layout.smc_num} 个，得 {len(programs)}")
+    slices = layout.distribute(tensor)
+    for smc in range(layout.smc_num):
+        if len(slices[smc]):
+            programs[smc].inject_vector(logical_addr, slices[smc], stride=stride)
+    return slices
+
+
+def gather_from_programs(programs: List, layout: CrossSmcLayout, logical_addr: int,
+                         D3: int, vector_lanes: int) -> np.ndarray:
+    """从 per-SMC programs 的独立 bank 读回分散切片并 gather 复原 1D 张量（sim 级 roundtrip 逆）。"""
+    bank = logical_addr // programs[0].bank_depth
+    offset = logical_addr % programs[0].bank_depth
+    lens = layout.per_smc_len(D3)
+    per_smc = []
+    for smc in range(layout.smc_num):
+        n = lens[smc]
+        flat = []
+        for r in range((n + vector_lanes - 1) // vector_lanes):
+            flat.extend(programs[smc].memory_allocator.banks[bank][offset + r])
+        per_smc.append(np.array(flat[:n], dtype=programs[smc].memory_allocator.banks[bank][offset].dtype))
+    return layout.gather(per_smc, D3)

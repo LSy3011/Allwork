@@ -14,7 +14,8 @@ for _p in (str(_ROOT), str(_ROOT / "src")):
         sys.path.insert(0, _p)
 
 from core.cross_smc_layout import (CrossSmcLayout, Unroll,  # noqa: E402
-                                   ur_vec_tran_succ, ur_vec_tran_inte)
+                                   ur_vec_tran_succ, ur_vec_tran_inte,
+                                   inject_distributed, gather_from_programs)
 
 
 class TestCrossSmcLayout(unittest.TestCase):
@@ -68,6 +69,43 @@ class TestCrossSmcLayout(unittest.TestCase):
         inte = CrossSmcLayout(8, Unroll.INTERLEAVE, B=1).distribute(t)
         self.assertFalse(all(np.array_equal(cont[x], inte[x]) for x in range(8)),
                          "连续与间插展开（B=1）布局应不同")
+
+
+class TestInjectDistributedSimIntegration(unittest.TestCase):
+    """sim/emitter 整合：layout 驱动的跨-SMC 分散注入落到真 MockProgram（sim 消费的 per-SMC bank）。"""
+
+    def _programs(self, n=8):
+        import os
+        for _p in (str(_ROOT), str(_ROOT / "src"), str(_ROOT / "verification_v2")):
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+        os.chdir(_ROOT)
+        from api.hw_spec import HardwareSpec
+        from verification_v2.infra.mock_memory import MockProgram
+        spec = HardwareSpec.load("hw_config")
+        return [MockProgram(spec, dtype=np.float16) for _ in range(n)], spec
+
+    def test_distributed_inject_populates_per_smc_banks(self):
+        """64 fp16 连续展开 → 每 SMC 独立 bank0 持自己 8 fp16 切片（= layout.distribute）。"""
+        programs, _ = self._programs()
+        vec = np.arange(1, 65, dtype=np.float16)            # 64 fp16
+        lay = CrossSmcLayout(8, Unroll.CONTIGUOUS)          # chunk=8
+        slices = inject_distributed(programs, vec, lay, logical_addr=0)  # bank0 offset0
+        for smc in range(8):
+            bank0_row0 = programs[smc].memory_allocator.banks[0][0]   # 8 fp16 = 1 行
+            np.testing.assert_array_equal(bank0_row0, slices[smc],
+                                          err_msg=f"SMC_{smc} bank0 应持连续切片 {slices[smc].tolist()}")
+            np.testing.assert_array_equal(slices[smc], np.arange(8 * smc + 1, 8 * smc + 9))
+
+    def test_sim_level_roundtrip_inject_then_gather(self):
+        """sim 级 roundtrip：分散注入 → 从 per-SMC bank gather 回 == 原向量（连续/间插都验）。"""
+        for lay in (CrossSmcLayout(8, Unroll.CONTIGUOUS),
+                    CrossSmcLayout(8, Unroll.INTERLEAVE, B=2)):
+            programs, _ = self._programs()
+            vec = np.arange(1, 65, dtype=np.float16)
+            inject_distributed(programs, vec, lay, logical_addr=0)
+            got = gather_from_programs(programs, lay, logical_addr=0, D3=64, vector_lanes=8)
+            np.testing.assert_array_equal(got, vec, err_msg=f"sim roundtrip mode={lay.mode} B={lay.B}")
 
 
 if __name__ == "__main__":
