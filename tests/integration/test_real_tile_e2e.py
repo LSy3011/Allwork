@@ -38,10 +38,22 @@ class TestRealTileE2E(unittest.TestCase):
         if not (CACHE_DIR / f"{self.MODEL}.npz").exists():
             self.skipTest("真权重未缓存（离线/CI）；本地跑 llm_checkpoint_weights.py 补缓存后启用")
         from verification_v2.tools.run_real_tile_e2e import run
-        results = run(self.MODEL, per_gemm=1, seed=0, gemms=["gate_proj"], n8=True)
+        results = run(self.MODEL, per_gemm=1, seed=0, gemms=["gate_proj"], variant="n8")
         passed, failed = results["gate_proj"]
         self.assertEqual(failed, 0, f"真权重列 N=8 e2e 应全 PASS（8 SMC bit-perfect），得 {failed} FAIL")
         self.assertGreaterEqual(passed, 1, "应至少 1 个 N=8 tile 通过")
+
+    def test_real_weight_cols_pass_fp16_matmul_q_dst_e2e(self):
+        """dst 变体：同 npz（a + b0..b3）但走 **SMI_DS_T 转置前端**（激活列对齐 gather→转置 1×8→
+        SHIFTUP 广播→每 SMC dot），真权重过最长真数据通路。守 8 SMC golden bit-perfect。"""
+        from verification_v2.tools.llm_checkpoint_weights import CACHE_DIR
+        if not (CACHE_DIR / f"{self.MODEL}.npz").exists():
+            self.skipTest("真权重未缓存（离线/CI）；本地跑 llm_checkpoint_weights.py 补缓存后启用")
+        from verification_v2.tools.run_real_tile_e2e import run
+        results = run(self.MODEL, per_gemm=1, seed=0, gemms=["gate_proj"], variant="dst")
+        passed, failed = results["gate_proj"]
+        self.assertEqual(failed, 0, f"真权重列 dst（转置前端）e2e 应全 PASS，得 {failed} FAIL")
+        self.assertGreaterEqual(passed, 1, "应至少 1 个 dst tile 通过")
 
 
 if __name__ == "__main__":

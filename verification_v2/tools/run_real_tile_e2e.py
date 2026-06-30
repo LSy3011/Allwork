@@ -27,8 +27,10 @@ for _p in (str(_ROOT), str(_ROOT / "src")):
 from verification_v2.tools.llm_checkpoint_weights import load_sampler, TENSOR_KEYS  # noqa: E402
 from verification_v2.tools.gen_llm_matmul_tiles import enumerate_gemms, sample_vec, MODELS  # noqa: E402
 
-OP_SINGLE = "fp16_matmul_min"   # 单-SMC K=8 dot（npz: a,b 各 (8,)）
-OP_N8 = "fp16_matmul_n"         # multi-SMC N=8×COLS=4=32 输出（npz: a (8,) + b0..b3 (8 SMC,8 K)）
+# variant → 实际算子。single=单-SMC K=8 dot（npz: a,b 各 (8,)）；n8/dst=multi-SMC N=8×COLS=4=32 输出
+# （npz: a (8,) + b0..b3 (8 SMC,8 K)，**两者 input_data 形状相同**）。dst 额外走 SMI_DS_T 转置前端
+# （激活列对齐 gather→转置→广播），故同 npz 验更长的真数据通路。
+OPS = {"single": "fp16_matmul_min", "n8": "fp16_matmul_n", "dst": "fp16_matmul_q_dst"}
 N8_COLS = 4
 N8_SMC = 8
 
@@ -44,16 +46,17 @@ def _run_one(npz_path: Path, op: str, timeout: int = 180) -> Tuple[bool, str]:
 
 
 def run(model_key: str, per_gemm: int, seed: int, gemms: List[str] = None,
-        n8: bool = False) -> Dict[str, Tuple[int, int]]:
+        variant: str = "single") -> Dict[str, Tuple[int, int]]:
     """每个 weight GEMM 采样 per_gemm 个真权重 tile 经实际算子 e2e 跑，返 {gemm:(passed,failed)}。
-    n8=False：单-SMC（fp16_matmul_min，1 个真权重列/tile）；n8=True：multi-SMC（fp16_matmul_n，
-    每 tile=32 个真权重列 = N8_SMC×N8_COLS，跑真 N=8 跨-SMC matmul 数据通路）。"""
+    variant: single=单-SMC（1 真权重列/tile）；n8=multi-SMC N=8（32 真权重列/tile）；
+    dst=同 n8 但走 SMI_DS_T 转置前端（更长真数据通路）。"""
     sampler = load_sampler(model_key)
     if sampler is None:
         raise RuntimeError("真权重不可用（网络/缓存缺）")
     a_role = {g.name: g.a_role for g in enumerate_gemms(MODELS[model_key], seq_len=128, decode=True)}
     target = gemms or [g for g in TENSOR_KEYS if sampler.has(g)]
-    op = OP_N8 if n8 else OP_SINGLE
+    op = OPS[variant]
+    multi = variant != "single"
     rng = np.random.default_rng(seed)
     results: Dict[str, Tuple[int, int]] = {}
     with tempfile.TemporaryDirectory() as td:
@@ -62,7 +65,7 @@ def run(model_key: str, per_gemm: int, seed: int, gemms: List[str] = None,
             for i in range(per_gemm):
                 a = sample_vec(a_role.get(gemm, "hidden_rmsnorm"), rng)  # 合成广播激活
                 payload = {"a": a}
-                if n8:
+                if multi:
                     for c in range(N8_COLS):     # 32 个真权重列：b{c}[s] = 输出神经元 (s,c) 的真 K=8 权重
                         payload[f"b{c}"] = np.stack(
                             [sampler.sample(gemm, rng) for _ in range(N8_SMC)]).astype(np.float16)
@@ -86,13 +89,13 @@ def main():
     ap.add_argument("--model", default="tinyllama-1.1b", choices=list(MODELS))
     ap.add_argument("--per-gemm", type=int, default=2, help="每 GEMM e2e tile 数（慢，每 tile 一次 e2e）")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--n8", action="store_true",
-                    help="multi-SMC fp16_matmul_n（每 tile 32 真权重列，真 N=8 跨-SMC 通路）；默认单-SMC")
+    ap.add_argument("--variant", choices=list(OPS), default="single",
+                    help="single=单-SMC K=8 dot；n8=multi-SMC N=8（32 真权重列）；dst=n8+SMI_DS_T 转置前端")
     args = ap.parse_args()
-    op = OP_N8 if args.n8 else OP_SINGLE
-    cols = f"（每 tile {N8_SMC}×{N8_COLS}=32 真权重列）" if args.n8 else ""
+    op = OPS[args.variant]
+    cols = f"（每 tile {N8_SMC}×{N8_COLS}=32 真权重列）" if args.variant != "single" else ""
     print(f"=== {MODELS[args.model].name} · 真权重 tile → {op} e2e（每 GEMM {args.per_gemm} tile）{cols} ===")
-    results = run(args.model, args.per_gemm, args.seed, n8=args.n8)
+    results = run(args.model, args.per_gemm, args.seed, variant=args.variant)
     print(f"\n{'GEMM':<11}{'passed':>8}{'failed':>8}")
     tot_p = tot_f = 0
     for gemm, (p, f) in results.items():
