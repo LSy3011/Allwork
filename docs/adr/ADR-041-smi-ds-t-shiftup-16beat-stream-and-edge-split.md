@@ -104,7 +104,22 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
 - `WINDOW` 新概念需接 emit(LOOPS) + **SHIFTUP/UR_W0 16 拍占用进 modulo/resource 约束**（否则 matmul loop 场景与下一迭代发射撞 slot）。
 
 ## 风险 / 债务
-- **DEBT-041-STREAM-DLY（hco 二审 catch，VCS-gated，升 Accepted 必修）**：当前 emit 走 IQ-LOOPS@II（II=2）→
+- ✅✅ **DEBT-041-STREAM-DLY 机制突破（2026-06-30，user 逐步指正 + RTL/文档/VCS 三重确证）——bank5 全零→15/16 行非零**：
+  整条 datapath（UR→SHIFTDN→SMI_DS_T→SHIFTUP→RtoVR→UR写 bank5）在 VCS 端到端出数。**正确机制**（推翻
+  本 ADR 之前 BLOCK-3「ds_transpose+19 EXACT 拍锚定」+ LOOPS/DLY/COND 全部错路）：
+  1. **SHIFTUP = 16 条显式相同指令 + EXTRA_DATA**（`smi_top.v:370/384` IQ14 例化 EXTRA_DATA=1、WRD 硬连
+     `ds_t_data_out`；文档 seq 1050「SHIFTUP 对应 SMI_IQ 具 EXTRA_DATA」）→ 每条等 WRD 就绪 pop 一个 data_out
+     beat、自动对齐 16 拍窗口。**绝不能用 1 条+LOOPS**（RTL 不复制成连续流，VCS 实证 o_cru_shiftup 仅 3 跳变）。
+  2. **UR_W0/RTOVR = 16 条显式 + lead-NOP**（NOP 的 LOOPS 字段，user 裁定；DLY 仅 0-7 拍不够装 ~32 拍）把写
+     使能/sel 路由推到广播窗口——UR_W0 不具 EXTRA_DATA 不等数据，须排程对齐。RTOVR 比 UR_W0 早；二者都须在
+     `dr_shiftup_d` 有效期活跃（user_register CRU 写数据 = `i_uvr_wdata_X`，靠 RtoVR sel 路由）。
+  3. 落地：`assembler.py` stream IQ 发 N 条显式（去 INIT/HDR loop）+ `stream_lead_delay`→lead-NOP；
+     `cross_smc_unit_op.py` `STREAM_LEAD_DELAY`（VCS 实测调）。**SHIFTUP 不垫**（EXTRA_DATA 自对齐）。
+  - 🔧 **剩余（DEBT-041-ADDR-MAP 收编）**：bank5 值/布局未对 golden——文档 seq 1039「转置为 **PARAM_UR_BYTE_CNT
+    行 × PARAM_SMC_NUM 列**」(fp16=16 行字节级) + seq 1042 B=2 间插输出；现 golden 是 element 级 8 行转置，须改
+    成字节级 16 行 + 间插布局。+ bank5[0]=0 off-by-one（RtoVR 1 拍路由延迟相位微调）。+ model-A sim 暂 fail
+    （sim 不建模 EXTRA_DATA/lead-NOP，须升流式模型或 gate）→ 回归未绿，本 commit 为 checkpoint。
+- ~~**DEBT-041-STREAM-DLY（旧，VCS-gated）**~~（机制已突破，见上；以下为历史推演记录）：当前 emit 走 IQ-LOOPS@II（II=2）→
   SHIFTUP 每 2 拍发一次（strided），**未达 D2 的 DLY=1 连续 16 拍**。sim model-A 不建模连续流故 proposed 不可见；
   VCS 逐拍 bank5 16 行 bit-match 会撞墙。修法（hco）= emit 16 连续 BODY（非 HDR-LOOP@II）。
   - ⚠ **实测（2026-06-29）：修法不只是 emit 改动，还卡 sim 流式模型**。试过最小 emit 修（stream IQ 用

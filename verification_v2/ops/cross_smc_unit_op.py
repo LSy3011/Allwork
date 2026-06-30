@@ -117,6 +117,7 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
     parallel_dim = "N"
     K = 8                       # gather 全 8 SMC（每 SMC 1 元素）
     SRC_BANK = 4
+    STREAM_LEAD_DELAY = 32      # ADR-041 ②：UR_W0 lead-NOP LOOPS（推到广播窗口；VCS 实测调）
 
     def __init__(self, **kwargs):
         self._smc_num = 1
@@ -215,6 +216,19 @@ class UnitDataShuffleTransposeOperator(BaseOperator):
             op.metadata.update({"shape": [self.K], "inner_loops": n_words - 1,
                                 "outer_loops": 0, "inner_inc": 1, "outer_inc": 0,
                                 "stream_beats": window})
+            # ADR-041 ②：UR_W0（写 bank5）须排到 SHIFTUP 广播窗口才写（user 2026-06-30：NOP+LOOPS 对齐）。
+            #   UR_W0 不具 EXTRA_DATA 不等数据，须垫 lead-NOP（LOOPS=STREAM_LEAD_DELAY）推到 dr_shiftup_d
+            #   有效期。delay 由 DST 输入 gather + drain 时序确定（VCS 实测调；SHIFTUP/RTOVR 不垫——SHIFTUP
+            #   靠 EXTRA_DATA 等数据、RtoVR 路由连续）。
+            # UR_W0 写使能 + RTOVR(sel=29 路由 dr_shiftup_d→uvr_wdata_0) 都须在广播窗口活跃才写得进
+            #   （user_register CRU 写数据 = i_uvr_wdata_X，由 RtoVR sel 路由；VCS 实测：只垫 UR_W0、
+            #   RTOVR 早发 → uvr_wdata_0 窗口期为零 → bank5=0）。SHIFTUP 不垫（EXTRA_DATA 自对齐）。
+            if op.op_type.upper() == "UR_WRITE":
+                op.metadata["stream_lead_delay"] = self.STREAM_LEAD_DELAY
+            elif op.op_type.upper() == "RTOVR":
+                # RTOVR 路由比 UR_W0 写早 1 拍（RtoVR sel→uvr_wdata_0 有 1 拍延迟，否则写捕获到上一拍数据
+                #   → bank5[k]=beat[k-1]、bank5[0]=0，VCS 实测 off-by-one）。
+                op.metadata["stream_lead_delay"] = self.STREAM_LEAD_DELAY - 1
         # rtovr_deps：消费者 out 经 RTOVR(sel=29) 从 SHIFTUP 取数（dependency_axioms 建 t_latch）
         for op in bcast_ops:
             if op.op_type.upper() == "RTOVR":

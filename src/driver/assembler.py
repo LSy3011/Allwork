@@ -69,21 +69,66 @@ class PhysicalAssembler:
             t_min_iq = min(op.metadata.get("global_t", 0) for op in ops)
             skip_iterations = t_min_iq // II
             l_init = (skip_iterations * II) + 1
-            
+
+            iq_max_stride = 0
+            for op in ops:
+                s = int(op.metadata.get("stride", 0))
+                if s > iq_max_stride: iq_max_stride = s
+
+            is_memory_iq = ("ur-" in iq_name.lower()) or ("rtovr" in iq_name.lower())
+            hdr_inc_embed = max(iq_max_stride, 1) if is_memory_iq else 0
+
+            # ADR-041 DEBT-041-STREAM-DLY 修（2026-06-30，照 TB tb_aiacc_top_shift IQ14 结构）：dst-datapath
+            #   stream IQ（SHIFTUP/RTOVR/UR_W0，带 stream_beats）emit **N 条显式相同指令、无 INIT/HDR loop 外壳**
+            #   —— RTL IQ14 具 EXTRA_DATA（smi_top.v:370/384：WRD 硬连 SMI_DS_T data_out），rdi_start 后**顺序
+            #   执行 N 条、每条等 WRD 就绪 pop 一个 data_out beat → N 拍自动对齐窗口**。TB 实证：16 条相同
+            #   SHIFTUP_IQ_DATA_REF（LOOPS=0、无 loop）。**绝不能用 1 条+HDR LOOPS 循环**（LOOP_CYCLE 原地保持
+            #   不重 pop WRD → 16 次广播同一/stale beat → bank5=0，VCS 实测）。逐 beat 地址 = logical_addr+k×stride
+            #   （UR_W0 stride=1 逐行 bank5[0..15]；SHIFTUP stride=0 常驻，data 字段被 WRD 覆盖）。
+            stream_beats0 = max((int(op.metadata.get("stream_beats", 0)) for op in ops), default=0)
+            if stream_beats0 > 0:
+                op = ops[0]
+                op_stride = int(op.metadata.get("stride", 0))
+                logical_addr0 = int(op.metadata.get("logical_addr", 0))
+                op_mask = 0x1 if (is_memory_iq and op_stride != 0) else 0
+                is_ur_iq = "ur-" in iq_name.lower()
+                layout = None
+                if is_ur_iq:
+                    from src.core.memory_layout import PhysicalMemoryLayout
+                    layout = PhysicalMemoryLayout.from_spec(self.hw_spec)
+                # ADR-041 ②（DEBT-041-STREAM-DLY 相位对齐，user 2026-06-30）：UR_W0（不具 EXTRA_DATA、不等数据）
+                #   须排到 SHIFTUP 广播窗口（dr_shiftup_d 有效期）才写，否则在数据到达前写零。SHIFTUP 靠
+                #   EXTRA_DATA 运行时等过 ~32 拍输入 gather 阶段，UR_W0 没等 → 早 ~32 拍。DLY 仅 0-7 拍不够，
+                #   故**垫一条 NOP（vld=0）带 LOOPS=stream_lead_delay** 把 16 条写指令推到广播窗口（NOP 支持
+                #   LOOPS，loop N 次 = 延迟 N+1 拍；user 裁定）。delay 由 producer DST 时序确定（VCS 实测调）。
+                lead_delay = int(op.metadata.get("stream_lead_delay", 0))
+                base_abs = 0
+                if lead_delay > 0:
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, abs_t=0, trace_id=f"leadnop_{iq_name}",
+                        header=SMIHeader(vld=0, loops=lead_delay), payload={},
+                        stage="BODY", op_type=str(ops[0].op_type)))
+                    base_abs = lead_delay + 1
+                for k in range(stream_beats0):
+                    header = SMIHeader(vld=1, inc=0, dly=0, inc_embed=op_mask)
+                    payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
+                    if layout is not None:
+                        addr_k = logical_addr0 + op_stride * k
+                        orig_bank, orig_offset = layout.resolve(int(addr_k))
+                        payload["BANK"] = orig_bank
+                        payload["ADDR"] = orig_offset % layout.bank_depth
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, abs_t=base_abs + k, header=header, payload=payload,
+                        stage="BODY", local_id=k, op_type=str(ops[0].op_type),
+                        trace_id=op.trace_id if k == 0 else f"{op.trace_id}_b{k}"))
+                continue
+
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
                 header=SMIHeader(vld=0, loops=l_init - 1), payload={},
                 stage="INIT", op_type=str(ops[0].op_type)
             ))
 
-            iq_max_stride = 0
-            for op in ops:
-                s = int(op.metadata.get("stride", 0))
-                if s > iq_max_stride: iq_max_stride = s
-            
-            is_memory_iq = ("ur-" in iq_name.lower()) or ("rtovr" in iq_name.lower())
-            hdr_inc_embed = max(iq_max_stride, 1) if is_memory_iq else 0
-            
             max_t_global = max(op.metadata.get("global_t", 0) for op in ops)
             # ADR-038/039：SMI_DS_T B=2 配对 datapath（SMI_DS_T 指令 IQ + 喂它的 SHIFTDN gather IQ）须
             # 始终做 **2 slot（B=2）** 迭代——issue_cnt==2 才出数 + 两 slot 各须 8 beat 填满。这与输出词数
@@ -92,15 +137,8 @@ class PhysicalAssembler:
             # num_iterations=2 巧合凑够。故对这些 IQ 用 eff_num_iter=max(num_iterations,2)，与输出词数解耦。
             is_smi_ds_t_dp = ("smi-ds-t" in iq_name.lower()
                               or any(op.metadata.get("smi_ds_t_gather") for op in ops))
-            # ADR-041 BLOCK-2/D2：SMI_DS_T 输出 16-beat 流——SHIFTUP/RTOVR/UR_W0 须持续广播 WINDOW 拍
-            #   （逐拍取不同 data_out beat）。这些 IQ 的节点带 stream_beats（cross_smc_unit_op 在 dst-datapath
-            #   建节点时打标，门控 producer=SMI_DS_T；fma/matmul broadcast SHIFTUP 无此标记 → 不受影响）。
-            #   用 stream_beats 覆盖 IQ 级 LOOPS（与输出词数 num_iterations 解耦：fp16 num_iterations=1 但
-            #   须广播 8/16 拍逐行）。SHIFTUP INC=0（data 硬连 data_out）、UR_W0 INC=1（连续行）由各 op stride 定。
-            stream_beats = max((int(op.metadata.get("stream_beats", 0)) for op in ops), default=0)
-            if stream_beats > 0:
-                eff_num_iter = stream_beats
-            elif is_smi_ds_t_dp:
+            # （stream IQ 已在上方 N-条显式分支提前 continue；此处只剩非-stream IQ。）
+            if is_smi_ds_t_dp:
                 eff_num_iter = max(num_iterations, 2)
             else:
                 eff_num_iter = num_iterations
