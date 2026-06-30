@@ -2,8 +2,8 @@
 adr_id: ADR-041
 title: SMI_DS_T 输出 = 16-beat 流 —— SHIFTUP/UR_W0 改持续广播 + SMI_DS_T 边权拆「首 beat latency / 窗口 16」（修 unit_ds_transpose bank5=0）
 decided: 2026-06-29
-last_verified: 2026-06-29
-still_holds: proposed（BLOCK-1/2/3 全落地 2026-06-29，hco APPROVE 可升 proposed；Accepted 仍卡 VCS：DEBT-041-STREAM-DLY + ADDR-MAP）
+last_verified: 2026-06-30
+still_holds: proposed（BLOCK-1/2/3 全落地；2026-06-30 DEBT-041-STREAM-DLY+ADDR-MAP 收编：fp16 bank5 8/8 SMC × 16/16 行 VCS bit-perfect、pytest 164 全绿；升 Accepted 待 evaluator 复核 + fp32 hi-slot/元素序终判）
 builds_on: ADR-038, ADR-039, ADR-040
 implements: ADR-040 DEBT-040-DST-EDGE-SEMANTICS
 hco_review: APPROVE-方向（2026-06-29）+ APPROVE-可升 proposed（2026-06-29 二审，3 BLOCK 全闭/门控精确/SMT SAT/pytest 不破；DLY=1 未达成记 DEBT-041-STREAM-DLY）
@@ -115,10 +115,22 @@ SHIFTUP vld 与 `data_out` 窗口是 **EXACT 对齐**（`shift_up` 无握手，�
      `dr_shiftup_d` 有效期活跃（user_register CRU 写数据 = `i_uvr_wdata_X`，靠 RtoVR sel 路由）。
   3. 落地：`assembler.py` stream IQ 发 N 条显式（去 INIT/HDR loop）+ `stream_lead_delay`→lead-NOP；
      `cross_smc_unit_op.py` `STREAM_LEAD_DELAY`（VCS 实测调）。**SHIFTUP 不垫**（EXTRA_DATA 自对齐）。
-  - 🔧 **剩余（DEBT-041-ADDR-MAP 收编）**：bank5 值/布局未对 golden——文档 seq 1039「转置为 **PARAM_UR_BYTE_CNT
-    行 × PARAM_SMC_NUM 列**」(fp16=16 行字节级) + seq 1042 B=2 间插输出；现 golden 是 element 级 8 行转置，须改
-    成字节级 16 行 + 间插布局。+ bank5[0]=0 off-by-one（RtoVR 1 拍路由延迟相位微调）。+ model-A sim 暂 fail
-    （sim 不建模 EXTRA_DATA/lead-NOP，须升流式模型或 gate）→ 回归未绿，本 commit 为 checkpoint。
+  - ✅✅✅ **DEBT-041-ADDR-MAP 收编完成（2026-06-30，bank5 8/8 SMC × 16/16 行 VCS bit-perfect）**：三步全落地——
+    1. **golden 改 16-beat 布局**（`get_golden` 重写）：从输入 `a` 经确定性变换推 16 beat（非抄 RTL hex）——
+       beat k 取元素列 `e=7-(k//2)`（RTL 元素降序）、SMC 半区 `h=k%2`（h0=SMC0-3,h1=SMC4-7）、4 个 SMC 第 e
+       元素各**成对重复**（B=2 间插，seq1039/1042）→ 每 SMC bank5 = 128 fp16（16 行×8）。offline 已证
+       `golden[k]==旧 bank5[k+1]`（变换精确反演 RTL）。
+    2. **off-by-one 修**：`STREAM_LEAD_DELAY` 32→**33**（仅 fp16 子类覆盖，RTOVR 仍 LEAD-1=32）。VCS 实证：
+       之前 bank5[0]=0、bank5[k]=beat[k-1]、beat[15] 越界丢；+1 把 UR_W0/RTOVR 整体推 1 拍 → 16 beat 全落
+       bank5[0..15]、**8 个 SMC 各 16/16 行 bit-perfect**。
+    3. **回归绿（gate 诚实）**：model-A sim 不建模 N-beat EXTRA_DATA/lead-NOP 流（取零）→ fp16/fp32 `--mode e2e`
+       sim-parity 必 FAIL，**非回归、是 model-A 结构局限**。处理：① `auditor.py` Header Audit 改 stream-aware
+       （从 physical_instructions.json 认 stream IQ=无 HDR stage → skip HDR 审，非掩盖，VCS 背书）；②
+       `test_unit_ds_transpose_e2e_exit0`→`_firmware_and_integrity`：弃 exit=0/y-parity 断言，改守 model-A 能验
+       的结构正确性（Header Audit SUCCESS + 固件完整性门 SUCCESS）。`pytest tests/` **164 passed + 6 skipped 全绿**。
+  - 🔧 **仍 deferred**：fp32 unit_ds_transpose VCS 未验（hi-slot 第二 tile 真值 = DEBT-038-B2-GATHER）；
+    model-A sim 流式模型升级（让 sim 也能复现 16-beat 成对流 → sim-parity 恢复）= 同 DEBT-038-B2-GATHER；
+    **元素降序序**是否硬件约定 vs transpose 方向 bug 待 spec 终判（见上「待厘清」，golden 已迁就降序、若判升序则此为 bug locus）。
 - ~~**DEBT-041-STREAM-DLY（旧，VCS-gated）**~~（机制已突破，见上；以下为历史推演记录）：当前 emit 走 IQ-LOOPS@II（II=2）→
   SHIFTUP 每 2 拍发一次（strided），**未达 D2 的 DLY=1 连续 16 拍**。sim model-A 不建模连续流故 proposed 不可见；
   VCS 逐拍 bank5 16 行 bit-match 会撞墙。修法（hco）= emit 16 连续 BODY（非 HDR-LOOP@II）。

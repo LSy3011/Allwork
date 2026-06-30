@@ -1090,35 +1090,66 @@ class TestADR041StreamAndExactAnchor(unittest.TestCase):
                                      f"{key} 的 {o.trace_id} 绝不应带 stream_beats（compute 单值广播被误展爆 fma）")
 
     def test_emit_stream_loops_equals_window(self):
-        """BLOCK-2 emit：stream IQ（shiftup/ur-w0）HDR LOOPS == WINDOW-1（IQ 级 LOOPS 展开 = 持续广播 WINDOW 拍），
-        与输出词数 num_iterations 解耦（fp16 num_iterations=1 但须广播 WINDOW 拍逐行）。UR_W0 INC=1（连续行）。"""
+        """ADR-041 DEBT-041-STREAM-DLY 机制突破 emit（2026-06-30，supersede 旧 HDR-LOOPS）：stream IQ 发
+        **WINDOW 条显式 BODY beat、无 HDR loop 外壳**（RTL IQ14 EXTRA_DATA 顺序 pop data_out）：
+          • SHIFTUP：WINDOW 条 VLD=1 beat，**无 lead-NOP**（EXTRA_DATA 自等数据对齐）。
+          • UR_W0：**1 条 lead-NOP（VLD=0, LOOPS=STREAM_LEAD_DELAY）** + WINDOW 条 VLD=1 beat，
+            逐 beat 写 bank5 连续行 addr 0..WINDOW-1（INC=0；地址由 per-beat logical_addr+stride×k 算，非 header INC）。"""
         import json
+        from verification_v2.ops.cross_smc_unit_op import UnitDataShuffleTransposeFp16Operator
         bdir = _ROOT / "build" / "verification_v2" / "unit_ds_transpose_fp16"
         instrs = json.loads((bdir / "physical_instructions.json").read_text())
         win = int(self._spec().delays["SMI_DS_T_WINDOW"])
-        for iq, exp_inc in (("shiftup", 0), ("ur-w0", 1)):
-            hdr = next(i for i in instrs if i["iq_name"] == iq and i["stage"] == "HDR")
-            self.assertEqual(hdr["header"]["LOOPS"], win - 1,
-                             f"{iq} HDR LOOPS 须=WINDOW-1({win-1})（16-beat 流）")
-            self.assertEqual(hdr["header"]["INC"], exp_inc,
-                             f"{iq} INC 须={exp_inc}（SHIFTUP data 硬连 INC=0 / UR_W0 连续行 INC=1）")
+        lead = UnitDataShuffleTransposeFp16Operator.STREAM_LEAD_DELAY
 
-    # ---- D4：fp16 真 8×8 转置 ----
+        # SHIFTUP：WINDOW 条 VLD=1 BODY、无 lead-NOP
+        sup = [i for i in instrs if i["iq_name"] == "shiftup"]
+        self.assertTrue(all(i["stage"] == "BODY" for i in sup), "shiftup 全 BODY（无 HDR/INIT 外壳）")
+        self.assertEqual(sum(1 for i in sup if i["header"]["VLD"] == 1), win,
+                         f"shiftup 须 WINDOW({win}) 条 VLD=1 beat")
+        self.assertEqual(sum(1 for i in sup if i["header"]["VLD"] == 0), 0, "shiftup 不垫 lead-NOP（EXTRA_DATA 自对齐）")
+
+        # UR_W0：1 lead-NOP（LOOPS=STREAM_LEAD_DELAY）+ WINDOW 条 VLD=1 写 bank5 连续行
+        urw = [i for i in instrs if i["iq_name"] == "ur-w0"]
+        nop = [i for i in urw if i["header"]["VLD"] == 0]
+        self.assertEqual(len(nop), 1, "ur-w0 须恰 1 条 lead-NOP")
+        self.assertEqual(nop[0]["header"]["LOOPS"], lead,
+                         f"ur-w0 lead-NOP LOOPS 须=STREAM_LEAD_DELAY({lead})")
+        beats = [i for i in urw if i["header"]["VLD"] == 1]
+        self.assertEqual(len(beats), win, f"ur-w0 须 WINDOW({win}) 条写 beat")
+        addrs = [i["payload"]["ADDR"] for i in beats]
+        self.assertEqual(addrs, list(range(win)), "ur-w0 逐 beat 写 bank5 连续行 0..WINDOW-1")
+        self.assertTrue(all(i["payload"]["BANK"] == 5 for i in beats), "ur-w0 写 bank5")
+
+    # ---- D4 / DEBT-041-ADDR-MAP：fp16 真 8×8 转置 → 16-beat 广播流布局 ----
     def test_fp16_golden_is_real_8x8_transpose(self):
-        """D4：fp16 扩 8 元素/SMC → golden = X.T 展平 64 fp16（真 8×8 转置，非退化 1 元素 1 行）。
-        反证：非对称输入下 golden != 平铺输入（旧 1 元素版无法捕获转置 bug）。"""
+        """DEBT-041-ADDR-MAP（VCS 端到端实证布局，supersede 旧 element 级 64 fp16）：
+        golden = 16-beat 广播流（spec seq1039/1042），每 beat 8 fp16 = 1 UR 词：
+          beat k：元素列 e=(ROWS-1)-k//2（RTL 降序）、SMC 半区 h=k%2、4 个 SMC 第 e 元素各成对重复（B=2）。
+        反证：① shape 须 (8,128)；② 每 fp16 成对重复；③ 非对称输入下 != 原序展平（杀 transpose-as-noop）。"""
         self._paths()
         import numpy as np
         from verification_v2.ops.cross_smc_unit_op import UnitDataShuffleTransposeFp16Operator
         op = UnitDataShuffleTransposeFp16Operator()
         data = op.prepare_input(n_rows=8, smc_num=8)
         self.assertEqual(data["a"].shape, (8, 8), "fp16 输入须 8 SMC×8 元素（8×8 矩阵）")
+        a = data["a"].astype(np.float16)
         golden = op.get_golden(data, vector_lanes=8)["y"]
-        self.assertEqual(golden.shape, (8, 64), "golden 须 (smc_num, 64)=8 转置行展平")
-        expect = np.tile(data["a"].astype(np.float16).T.reshape(-1), (8, 1))
-        self.assertTrue(np.array_equal(golden, expect), "golden 须 = X.T 展平广播全 SMC")
-        # 非平凡：转置 != 原矩阵展平（专杀 no-op/view 退化）
-        self.assertFalse(np.array_equal(golden[0], data["a"].astype(np.float16).reshape(-1)),
+        self.assertEqual(golden.shape, (8, 128), "golden 须 (smc_num, 128)=16 beat × 8 fp16")
+        # 广播：全 SMC 一致
+        for s in range(1, 8):
+            self.assertTrue(np.array_equal(golden[s], golden[0]), "广播 golden 须全 SMC 同")
+        g = golden[0].reshape(16, 8)
+        for k in range(16):                                  # 逐 beat 校 VCS 实证布局
+            e = 7 - (k // 2)
+            h = k % 2
+            exp = np.array([a[h * 4 + j][e] for j in range(4) for _ in range(2)], dtype=np.float16)
+            self.assertTrue(np.array_equal(g[k], exp),
+                            f"beat{k}(e={e},h={h}) 须 = 4 SMC 第 e 元素成对重复")
+        # 成对重复结构（B=2 间插）
+        self.assertTrue(np.array_equal(g[:, 0::2], g[:, 1::2]), "每 fp16 须成对重复（B=2）")
+        # 非平凡：转置后 != 原序展平（杀 no-op/view 退化）
+        self.assertFalse(np.array_equal(golden[0][:64], a.reshape(-1)),
                          "非对称 8×8 转置后 != 原序展平（捕获 transpose-as-noop 回归）")
 
 

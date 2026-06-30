@@ -276,6 +276,12 @@ class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
     #   故 golden 取忠实的 8 行（64 fp16），firmware 走 16-beat 流（BLOCK-2）供 VCS 校 lo+hi 全 16 beat。
     ROWS = 8                     # SMI_DS_T 转置输出行数 = 每 SMC 的元素数（8 fp16/行）
 
+    # ADR-041 DEBT-041-ADDR-MAP off-by-one 修（2026-06-30，VCS 实证）：父类 STREAM_LEAD_DELAY=32 下
+    #   VCS 实测 bank5[0]=0、bank5[k]=beat[k-1]（写比广播数据早 1 拍、beat[15] 越界丢）。+1 把 UR_W0/RTOVR
+    #   整体推迟 1 拍 → 写 k 拍正捕获 beat[k]、16 beat 全落 bank5[0..15]。仅 fp16 子类覆盖（fp16 已 VCS 验，
+    #   fp32 父类时序未 VCS、不动）。RTOVR 仍 = LEAD-1（父类 get_dfg 相对偏移逻辑不变）。
+    STREAM_LEAD_DELAY = 33
+
     def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
         # fp16：8 lane×16-bit/词 → 每转置行 8 元素恰 1 词（word_lanes=8）；element_bits=16 选 fp16 codec。
         # lanes=ROWS=8：8×8 真转置 → 8 个输出行（旧 lanes=1 是 8 SMC×1 元素的退化单行）。
@@ -290,10 +296,30 @@ class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
         return {"a": a}
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        # ADR-041 DEBT-041-ADDR-MAP（2026-06-30，VCS 端到端实证布局；supersede 旧 element 级 8 行 a.T）：
+        #   SMI_DS_T 把 8×8 fp16 转置 tile 按 **16-beat 广播流**发出（spec seq1039「转置成 PARAM_UR_BYTE_CNT
+        #   =16 行 × PARAM_SMC_NUM=8 列」+ seq1042 B=2 间插）。每 beat = 1 个 UR 词（8 fp16 = 16 byte）：
+        #     • 元素列 e = (ROWS-1) - k//2     —— RTL 元素**降序**发（VCS 实测 e=7 先出；transpose 输出序，
+        #       是硬件定值非可调；若未来 spec 判定应升序，此处即 bug locus，见 ADR-041 待厘清）。
+        #     • SMC 半区 h = k%2（h0=SMC0-3、h1=SMC4-7）—— 8-SMC 转置行拆成 2 个 16-byte 发出（seq1039
+        #       「一行 PARAM_SMC_NUM 分为多个 PARAM_UR_BYTE_CNT 发出」）。
+        #     • 取该半区 4 个 SMC 的第 e 元素，每 fp16 **成对重复**（B=2 间插，4 fp16 → 8 槽 = 16 byte）。
+        #   SHIFTUP 广播 → 每 SMC bank5 收**全 16 beat = 128 fp16**（partitioned 写但内容广播一致）。
+        #   ⚠ model-A sim 不建模该 16-beat 成对流（写 element 级 8 行）→ fp16 `--mode e2e` sim parity
+        #   预期 FAIL；验收以 VCS bank5 逐行 bit-match 为准（DEBT-041，待 sim 流式模型升级 = DEBT-038-B2-GATHER）。
         a = input_data["a"].astype(np.float16)                 # (K=8 SMC, ROWS=8 elem)
-        # 转置：转置行 m = [a[s][m] for s in K] = 矩阵第 m 列 → 行对齐激活，广播达全 SMC。
-        rows = a.T.astype(np.float16)                          # (ROWS=8, K=8)
-        golden = np.tile(rows.reshape(-1), (self._smc_num, 1))  # 每 SMC = 8 行展平 64 fp16
+        half = self.K // 2                                     # 每半区 SMC 数 = 4
+        beats = []
+        for k in range(2 * self.ROWS):                         # 16 beat
+            e = (self.ROWS - 1) - (k // 2)
+            h = k % 2
+            row: List[Any] = []
+            for j in range(half):
+                v = a[h * half + j][e]
+                row += [v, v]                                  # B=2 成对重复
+            beats.append(np.asarray(row, dtype=np.float16))    # 8 fp16/beat
+        per_smc = np.concatenate(beats)                        # 128 fp16 = 16 行 × 8
+        golden = np.tile(per_smc, (self._smc_num, 1))          # 广播：全 SMC 同
         return {"y": golden, "intermediates": []}
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],

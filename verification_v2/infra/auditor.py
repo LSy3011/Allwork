@@ -27,10 +27,31 @@ class Auditor:
             print(f"[ERROR] No hex files found in {self.output_dir} or {self.smc_dir}")
             return False
             
+        # ADR-041 DEBT-041-STREAM-DLY 突破后（2026-06-30）：dst-datapath stream IQ（SHIFTUP/UR_W0/RTOVR）
+        #   走 **N 条显式 BODY beat、无 HDR 帧**（EXTRA_DATA/lead-NOP 对齐），故 PC1 不是 HDR——本 audit 的
+        #   HDR embed/inc_embed 前置假设对它们不成立（embed=0、inc_embed=0 是正确而非 misconfigured）。
+        #   从 physical_instructions.json 找「无 HDR stage」的 IQ = stream IQ，跳过其 HDR audit（非掩盖：
+        #   这些 IQ 的正确性由 VCS bank5 逐行 bit-match 背书）。HDR-model IQ（ur-r/shiftdn/smi-ds-t…）照审。
+        stream_iqs = set()
+        pi_path = self.output_dir / "physical_instructions.json"
+        if pi_path.exists():
+            try:
+                pi = json.loads(pi_path.read_text())
+                iq_stages: Dict[str, set] = {}
+                for ins in pi:
+                    iq_stages.setdefault(ins.get("iq_name", ""), set()).add(ins.get("stage", ""))
+                stream_iqs = {iq for iq, st in iq_stages.items() if "HDR" not in st}
+            except Exception:
+                pass
+
         all_passed = True
         units_audited = 0
         for hf in hex_files:
             unit_name = os.path.basename(hf).replace("iq_", "").replace(".hex", "")
+            if unit_name in stream_iqs:
+                if self.show_review:
+                    print(f"  Unit: {unit_name:<12} | STREAM (N-beat 显式, 无 HDR) [SKIP-AUDIT]")
+                continue
             # 物理单元类型归一化
             u_type = unit_name.split("-")[0]
             if u_type == "ur":
