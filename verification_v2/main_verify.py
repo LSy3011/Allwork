@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator
 
@@ -45,6 +45,8 @@ OPERATOR_MAP = {
     "matmul_q2": ManualMatmulQ2Operator,
     # ADR-032 S1：FP16 推理 matmul 最小通路（FP16MUL + FP32ADDTREE8TO1，单 SMC K=8）
     "fp16_matmul_min": ManualFp16MatmulOperator,
+    # DEBT-025-MULTITILE 首步（hco APPROVE 候选①）：fp16 K=16 = 2 tile，8to1 片内 + 5to1 accumulate 片间
+    "fp16_matmul_k16": ManualFp16MatmulK16Operator,
     # ADR-032 S2：FP16 matmul 满 32 乘（4 列稠密，1 FP16MUL → 8 D → 4 ADDTREE8TO1）
     "fp16_matmul_q": ManualFp16MatmulQOperator,
     # ADR-032 S3：FP16 matmul 8-SMC N 维广播（满 32 乘/SMC，partitioned 输出）

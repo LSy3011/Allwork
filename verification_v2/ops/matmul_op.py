@@ -1194,6 +1194,90 @@ class ManualFp16MatmulOperator(BaseOperator):
         return ops
 
 
+class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
+    """DEBT-025-MULTITILE 首步（ADR-026 Stage-3 大 K 多-tile；hco APPROVE 候选①，2026-06-30）：
+    fp16 **K=16 = 2 个 K=8 tile，§1193「复用 RESULT + 累加到 RESULT」的 fp16 实现**。
+
+    🔑 钦定 reduce 结构（hco 据 spec 表517/520/§1193 裁定）：FP32ADDTREE8TO1 **无 accumulate 位**（表520），
+    故不能在 8to1 里跨-tile 累加（naive 试过：sim 给 t1-only，忠实于硬件）。正确路 = **两级 reduce**：
+      · 片内：每 tile FP16MUL → FP32ADDTREE8TO1（dst_id=0，纯 8→1）→ 部分和 p_i（恒落 D lane0，lane1-3=0）
+      · 片间：p_i → FP32ADDTREE5TO1（**accumulate=1**，5to1 有累加位）→ 累加器 = RESULT（= §1193）
+    累加自环在 5to1（latency=4）→ **II≥4**（同构 `ManualMatmulQDsTK8Operator` 的 fp32 2-词累加）。
+
+    🔴 stale-lane 不变量（hco 致命陷阱）：8to1 D 寄存器**按 dst_id mask 只写单 lane、其余保留旧值**
+    （`fp32addtree8to1_unit.py`）。故 8to1 **锁死 dst_id=0**（reset 后 lane1-3 恒 0）→ 喂 5to1_S0 的
+    `[p_i,0,0,0]` 干净，否则脏 lane 污染累加。单 8to1 op 缺省 dst_id=0，天然满足。
+    扩 K=24/32… 只需 inner_loops=K//8-1（同 5to1 累加器）；RESULT>8 元素才溢出 UR（§1191/1192，非本场景）。
+    ⚠ model-A sim 8/8 仅终值 parity，不验跨-tile 时序（同 ADR-023/033，升 Accepted 需 VCS）。"""
+
+    K = 16   # 2 个 K=8 tile
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        a = input_data["a"].astype(np.float16)
+        b = input_data["b"].astype(np.float16)
+        f32 = np.float32
+
+        def reduce8(act, w):   # 镜像 FP32ADDTREE8TO1 _reduce8 平衡树（片内）
+            p = (act.astype(np.float32) * w.astype(np.float32))
+            l0 = f32(p[0] + p[1]); l1 = f32(p[2] + p[3])
+            l2 = f32(p[4] + p[5]); l3 = f32(p[6] + p[7])
+            return f32(f32(l0 + l1) + f32(l2 + l3))
+
+        # 5to1 accumulate 片间：acc = reduce8(tile0) + reduce8(tile1)（K=16 dot）
+        s = f32(reduce8(a[0:8], b[0:8]) + reduce8(a[8:16], b[8:16]))
+        golden = np.zeros(4, dtype=np.float32)
+        golden[0] = s
+        return {"y": golden, "intermediates": []}
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
+                       meta_name="a", logical_addr=0 * 256 + 0, stride=1,
+                       role="input", iq_id=30, precision="fp16")
+        br = b.make_op("UR_READ", "b_read", RT.UR_READ, [],
+                       meta_name="b", logical_addr=1 * 256 + 0, stride=1,
+                       role="input", iq_id=31, precision="fp16")
+        rt_a = b.make_op("RTOVR", "rt_a_FP16MUL_S0", PS.FP16MUL_S0, [ar])
+        rt_b = b.make_op("RTOVR", "rt_b_FP16MUL_S4567", PS.FP16MUL_S4567, [br])
+        mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, [rt_a, rt_b], iq_id=18)
+        # 片内：FP16MUL D0/D1 → FP32ADDTREE8TO1（dst_id=0 缺省，纯 8→1，cumulative=False）→ 部分和
+        rt_d0 = b.make_op("RTOVR", "rt_d0_FP32ADDTREE8TO1_S0", PS.FP32ADDTREE8TO1_S0,
+                          [mul], dep_port="D0")
+        rt_d1 = b.make_op("RTOVR", "rt_d1_FP32ADDTREE8TO1_S1", PS.FP32ADDTREE8TO1_S1,
+                          [mul], dep_port="D1")
+        p_tile = b.make_op("FP32ADDTREE8TO1", "p_tile", RT.FP32ADDTREE8TO1, [rt_d0, rt_d1],
+                           cumulative=False, reduction_per_channel=8, iq_id=28)
+        # 片间：部分和 → FP32ADDTREE5TO1（accumulate=1）→ 累加器 RESULT（§1193；II≥latency=4）
+        rt_p = b.make_op("RTOVR", "rt_p_FP32ADDTREE5TO1_S0", PS.FP32ADDTREE5TO1_S0, [p_tile])
+        y_sum = b.make_op("FP32ADDTREE5TO1", "y_0", RT.FP32ADDTREE5TO1, [rt_p],
+                          cumulative=True, reduction_per_channel=4, iq_id=26,
+                          loop_carried_depends_on={"y_0": 4})
+        rt_out = b.make_op("RTOVR", "rt_y_0_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+        b.make_op("UR_WRITE", "out_obj_0", RT.UR_WRITE, [rt_out],
+                  logical_addr=5 * 256 + 0, stride=0, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # inner_loops=1：2 迭代（2 词），逐迭代 +1 词读（stride=1）、输出 5to1 累加器原地（stride=0）
+        inner = self.K // 8 - 1   # =1
+        for op in ops:
+            op.metadata.update({"shape": [self.K // 8], "inner_loops": inner, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+        out = next(o for o in ops if o.trace_id == "out_obj_0")
+        out.metadata.update({"inner_inc": 0, "outer_inc": 0, "stride": 0})
+        return ops
+
+
 class ManualFp16MatmulQOperator(BaseOperator):
     """ADR-032 S2：FP16 推理 matmul 满 32 乘（单 SMC，K=8，4 列稠密）。
 

@@ -44,6 +44,23 @@ class TestSmiDsTE2EExitCode(unittest.TestCase):
         self.assertEqual(rc, 0, f"fp16_matmul_q_dst --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
 
 
+class TestFp16MultiTileK16E2E(unittest.TestCase):
+    """DEBT-025-MULTITILE 首步（hco APPROVE 候选①）：fp16 K=16 两-tile 累加 e2e。
+    真数据通路验「8to1 片内 + 5to1 accumulate 片间」（§1193）—— 8to1/5to1 首次同 DFG 共存 +
+    5to1 累加位真生效（sim 出 t0+t1 而非 naive 的 t1-only）。golden bit-perfect + II≥4。"""
+
+    def _run_e2e(self, op: str):
+        proc = subprocess.run(
+            [sys.executable, "verification_v2/main_verify.py", "--op", op, "--mode", "e2e"],
+            cwd=str(_ROOT), capture_output=True, text=True, timeout=300, env=dict(os.environ))
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_fp16_matmul_k16_e2e_exit0(self):
+        rc, out = self._run_e2e("fp16_matmul_k16")
+        self.assertEqual(rc, 0, f"fp16_matmul_k16 e2e 应 exit=0（2-tile 累加 bit-perfect）\n{out[-2000:]}")
+        self.assertIn("PASSED y", out, "golden parity 应 PASS（5to1 accumulate 片间累加生效）")
+
+
 class TestMatmulMultiChannelDenseGolden(unittest.TestCase):
     """ADR-026 Stage-2 / ADR-036 S3：多通道 dense matmul（M 行 → addtree 独立 lane S0..S{M-1}，
     破 matmul_q 的 pipeline-depth M≤4 hack）的**最终 golden parity** 守门。
