@@ -103,6 +103,63 @@ def ur_vec_tran_inte(smc_num: int, ur_byte_cnt: int = 16, element_byte: int = 2)
     return CrossSmcLayout(smc_num=smc_num, mode=Unroll.INTERLEAVE, B=B)
 
 
+# ---- 2D 矩阵分散（§1095-1099 UR_Mat_*；matmul 权重/激活矩阵用）----
+@dataclass(frozen=True)
+class Mat2DLayout:
+    """2D Tensor[H,W] 跨-SMC 分散（§1095-1099）。展开维（D3）跨 SMC、另一维（D0）是片内 payload。
+    axis=0：行(H)展开（非转置，§1096 Norm / §1097 间插）；axis=1：列(W)展开（转置，§1098 Tran_Succ /
+    §1099 Tran_Inte）。matmul 权重 W[K,N] 用 axis=1（每 SMC 持 N/SMC_NUM 列、每列 K 元素）。"""
+    layout: "CrossSmcLayout"
+    axis: int   # 0=行展开 / 1=列展开
+
+    def _view(self, matrix: np.ndarray) -> np.ndarray:
+        return matrix if self.axis == 0 else matrix.T   # [D3, payload]
+
+    def distribute(self, matrix: np.ndarray) -> List[np.ndarray]:
+        """[H,W] → 每 SMC 一个子矩阵 [D3_sub, payload]（按展开维分散）。"""
+        M = self._view(matrix)
+        D3 = M.shape[0]
+        placed: List[List[Tuple[int, int]]] = [[] for _ in range(self.layout.smc_num)]
+        for d3 in range(D3):
+            smc, sub = self.layout.placement(d3, D3)
+            placed[smc].append((sub, d3))
+        out = []
+        for s in range(self.layout.smc_num):
+            rows = [M[d3] for _sub, d3 in sorted(placed[s])]
+            out.append(np.array(rows, dtype=M.dtype) if rows
+                       else np.empty((0, M.shape[1]), dtype=M.dtype))
+        return out
+
+    def gather(self, per_smc: List[np.ndarray], H: int, W: int) -> np.ndarray:
+        """逆：每 SMC 子矩阵 → 复原 [H,W]。"""
+        D3, payload = (H, W) if self.axis == 0 else (W, H)
+        M = np.empty((D3, payload), dtype=per_smc[0].dtype)
+        for d3 in range(D3):
+            smc, sub = self.layout.placement(d3, D3)
+            M[d3] = per_smc[smc][sub]
+        return M if self.axis == 0 else M.T
+
+
+def ur_mat_norm(smc_num: int) -> Mat2DLayout:
+    """§1096 非转置连续 UR_Mat_Norm：行(H)连续展开。"""
+    return Mat2DLayout(CrossSmcLayout(smc_num, Unroll.CONTIGUOUS), axis=0)
+
+
+def ur_mat_norm_inte(smc_num: int, B: int = 2) -> Mat2DLayout:
+    """§1097 非转置间插：行(H)间插展开，典型 B=2。"""
+    return Mat2DLayout(CrossSmcLayout(smc_num, Unroll.INTERLEAVE, B=B), axis=0)
+
+
+def ur_mat_tran_succ(smc_num: int) -> Mat2DLayout:
+    """§1098 转置连续 UR_Mat_Tran_Succ：列(W)连续展开（matmul 权重每 SMC 持 N/SMC_NUM 连续列）。"""
+    return Mat2DLayout(CrossSmcLayout(smc_num, Unroll.CONTIGUOUS), axis=1)
+
+
+def ur_mat_tran_inte(smc_num: int, B: int = 2) -> Mat2DLayout:
+    """§1099 转置间插 UR_Mat_Tran_Inte：列(W)间插展开，典型 B=2。"""
+    return Mat2DLayout(CrossSmcLayout(smc_num, Unroll.INTERLEAVE, B=B), axis=1)
+
+
 # ---- sim/emitter 整合：按 layout 跨-SMC 分散注入 per-SMC programs ----
 def inject_distributed(programs: List, tensor: np.ndarray, layout: CrossSmcLayout,
                        logical_addr: int, stride: int = 1) -> List[np.ndarray]:

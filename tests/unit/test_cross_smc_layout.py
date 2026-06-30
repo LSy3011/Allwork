@@ -71,6 +71,45 @@ class TestCrossSmcLayout(unittest.TestCase):
                          "连续与间插展开（B=1）布局应不同")
 
 
+class TestMat2DLayout(unittest.TestCase):
+    """2D 矩阵分散（§1096-1099 UR_Mat_*）：matmul 权重/激活矩阵跨-SMC 分散。"""
+
+    def test_col_distribute_matches_spec_1098(self):
+        """§1098 转置连续：W[K=8,N=16] 列展开，chunk=2 → SMC_s 持列 [2s,2s+1]，每列 K=8 元素。"""
+        from core.cross_smc_layout import ur_mat_tran_succ
+        W = np.arange(8 * 16, dtype=np.float16).reshape(8, 16)   # [K, N]
+        per = ur_mat_tran_succ(8).distribute(W)
+        for s in range(8):
+            self.assertEqual(per[s].shape, (2, 8), f"SMC_{s} 应持 2 列×K=8")
+            np.testing.assert_array_equal(per[s][0], W[:, 2 * s], "第 1 列应 = W[:,2s]")
+            np.testing.assert_array_equal(per[s][1], W[:, 2 * s + 1])
+
+    def test_roundtrip_2d_all_formats(self):
+        """distribute → gather 复原 [H,W]（行/列展开 + 连续/间插）。"""
+        from core.cross_smc_layout import (ur_mat_norm, ur_mat_norm_inte,
+                                           ur_mat_tran_succ, ur_mat_tran_inte)
+        rng = np.random.default_rng(0)
+        for H, W in ((8, 16), (16, 32), (8, 8), (10, 24)):
+            M = rng.uniform(1, 5, (H, W)).astype(np.float16)
+            for fmt in (ur_mat_norm(8), ur_mat_norm_inte(8), ur_mat_tran_succ(8), ur_mat_tran_inte(8)):
+                got = fmt.gather(fmt.distribute(M), H, W)
+                np.testing.assert_array_equal(got, M, err_msg=f"2D roundtrip {H}x{W} axis={fmt.axis}")
+
+    def test_reproduces_matmul_n_weight_layout(self):
+        """一致性：matmul_n 手搓「列 (s,c)=全局列 4s+c → SMC s」= 转置连续 chunk=4 分散。
+        把 ad-hoc 权重分散收编到文档 §1098 模型下。"""
+        from core.cross_smc_layout import ur_mat_tran_succ
+        K, COLS, SMC = 8, 4, 8
+        N = SMC * COLS                                            # 32 列
+        W = np.arange(K * N, dtype=np.float16).reshape(K, N)
+        per = ur_mat_tran_succ(SMC).distribute(W)                 # chunk=ceil(32/8)=4
+        for s in range(SMC):
+            self.assertEqual(per[s].shape, (COLS, K), f"SMC_{s} 应持 {COLS} 连续列")
+            for c in range(COLS):
+                np.testing.assert_array_equal(per[s][c], W[:, s * COLS + c],
+                                              err_msg=f"SMC_{s} 第 {c} 列 = 全局列 {s*COLS+c}（matmul_n 布局）")
+
+
 class TestInjectDistributedSimIntegration(unittest.TestCase):
     """sim/emitter 整合：layout 驱动的跨-SMC 分散注入落到真 MockProgram（sim 消费的 per-SMC bank）。"""
 
