@@ -1512,10 +1512,13 @@ class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
             b_addr = self.get_bank_addr(f"b{c}", spec)
             for k, prog in enumerate(programs):
                 prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)   # 权重列 c per-SMC
-        for k, prog in enumerate(programs):
-            if k < self.K:
-                prog.inject_vector(src_logical, np.array([a[k]], dtype=np.float16), stride=1)  # SMC_k 持 a[k]
-            # 不注入 bank0：SMI_DS_T 转置后写回行对齐激活（供 SHIFTUP 广播读）
+        # 激活 K=8 列对齐存全 8 SMC（每 SMC 持 1 元素 a[k]）= 文档 §1091 UR_Vec_Tran_Succ
+        #   转置连续分散（chunk=1）。改调跨-SMC 分散布局模型，替代手搓 `a[k]→SMC_k` loop
+        #   （一致性等价，由 test_fp16_matmul_q_dst_e2e_exit0 守护）。不注入 bank0：SMI_DS_T
+        #   转置后写回行对齐激活（供 SHIFTUP 广播读）。
+        from core.cross_smc_layout import ur_vec_tran_succ, inject_distributed
+        inject_distributed(programs, np.asarray(a, dtype=np.float16),
+                           ur_vec_tran_succ(len(programs)), src_logical)
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
         # fp16_matmul_n 的 SMC 内 DFG（FP16MUL 满 32 乘 + SHIFTUP 广播）+ SMI_DS_T 转置前端注入
