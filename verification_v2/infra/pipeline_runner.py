@@ -18,7 +18,8 @@ class PipelineRunner:
         self.output_root = "build/verification_v2"
         os.makedirs(self.output_root, exist_ok=True)
 
-    def run_full_stack(self, operator: Any, input_data: Dict[str, np.ndarray], op_name: str = None):
+    def run_full_stack(self, operator: Any, input_data: Dict[str, np.ndarray], op_name: str = None,
+                       external_input: bool = False):
         if self.show_review:
             print(f"\n>>> Starting Pipeline Runner...")
         
@@ -36,7 +37,12 @@ class PipelineRunner:
         if is_multi_smc:
             first_val = next(iter(input_data.values()))
             n_rows_actual = first_val.shape[-1]
-            input_data = operator.prepare_input(n_rows_actual, smc_num=smc_num_eff)
+            # ADR-041 followup（2026-06-30）：补全 --input-file 语义。multi-SMC 路径默认 regen 出 per-SMC
+            #   partitioned input（rng.uniform）；当 external_input（--input-file 注入，已是 multi-SMC 形状：
+            #   broadcast 1D + partitioned (smc_num,K)）时**跳过 regen、honor 注入值**（真权重列 tile）。
+            #   默认 external_input=False → 行为完全不变（现有 multi-SMC 回归零影响）。
+            if not external_input:
+                input_data = operator.prepare_input(n_rows_actual, smc_num=smc_num_eff)
             programs = [MockProgram(spec=self.spec, dtype=operator.dtype)
                         for _ in range(smc_num_eff)]
             program = programs[0]  # for tensor metadata / 兼容

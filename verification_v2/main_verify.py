@@ -119,7 +119,8 @@ def run_test(op_name: str, n_rows: int, op_args: dict, hw_config_name: str, show
     
     # 2. 运行流水线
     runner = PipelineRunner(hw_config_name=hw_config_name, show_review=show_r, show_model=show_m)
-    ctx = runner.run_full_stack(operator, input_data, op_name=op_name)
+    ctx = runner.run_full_stack(operator, input_data, op_name=op_name,
+                                external_input=(input_file is not None))
     
     if not ctx:
         return False

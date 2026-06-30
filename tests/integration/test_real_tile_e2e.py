@@ -30,6 +30,19 @@ class TestRealTileE2E(unittest.TestCase):
             self.assertEqual(failed, 0, f"{gemm}: 真权重 tile e2e 应全 PASS（固件+sim 数据通路），得 {failed} FAIL")
             self.assertGreaterEqual(passed, 1, f"{gemm}: 应至少 1 个 tile 通过")
 
+    def test_real_weight_cols_pass_fp16_matmul_n_e2e(self):
+        """multi-SMC N=8：32 个真权重列（8 SMC×4 列）→ fp16_matmul_n e2e，跑真 N=8 跨-SMC 数据通路
+        （SHIFTUP 广播 fan-out + 每 SMC 本地权重 + addtree），守 8 SMC golden bit-perfect。
+        依赖 pipeline_runner external_input（--input-file honor multi-SMC 注入）。"""
+        from verification_v2.tools.llm_checkpoint_weights import CACHE_DIR
+        if not (CACHE_DIR / f"{self.MODEL}.npz").exists():
+            self.skipTest("真权重未缓存（离线/CI）；本地跑 llm_checkpoint_weights.py 补缓存后启用")
+        from verification_v2.tools.run_real_tile_e2e import run
+        results = run(self.MODEL, per_gemm=1, seed=0, gemms=["gate_proj"], n8=True)
+        passed, failed = results["gate_proj"]
+        self.assertEqual(failed, 0, f"真权重列 N=8 e2e 应全 PASS（8 SMC bit-perfect），得 {failed} FAIL")
+        self.assertGreaterEqual(passed, 1, "应至少 1 个 N=8 tile 通过")
+
 
 if __name__ == "__main__":
     unittest.main()
