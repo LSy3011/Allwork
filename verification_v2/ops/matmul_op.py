@@ -1208,6 +1208,14 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
     （`fp32addtree8to1_unit.py`）。故 8to1 **锁死 dst_id=0**（reset 后 lane1-3 恒 0）→ 喂 5to1_S0 的
     `[p_i,0,0,0]` 干净，否则脏 lane 污染累加。单 8to1 op 缺省 dst_id=0，天然满足。
     扩 K=24/32… 只需 inner_loops=K//8-1（同 5to1 累加器）；RESULT>8 元素才溢出 UR（§1191/1192，非本场景）。
+
+    🔴 存储/容量边界（user 2026-06-30 点出；本算子是**单-SMC 累加机制载体、非可扩展布局**）：
+    UR = 8 banks × 256 行 × 16 byte = **32KB/SMC**（2048 fp16/bank），全片 8 SMC = **256KB**。
+    单-SMC 直接扩 K 撞 bank 墙：K=2048 顶满 1 bank、K=4096 需 2 banks、K≥8192 单 SMC 放不下。
+    真扩 K 必须 ① **跨-SMC 转置间插分散**（每 SMC 只 K/8，spec §1185）+ ② **权重 HBM 经 LDB 流式**
+    逐 tile 读入——真权重矩阵 8–33MB（如 LLaMA2-7B q_proj=4096²=33.5MB）≫ 256KB 全片 UR，**不可能
+    UR 常驻**；UR 只放「工作 tile + 激活向量 + 运行中 RESULT」。即真大 K matmul = 本累加核 +
+    跨-SMC 分散 + LDB 权重流式（后两者未建模，独立缺口）。详见 memory ur-bank-capacity-and-llm-fit。
     ⚠ model-A sim 8/8 仅终值 parity，不验跨-tile 时序（同 ADR-023/033，升 Accepted 需 VCS）。"""
 
     K = 16   # 2 个 K=8 tile
