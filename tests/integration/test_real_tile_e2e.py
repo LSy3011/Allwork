@@ -55,6 +55,19 @@ class TestRealTileE2E(unittest.TestCase):
         self.assertEqual(failed, 0, f"真权重列 dst（转置前端）e2e 应全 PASS，得 {failed} FAIL")
         self.assertGreaterEqual(passed, 1, "应至少 1 个 dst tile 通过")
 
+    def test_real_weight_cols_pass_fp16_matmul_full_dst_e2e(self):
+        """full_dst 变体：M=8 多行流式（逐行广播 M-loop）+ SMI_DS_T 多行转置前端，真权重 → M×N×COLS=256
+        输出。npz 仅 a 用 M*K=64（8 激活行），权重 b0..b3 同。守 8 SMC golden bit-perfect（终值 parity；
+        跨-SMC 逐拍时序忠实度 = ADR-036 proposed，待 VCS）。"""
+        from verification_v2.tools.llm_checkpoint_weights import CACHE_DIR
+        if not (CACHE_DIR / f"{self.MODEL}.npz").exists():
+            self.skipTest("真权重未缓存（离线/CI）；本地跑 llm_checkpoint_weights.py 补缓存后启用")
+        from verification_v2.tools.run_real_tile_e2e import run
+        results = run(self.MODEL, per_gemm=1, seed=0, gemms=["gate_proj"], variant="full_dst")
+        passed, failed = results["gate_proj"]
+        self.assertEqual(failed, 0, f"真权重 full_dst（M=8 多行+转置）e2e 应全 PASS，得 {failed} FAIL")
+        self.assertGreaterEqual(passed, 1, "应至少 1 个 full_dst tile 通过")
+
 
 if __name__ == "__main__":
     unittest.main()

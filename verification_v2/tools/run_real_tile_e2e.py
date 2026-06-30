@@ -27,10 +27,19 @@ for _p in (str(_ROOT), str(_ROOT / "src")):
 from verification_v2.tools.llm_checkpoint_weights import load_sampler, TENSOR_KEYS  # noqa: E402
 from verification_v2.tools.gen_llm_matmul_tiles import enumerate_gemms, sample_vec, MODELS  # noqa: E402
 
-# variant → 实际算子。single=单-SMC K=8 dot（npz: a,b 各 (8,)）；n8/dst=multi-SMC N=8×COLS=4=32 输出
-# （npz: a (8,) + b0..b3 (8 SMC,8 K)，**两者 input_data 形状相同**）。dst 额外走 SMI_DS_T 转置前端
-# （激活列对齐 gather→转置→广播），故同 npz 验更长的真数据通路。
-OPS = {"single": "fp16_matmul_min", "n8": "fp16_matmul_n", "dst": "fp16_matmul_q_dst"}
+# variant → (实际算子, multi(用 b0..b3), M 行数)。npz: a=(M*K,) 激活 + 权重。
+#   single  单-SMC K=8 dot                 npz: a (8,) + b (8,)
+#   n8      multi-SMC N=8×COLS=4=32 输出    npz: a (8,) + b0..b3 (8 SMC,8 K)
+#   dst     同 n8 + SMI_DS_T 转置前端（激活列对齐 gather→转置→广播）
+#   full_dst M=8 多行流式 + 转置前端         npz: a (M*K=64,) 8 激活行 + b0..b3 → M×N×COLS=256 输出
+# 注：n8/dst/full_dst 权重 npz 同格式（b0..b3 (8,8) 真权重列），仅 a 长度随 M 变。
+VARIANTS = {
+    "single":   ("fp16_matmul_min", False, 1),
+    "n8":       ("fp16_matmul_n", True, 1),
+    "dst":      ("fp16_matmul_q_dst", True, 1),
+    "full_dst": ("fp16_matmul_full_dst", True, 8),
+}
+K_DOT = 8       # 单 tile 收缩维
 N8_COLS = 4
 N8_SMC = 8
 
@@ -49,21 +58,21 @@ def run(model_key: str, per_gemm: int, seed: int, gemms: List[str] = None,
         variant: str = "single") -> Dict[str, Tuple[int, int]]:
     """每个 weight GEMM 采样 per_gemm 个真权重 tile 经实际算子 e2e 跑，返 {gemm:(passed,failed)}。
     variant: single=单-SMC（1 真权重列/tile）；n8=multi-SMC N=8（32 真权重列/tile）；
-    dst=同 n8 但走 SMI_DS_T 转置前端（更长真数据通路）。"""
+    dst=同 n8 + SMI_DS_T 转置前端；full_dst=M=8 多行流式 + 转置前端（256 输出/tile）。"""
     sampler = load_sampler(model_key)
     if sampler is None:
         raise RuntimeError("真权重不可用（网络/缓存缺）")
     a_role = {g.name: g.a_role for g in enumerate_gemms(MODELS[model_key], seq_len=128, decode=True)}
     target = gemms or [g for g in TENSOR_KEYS if sampler.has(g)]
-    op = OPS[variant]
-    multi = variant != "single"
+    op, multi, m_rows = VARIANTS[variant]
     rng = np.random.default_rng(seed)
     results: Dict[str, Tuple[int, int]] = {}
     with tempfile.TemporaryDirectory() as td:
         for gemm in target:
             passed = failed = 0
             for i in range(per_gemm):
-                a = sample_vec(a_role.get(gemm, "hidden_rmsnorm"), rng)  # 合成广播激活
+                # 激活 = M 行 × K（full_dst M=8→64 flat；其余 M=1→8）
+                a = sample_vec(a_role.get(gemm, "hidden_rmsnorm"), rng, n=m_rows * K_DOT)
                 payload = {"a": a}
                 if multi:
                     for c in range(N8_COLS):     # 32 个真权重列：b{c}[s] = 输出神经元 (s,c) 的真 K=8 权重
@@ -89,11 +98,11 @@ def main():
     ap.add_argument("--model", default="tinyllama-1.1b", choices=list(MODELS))
     ap.add_argument("--per-gemm", type=int, default=2, help="每 GEMM e2e tile 数（慢，每 tile 一次 e2e）")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--variant", choices=list(OPS), default="single",
-                    help="single=单-SMC K=8 dot；n8=multi-SMC N=8（32 真权重列）；dst=n8+SMI_DS_T 转置前端")
+    ap.add_argument("--variant", choices=list(VARIANTS), default="single",
+                    help="single=单-SMC；n8=N=8；dst=n8+转置前端；full_dst=M=8 多行+转置前端")
     args = ap.parse_args()
-    op = OPS[args.variant]
-    cols = f"（每 tile {N8_SMC}×{N8_COLS}=32 真权重列）" if args.variant != "single" else ""
+    op, multi, m_rows = VARIANTS[args.variant]
+    cols = f"（每 tile {N8_SMC}×{N8_COLS}{'×M'+str(m_rows) if m_rows>1 else ''} 真权重输出）" if multi else ""
     print(f"=== {MODELS[args.model].name} · 真权重 tile → {op} e2e（每 GEMM {args.per_gemm} tile）{cols} ===")
     results = run(args.model, args.per_gemm, args.seed, variant=args.variant)
     print(f"\n{'GEMM':<11}{'passed':>8}{'failed':>8}")
