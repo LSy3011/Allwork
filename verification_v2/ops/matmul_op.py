@@ -1547,6 +1547,11 @@ class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
         if sup is not None:
             sup.metadata["depends_on"] = [ds_transpose.trace_id]
             sup.metadata["dst_datapath_value"] = True   # 值经 data_out datapath 流入 → rigid 审计豁免（仅校时序）
+            # ADR-043 D1'：compute 采的是 SMI_DS_T 广播的 **held 末 beat**（resident）→ transpose→shiftup RAW 边
+            #   latency 须用 SMI_DS_T_RESIDENT(35=首beat19+window16) 而非首 beat 19。独立 marker（不用
+            #   dst_datapath_value——unit 也设它、会误伤：unit 是 streaming-to-bank 边、仍留 19）。
+            #   hco BLOCK-1：gate 这个 flag，不做「下游是否 FP16MUL」图推断（fp32 q_dst 下游是 ADDTREE5TO1 会漏）。
+            sup.metadata["dst_compute_resident"] = True
             sup.metadata["math"] = "shiftup_broadcast(SMI_DS_T.data_out)"
             # ADR-042 BLOCK-2：广播 SHIFTUP 须**密集 16-beat 流**（stream_beats=SMI_DS_T_WINDOW），逐拍取
             #   data_out beat；单脉冲只广播窗口尾后空 beat（VCS 稀疏 3 行 → compute 取零）。门控仍

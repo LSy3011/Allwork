@@ -238,15 +238,21 @@ class UCodeSynthesizer:
             for cons in consumers:
                 t_c = schedule.get(cons.trace_id)
                 if t_c is None: continue
-                if t_c < t + lat:
+                # ADR-043 D1''（BLOCK-2）：与 dependency_axioms 同步——SMI_DS_T resident-sampling 边
+                #   （consumer 采 held 末 beat、带 dst_compute_resident）用 SMI_DS_T_RESIDENT(35) 而非首 beat 19。
+                #   否则 axiom 排 t_c=t+35、verifier 用 19 → 维度6 overwrite `t_c>=t+19+II` 误杀 → Synthesis failed。
+                eff_lat = lat
+                if res_type == "SMI_DS_T" and cons.metadata.get("dst_compute_resident"):
+                    eff_lat = self.hw_spec.delays.get("SMI_DS_T_RESIDENT", lat)
+                if t_c < t + eff_lat:
                     print(f"[VERIFIER-FAIL] RAW Violation: {op.trace_id} -> {cons.trace_id} "
-                          f"(t_p={t}, t_c={t_c}, lat={lat})")
+                          f"(t_p={t}, t_c={t_c}, lat={eff_lat})")
                     return False
                 is_inv = (op.metadata.get("is_invariant", False) or
                           op.metadata.get("is_const", False) or
                           op.metadata.get("stride", 1) == 0 or
                           res_type == "UR_WRITE")
-                if not is_inv and t_c >= t + lat + II:
+                if not is_inv and t_c >= t + eff_lat + II:
                     print(f"[VERIFIER-FAIL] Latch Overwrite: {op.trace_id} expired "
                           f"before {cons.trace_id} read (II={II})")
                     return False

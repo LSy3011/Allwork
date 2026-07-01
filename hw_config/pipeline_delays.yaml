@@ -24,7 +24,14 @@ pipeline_delays:
                            #     (OUT_ROWS×2)被误当 RAW latency，见下 SMI_DS_T_WINDOW。仍 DRAFT，升 Accepted 待 VCS 逐拍。
   SMI_DS_T_WINDOW:     16   # = OUT_ROWS×2（smi_ds_t.v:58/26，跟元素宽度走 fp32→8）。SMI_DS_T data_out_vld 持续拍数 =
                            #   SHIFTUP/UR_W0 16-beat 流广播持续拍 + RTOVR latch lifecycle + 资源占用窗口。
-                           #   **不进 add_latency_axiom**（非 RAW latency）。ADR-041 D2。
+                           #   **不进 add_latency_axiom**（非 RAW latency）——**仅对 streaming-to-bank 边（unit_ds_transpose
+                           #   逐 beat 写 bank5）成立**。ADR-041 D2。
+  SMI_DS_T_RESIDENT:   35   # ADR-043 D4：**resident-sampling 边**（compute 采 SMI_DS_T 广播的 held 末 beat）的 RAW latency
+                           #   = SMI_DS_T(19 首 beat) + SMI_DS_T_WINDOW(16) = 35。partial-supersede ADR-041 D2「WINDOW 不进
+                           #   RAW latency」——仅对**采驻留末 beat 的 compute-side 边**（q_dst 等，consumer 带 dst_compute_resident）。
+                           #   streaming-to-bank 边（unit）仍用 19。35 = (WINDOW−1)+shiftup reg(+1) 相消（shift_up.v:54 /
+                           #   smi_ds_t.v:58 LAST_BEAT=15），非「+整窗」；VCS 校 ±1~2（DEBT-043-RESIDENT-LAT-VCS）。
+                           #   compute 采的是唯一 held 到下次广播的末 beat（shift_up.v:52-58 每拍覆盖、只末拍保持）。
   INT8toFP16:          1    # INT8转FP16延迟
   VIN0:                0    # 向量输入流水线寄存器0
   VIN1:                0    # 向量输入流水线寄存器1

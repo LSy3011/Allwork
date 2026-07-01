@@ -51,8 +51,15 @@ class DependencyAxioms(AxiomBase):
                 label = f"lat_{op.trace_id}_{dep_id}_{mode}"
                 if (op_type == "SMI_DS_T"
                         and op.metadata.get("dst_datapath_value")):
+                    # ADR-043 D1''（BLOCK-2 verifier 同步）：resident-sampling 边（consumer 采 held 末 beat，
+                    #   带 dst_compute_resident）用 SMI_DS_T_RESIDENT(=首beat19+window16=35) 而非首 beat 19。
+                    #   streaming-to-bank 边（unit，无此 marker）仍用 lat=19。ucode_solver 维度4/6 必同取此值
+                    #   （否则 t_c=t+35 >= t+19+II 误报 overwrite → Synthesis failed，ADR-006/021 类 desync）。
+                    smi_lat = lat
+                    if op.metadata.get("dst_compute_resident"):
+                        smi_lat = spec.delays.get("SMI_DS_T_RESIDENT", lat)
                     DependencyAxioms._add_constraint(
-                        solver, t_vars[op.trace_id] == t_vars[dep_id] + lat,
+                        solver, t_vars[op.trace_id] == t_vars[dep_id] + smi_lat,
                         f"smi_ds_t_exact_{op.trace_id}_{dep_id}_{mode}"
                     )
                 else:

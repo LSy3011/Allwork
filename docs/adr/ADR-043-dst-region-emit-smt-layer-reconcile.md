@@ -93,6 +93,20 @@ padding tile2 显式注零（硅 X 风险），但注零改 ur_data 大小 → T
 - **Opt-C（拒）**：compute 等 data_out_vld 的 COND 握手——`shift_up.v` 对 RTOVR 无 ready/valid 握手，硬件层无可等信号
   （hco 判定不可实现）。V1.0 静态 DLY 排程（[[aiacc-hardware-timing-model]]）。
 
+## 实现进度（2026-07-01：D1/D4 落地 + VCS 验证，相位 reconcile 成功；剩 activation 数据格式）
+D4（`pipeline_delays.yaml` SMI_DS_T_RESIDENT=35）+ D1'（q_dst SHIFTUP 加 `dst_compute_resident` marker）+ D1''
+（`dependency_axioms.py` + `ucode_solver.py` 两处按 marker 取 35）落地。**SMT SAT-verified @II=17**（无 desync）；
+schedule 实测 shiftup=transpose+35、rt_act=t77（was 48）。**回归干净**：fp32 `matmul_q_dst` 仍 8/8 bit-perfect（marker
+隔离住、留 19）、pytest 183 pass（仅 2 q_dst WIP 红）。
+✅ **VCS 验证相位 reconcile 成功**：`dvr_fp16mul_s4567`（compute 激活输入）**现捕获非零广播值 @cyc6150**（D1 前恒空）
+= data_out held 末 beat（beat15）——**compute 终于采到 SMI_DS_T 广播的驻留值**，D1 latency 修奏效。
+🔴 **仍 bank5=0，剩 activation 数据格式（非相位）**：捕获值 = `[-100,-200,...]` **垃圾**，两因：
+1. **beat15 = hi slot = tile2 = 未注入 UR = 硅上垃圾**（坐实 hco BLOCK-2）→ D2' 须把 activation 路由到 hi-slot tile2 + 显式注入。
+2. **beat 是 B=2 half-split**（VCS beat14 lo = `[4.234,4.234,-0.033,-0.033,...]` = 4 distinct 成对，非 8 lane [a0..a7]）——
+   一个 beat 只携半行(4 SMC)、compute 需 8 lane [a0..a7]。**col-0 8×8 呈现 + compute 读单 beat 无法交付 8 lane 激活**。
+   这是 K=8 向量经 B=2-paired SMI_DS_T 到 compute 8-lane 的**语义映射问题**，非相位——须 RTL/doc（表79 vector×matrix
+   激活格式）厘清「向量该怎么摆进 8×8 使转置某 beat = [a0..a7] 8 distinct」。DEBT-043-VEC-BEAT-FORMAT。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
