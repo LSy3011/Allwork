@@ -120,6 +120,12 @@ def _build_smi_ds_t_chain(cfg: Dict[str, int], spec: Any):
     gather_cnt = int(cfg.get("gather_smc_cnt", smc_num))
     src_bank = int(cfg.get("src_bank", 4))
     src_addr = int(cfg.get("src_addr", 0))
+    # ADR-044 D2（two-word 双-gather）：每 SMC 持 2 词（word0/word1）时，两条 gather 须各读**不同词**填
+    #   T0/T1 → 16 个 distinct 行。two_word=True 时建第 2 条 UR 读(word1@src_addr+hi_word_offset) + 第 2 条
+    #   RTOVR 路由（放开 solver 单-DVR-路由，ucode_solver/dependency_axioms 配套改），ds_gather_1 依赖它。
+    #   默认 False → 单读单路由（fp16/matmul_q/fma 行为不变）。
+    two_word = bool(cfg.get("two_word_gather", False))
+    hi_word_offset = int(cfg.get("hi_word_offset", 1))
     shiftdn_iq, smi_ds_t_iq = 34, 40
     ur_read_iq = 30
     if spec is not None and hasattr(spec, "config"):
@@ -188,6 +194,40 @@ def _build_smi_ds_t_chain(cfg: Dict[str, int], spec: Any):
         op_type="RTOVR", logic_cycle=0, trace_id="rt_ds_src_SHIFTDN_S",
         metadata=rt_ds_src_meta,
     )
+    # ADR-044 D2：two-word → 第 2 条 UR 读(word1) + 第 2 条 RTOVR 路由到同一 DVR_SHIFTDN_S（晚拍重载）。
+    ds_src_read_hi = rt_ds_src_hi = None
+    if two_word:
+        # ADR-044 D1（时间分离 + DVR 顺序重载）：word1 读**排在 gather0 之后**——强制序
+        #   ds_src_read→route→ds_gather(读 word0)→ds_src_read_hi→route_hi→ds_gather_1(读 word1)。
+        #   否则 solver 把两 route 排相邻 → DVR 末值=word0 → 两 gather 都读 word0（word1 丢，回 64）。
+        ds_src_hi_meta = {
+            "depends_on": ["ds_gather"], "iq_type": RT.UR_READ,
+            "meta_name": "ds_src_hi", "role": "input", "stride": 0,
+            "logical_addr": src_bank * bank_depth + src_addr + hi_word_offset,
+            "smc_id_en": max(gather_cnt - 1, 0),
+            "dst_word1_read": True,   # ADR-044 D1：drain 边 gate（依赖 gather0 隔 2N 拍）
+            "math": "smi_ds_t_src_read_hi(col-aligned word1 on SMC_s)", **prologue,
+        }
+        if real_gather:
+            ds_src_hi_meta["ds_src_read"] = True
+        else:
+            ds_src_hi_meta["iq_id"] = ur_read_iq
+            ds_src_hi_meta["structural_only"] = True
+        ds_src_read_hi = MIROp(
+            op_type="UR_READ", logic_cycle=0, trace_id="ds_src_read_hi",
+            metadata=ds_src_hi_meta,
+        )
+        rt_ds_src_hi_meta = {
+            "depends_on": ["ds_src_read_hi"], "slot_id": PS.SHIFTDN_S, "sel": -1, "dep_port": "D",
+            "smi_ds_t_route": True,
+            "math": "rtovr_route(UR_read word1 → DVR_SHIFTDN_S)", **prologue,
+        }
+        if not real_gather:
+            rt_ds_src_hi_meta["structural_only"] = True
+        rt_ds_src_hi = MIROp(
+            op_type="RTOVR", logic_cycle=0, trace_id="rt_ds_src_hi_SHIFTDN_S",
+            metadata=rt_ds_src_hi_meta,
+        )
     ds_gather = MIROp(
         op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather",
         metadata={
@@ -220,29 +260,61 @@ def _build_smi_ds_t_chain(cfg: Dict[str, int], spec: Any):
     #   依赖 ds_src_read（非 g0 的刚性 rtovr latch），故可排到比 g0 晚一拍——绕开「rtovr latch 把两个
     #   consumer 都钉到 t[src]+delay 同拍 → 单 SHIFTDN IQ 资源冲突 UNSAT」。hi slot 的真实第二半列
     #   数据 + 精确第二读时序 = DEBT-038-B2-GATHER（VCS-gated）。
-    ds_gather_hi = MIROp(
-        op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather_1",
-        metadata={
+    # ADR-044 D2：two_word 时 ds_gather_1 依赖 **word1 路由**（rt_ds_src_hi）+ rtovr_deps ds_src_read_hi
+    #   → 读 word1 填 T1（distinct tile）。默认（单词）保持依赖 ds_src_read 的松弛 RAW（旧行为）。
+    if two_word:
+        gather_hi_meta = {
+            # ADR-044 D1：直接 drain 边 ds_gather→ds_gather_1（belt-and-suspenders，不依赖 latch 链算术）
+            #   + word1 route。dst_word1_read → gate drain(2N) 使 gather1 脉冲 ≥ gather0+2N（两波 CRD 不撞）。
+            "depends_on": ["rt_ds_src_hi_SHIFTDN_S", "ds_gather"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
+            "smi_ds_t_gather": True, "dst_word1_read": True,
+            "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 1,
+            "rtovr_deps": {"ds_src_read_hi": {"dvr": int(PS.SHIFTDN_S.value), "sel": -1}},
+            "math": "smi_ds_t_gather_hi(word1 via 2nd DVR_SHIFTDN_S route → fill T1)",
+            **prologue,
+        }
+    else:
+        gather_hi_meta = {
             "depends_on": ["ds_src_read"], "iq_type": RT.SHIFTDN, "iq_id": shiftdn_iq,
             "smi_ds_t_gather": True,   # ADR-038：SMI_DS_T B=2 datapath gather（hi slot）
             "smc_id_en": max(gather_cnt - 1, 0), "smc_id": 0, "broadcast": 1,
             "math": "smi_ds_t_gather_hi(B=2 second read of same DVR_SHIFTDN_S → fill hi slot)",
             **prologue,
-        },
+        }
+    ds_gather_hi = MIROp(
+        op_type="SHIFTDN", logic_cycle=0, trace_id="ds_gather_1",
+        metadata=gather_hi_meta,
     )
     # 表598（docx para4649/4719）：配对组 intlv_en 必为 1、intlv_in|intlv_out 至少一个为 1。
     #   intlv_in=0：VCD 实测 RTL write-router「!lo_ready→lo else hi」= 先填满 lo 再 hi，与顺序填一致。
-    #   intlv_out=1：满足表598 约束（intlv_in|intlv_out≥1）。每算子精确 intlv 组合按 golden 存储格式
-    #   定（连续 vs 间插，para5130）= DEBT-038-INTLV-PER-OP（实现期 golden-match 钉死）。
+    #   intlv_out=1：每算子精确 intlv 组合按 golden 存储格式定（连续 vs 间插，para5130）。
+    # ADR-044 D3（hco APPROVE，DEBT-038-INTLV-PER-OP 兑现）：intlv_in/intlv_out **提成 per-op**（cfg 读取），
+    #   默认保持 (in=0,out=1) 向后兼容 fp16/matmul_q/fma（其 golden 照 intlv_out=1 反推）；vec128 显式 (0,0)
+    #   顺序写+顺序出（先 T0 8 beat 再 T1 8 beat），与 tb_aiacc_top_shift.v:658-671「intlv 全 0」+ smi_ds_t.v:64-70
+    #   顺序输出一致。**不得改共享默认**（改则破 fp16/matmul_q VCS/golden）。
+    intlv_in = int(cfg.get("intlv_in", 0))
+    intlv_out = int(cfg.get("intlv_out", 1))
     ds_transpose = MIROp(
         op_type="SMI_DS_T", logic_cycle=0, trace_id="ds_transpose",
         metadata={
             "depends_on": ["ds_gather", "ds_gather_1"], "iq_type": RT.SMI_DS_T, "iq_id": smi_ds_t_iq,
-            "VALID": 1, "intlv_en": 1, "intlv_grp": 0, "intlv_in": 0, "intlv_out": 1,
+            "VALID": 1, "intlv_en": 1, "intlv_grp": 0, "intlv_in": intlv_in, "intlv_out": intlv_out,
+            # ADR-044 D1：two_word 时关 ADR-042 紧上界（否则与 gather1=g0+2N 冲突 UNSAT）。
+            "dst_two_gather_sep": two_word,
             "math": "smi_ds_t_transpose(B=2 paired, gather_cnt x lanes)", **prologue,
         },
     )
-    return ([ds_src_read, rt_ds_src, ds_gather, ds_gather_hi, ds_transpose], ds_transpose)
+    chain = [ds_src_read, rt_ds_src, ds_gather, ds_gather_hi, ds_transpose]
+    if two_word:
+        # ADR-044 D2：把 word1 读+路由串进链（solver 已放开单-DVR-路由 → ucode_solver/dependency_axioms）。
+        chain = [ds_src_read, rt_ds_src, ds_src_read_hi, rt_ds_src_hi,
+                 ds_gather, ds_gather_hi, ds_transpose]
+        # ADR-044 D1（assembler Q2）：DST gather 链两 gather 隔 2N，II-kernel（global_t%iq_II）会撞同槽丢
+        #   ds_gather。故 read/route/gather 打 dst_explicit_emit → assembler 按各自 global_t 逐条落 abs_t
+        #   （+NOP 填隙），不进 II-kernel。ds_transpose 不打（CRI IQ 仍走 eff_num_iter=2 出 2 条 CRI，Q4）。
+        for _o in (ds_src_read, rt_ds_src, ds_src_read_hi, rt_ds_src_hi, ds_gather, ds_gather_hi):
+            _o.metadata["dst_explicit_emit"] = True
+    return (chain, ds_transpose)
 
 
 def _inject_smi_ds_t_transpose(ops: List[Any], cfg: Dict[str, int], spec: Any) -> List[Any]:

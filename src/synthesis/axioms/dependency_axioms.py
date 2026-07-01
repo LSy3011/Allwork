@@ -63,8 +63,16 @@ class DependencyAxioms(AxiomBase):
                         f"smi_ds_t_exact_{op.trace_id}_{dep_id}_{mode}"
                     )
                 else:
+                    # ADR-044 D1（hco APPROVE）：two-separated-gather 的 drain 边——consumer 读 word1
+                    #   （dst_word1_read）依赖 gather0（smi_ds_t_gather）须隔 DST_GATHER_DRAIN(=2N) 拍，
+                    #   使 DVR_SHIFTDN_S 保持 word0 到 vld 传遍所有 SMC（+CRD 回收）才换 word1，且两波 CRD
+                    #   不撞 SMI 总线。gate 精确到 vec128 DST 链的 word1 读/gather，不波及 matmul_q/fma。
+                    edge_lat = lat
+                    if (op.metadata.get("dst_word1_read")
+                            and producer.metadata.get("smi_ds_t_gather")):
+                        edge_lat = spec.delays.get("DST_GATHER_DRAIN", lat)
                     DependencyAxioms._add_constraint(
-                        solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label
+                        solver, t_vars[op.trace_id] >= t_vars[dep_id] + edge_lat, label
                     )
                     # ADR-042 DEBT-042-REGION-DLY（相位对齐）：SHIFTDN gather → SMI_DS_T transpose 的 RAW
                     #   边默认 `>=` 让 SMT 把 gather 排 ASAP、而 transpose 被下游 shiftup(dst_datapath_value)
@@ -74,9 +82,14 @@ class DependencyAxioms(AxiomBase):
                     #   把 gather 拉到 transpose 附近（ALAP），使 CRI 与 gather 数据窗对齐。GAP<II 保持在
                     #   counter-verifier 区间 [t+lat, t+lat+II) 内 → 不破维度6。仅命中 smi_ds_t_gather 生产者
                     #   → SMI_DS_T 消费者，不动其他 SHIFTDN/边。
+                    # ADR-044 D1（hco BLOCK）：two-separated-gather 模式下 ds_gather_1 被 drain 边推到
+                    #   gather0+2N、ds_transpose 依赖两 gather（>= g1+lat）→ 与 ADR-042 的紧上界
+                    #   `t(transpose) <= t(g0)+lat+2` **直接冲突 → UNSAT**。故 transpose 带
+                    #   dst_two_gather_sep 时**关掉**此紧上界（仅旧的两-gather-相邻模型需要它对齐 CRI）。
                     if (op_type == "SHIFTDN"
                             and producer.metadata.get("smi_ds_t_gather")
-                            and op.op_type.upper() == "SMI_DS_T"):
+                            and op.op_type.upper() == "SMI_DS_T"
+                            and not op.metadata.get("dst_two_gather_sep")):
                         DST_GATHER_GAP = 2
                         DependencyAxioms._add_constraint(
                             solver,

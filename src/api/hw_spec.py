@@ -163,7 +163,13 @@ class HardwareSpec(BaseModel):
             "system_core": master_data["system_core"] if master_data else load_yaml("specs/system/system_core.yaml"),
             "rtovr_config": load_yaml("rtovr_config.yaml").get("rtovr_connectivity", {})
         }
-        
+
+        # ADR-044 D1（hco RTL 取证 shift_down.v:20-51）：DST gather 链 drain = 2·PARAM_SMC_NUM
+        #   （CRU 携 vld 向北逐跳传播 N 拍到达最后 SMC + CRD 数据向南逐跳回收 N 拍到 SMI = 往返 2N）。
+        #   two-separated-gather（word0/word1 顺序复用 DVR_SHIFTDN_S）的 SMT drain 边用它（dependency_axioms）。
+        #   **参数化**（PARAM_SMC_NUM=8→16, 32→64），不硬编码 yaml。
+        spec_data["delays"]["DST_GATHER_DRAIN"] = 2 * int(spec_data["params"]["PARAM_SMC_NUM"])
+
         # 2. 深度加载每个模块的详细物理规格 (Specs Override Modules)
         modules_data = spec_data["modules"]
         for mname in modules_data:

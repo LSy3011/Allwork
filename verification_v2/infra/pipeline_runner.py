@@ -65,7 +65,33 @@ class PipelineRunner:
         for op in ops:
             op.metadata["global_t"] = schedule[op.trace_id]
             op.metadata["unit_id"] = unit_map.get(op.trace_id)
- 
+
+        # ADR-044（正本，user 2026-07-01「latency 固定不该标定」）：DST 广播→bank5 写的
+        #   stream_lead_delay 从 SMT 已排的 shiftup（其 global_t = ds_transpose + SMI_DS_T lat
+        #   = data_out 就绪拍，已含固定 gather/collect/2N-drain latency）+ 固定 SHIFTUP 广播→UR写
+        #   管线常量推导，取代手设常量。换 PARAM_SMC_NUM / gather drain 时自动跟，无需 VCS 逐拍标定。
+        #   （out_obj_0 自身 global_t 被 rtovr resident-window slack 高估、不能直接用；shiftup.global_t 准。）
+        #   见 memory derive-timing-not-vcs-calibrate + ADR-044 DEBT-042-EMIT-SMT-LAYER。
+        DST_BCAST_WRITE_LEAD = 7   # 固定：shiftup.global_t(=data_out 就绪拍)→bank5 首写的广播管线拍数
+                                   #   （SHIFTUP 广播传播 + RTOVR sel→uvr_wdata + 写捕获）。VCS 锚定：lead=6
+                                   #   时 bank5[0]=0/整体偏移 1 拍（末 beat 丢），+1 对齐 → =7。固定常量非 per-run 调。
+        # 门控：仅 two-separated-gather（vec128，transpose 带 dst_two_gather_sep）走推导——其 data_out 因
+        #   gather1 隔 2N 后移、手设 lead 无法跟。unit_ds_transpose（单-tile、已 VCS 8/8）保留其手设 lead 不动。
+        _is_two_word = any(op.metadata.get("dst_two_gather_sep") for op in ops)
+        _dst_shiftup = next((op for op in ops
+                             if op.op_type.upper() == "SHIFTUP"
+                             and op.metadata.get("dst_datapath_value")), None)
+        if _is_two_word and _dst_shiftup is not None and "global_t" in _dst_shiftup.metadata:
+            _sgt = int(_dst_shiftup.metadata["global_t"])
+            for op in ops:
+                if op.metadata.get("stream_beats") and op.metadata.get("dst_datapath_value"):
+                    ot = op.op_type.upper()
+                    if ot == "UR_WRITE":
+                        op.metadata["stream_lead_delay"] = _sgt + DST_BCAST_WRITE_LEAD
+                    elif ot == "RTOVR":
+                        # RTOVR 路由早 UR 写 1 拍（sel→uvr_wdata 1 拍延迟，off-by-one 修）
+                        op.metadata["stream_lead_delay"] = _sgt + DST_BCAST_WRITE_LEAD - 1
+
         v_level = 3 if self.show_model else (2 if self.show_review else 1)
         assembler = PhysicalAssembler(self.spec, verbosity=v_level)
         

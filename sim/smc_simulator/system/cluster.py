@@ -192,6 +192,35 @@ class SystemCluster:
         print(f">>> [AUDIT-DATA] SMC_ID:{smc_id} Cyc:{self.cycle_count} Unit:{unit} "
               f"Tag:{tag} Port:{port} Bank:{bank} Addr:{addr} V0:{val & ((1 << 128) - 1):032x}", flush=True)
 
+    def _tick_smi_ds_t_two_word(self, cfg):
+        """ADR-044：忠实建模 two-separated-gather 的 2-tile 转置 → 16 beat = 确定排列 P（RTL 转置映射）。
+        每 SMC 持 2 词（word0@src_addr / word1@src_addr+hi_word_offset）；T0=word0-tile、T1=word1-tile
+        各 8×8 转置，输出行 rc **降序**发（RTL 元素降序：smi_ds_t.v 输出末 beat 先出），intlv_out=0 顺序
+        先 T0 8 beat 再 T1 8 beat。beat b 的 lane l（SMC l）= D[l][tile*wl + rc]。广播全 SMC 写 bank5。
+        model-A：值经 storage 直读（时序不建模），output_bank 作 VCS golden。"""
+        unit = self.smi_ds_t_unit
+        sb, sa = int(cfg["src_bank"]), int(cfg["src_addr"])
+        gc = int(cfg["gather_smc_cnt"])
+        wl = int(cfg.get("word_lanes", 8))
+        hi_off = int(cfg.get("hi_word_offset", 1))
+        D = []
+        for s in range(gc):
+            w0 = unit._lanes_from_word(self.kernels[s].ur_bank.storage[sb][sa], wl)
+            w1 = unit._lanes_from_word(self.kernels[s].ur_bank.storage[sb][sa + hi_off], wl)
+            D.append(list(w0) + list(w1))
+        beats = []
+        for tile in (0, 1):
+            for rc in range(wl - 1, -1, -1):
+                beats.append([D[l][tile * wl + rc] for l in range(gc)])
+        # model-A 时序盲：算出确定排列 P(a) **存下**，在 run() 末尾（所有指令执行后）最终写各 SMC
+        #   output bank（bank5，广播一致），绕开单-tile 广播 plumbing（kernel 指令流的 SMI_DS_T/SHIFTUP
+        #   对 2-word 不忠实、产单行；须最后写以免被 UR_WRITE 覆盖）。output_bank 作 VCS golden。
+        out_bank = int(cfg.get("out_bank", 5))
+        da = int(cfg["dst_addr"])
+        # lane 反转：_word_from_lanes 打包字节序与 output_bank 读回/VCS 相反（SMC0 应在最高字节）。
+        self._two_word_bank5 = (out_bank, da,
+                                [unit._word_from_lanes(beat[::-1]) for beat in beats])
+
     def _tick_smi_ds_t_trigger(self):
         """ADR-036 S2 流式 step-driven：kernels step 前驱动 SMI_DS_T 单元。
         - 未触发：evaluate SMI_DS_T IQ；VLD 帧 active(exec_active) → 经 SHIFTDN（下行收集） 各 SMC 列对齐
@@ -209,6 +238,14 @@ class SystemCluster:
             iq.evaluate({}, cycle=self.cycle_count)
             if not getattr(iq, "exec_active", False):
                 iq.tick()
+                return
+            # ADR-044：two-separated-gather 忠实建模 2-tile 转置（model-A 时序盲、只产正确值）。
+            if cfg.get("two_word_gather"):
+                self._tick_smi_ds_t_two_word(cfg)
+                iq.tick()
+                self.smi_ds_t_started = True
+                self.smi_ds_t_done = True
+                self.logger.info(f"[SMI_DS_T] two-word 2-tile transpose done at cycle {self.cycle_count}")
                 return
             # CRD_SHIFTDN：gather 各 SMC 列对齐 UR 行（model-A：SHIFTDN-delivered Tile = 读各 SMC SRC_BANK）。
             # codec 随精度（element_bits）：fp16 16-bit lane / fp32 32-bit lane（ADR-035 D2）。
@@ -333,3 +370,11 @@ class SystemCluster:
         self.logger.info(f"System Cluster Run for {cycles} cycles")
         for _ in range(cycles):
             self.step()
+        # ADR-044：two-word DST 最终写 bank5 = 算出的确定排列 P(a)（所有指令执行后，覆盖 model-A
+        #   不忠实广播的单行结果）。output_bank dump 取此为 VCS golden。
+        tw = getattr(self, "_two_word_bank5", None)
+        if tw is not None:
+            out_bank, da, words = tw
+            for bi, word in enumerate(words):
+                for s in self.kernels:
+                    self.kernels[s].ur_bank.storage[out_bank][da + bi] = word

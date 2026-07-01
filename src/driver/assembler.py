@@ -132,6 +132,63 @@ class PhysicalAssembler:
                         trace_id=op.trace_id if k == 0 else f"{op.trace_id}_b{k}"))
                 continue
 
+            # ADR-044 Q4（hco）：two-separated-gather 的 SMI_DS_T CRI 必须 **early**（issue_cnt=2 先于
+            #   gather0 写 beat 到达，否则 slot 未 open → wr_vld 门掉全部 gather 写 → data_out 永 0）。
+            #   CRI-issue（early，开 T0/T1）与 data_out→SHIFTUP（晚，engine 收齐后自发）是**独立事件**，
+            #   单 ds_transpose 节点混成一个 → 其 global_t(晚，驱动 shiftup RAW 边) 不能用来定 CRI abs_t。
+            #   故 two_word 时 CRI 固定早发 abs_t 1/2（slot_en 一旦 latch 持续到 session 末，覆盖后续 gather 窗）。
+            if ("smi-ds-t" in iq_name.lower()
+                    and any(op.metadata.get("dst_two_gather_sep") for op in ops)):
+                tr = next(op for op in ops if op.metadata.get("dst_two_gather_sep"))
+                physical_instructions.append(PhysicalInstruction(
+                    iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
+                    header=SMIHeader(vld=0, loops=0), payload={},
+                    stage="INIT", op_type=str(ops[0].op_type)))
+                cri_payload = self._resolve_physical_payload(tr, trace_to_slot, trace_to_type)
+                for j in range(2):   # 2 条相邻 CRI 开 T0/T1（issue_cnt→2）
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, abs_t=1 + j, header=SMIHeader(vld=1, inc=0, dly=0, inc_embed=0),
+                        payload=cri_payload, stage="BODY", op_type=str(ops[0].op_type),
+                        trace_id=tr.trace_id if j == 0 else f"{tr.trace_id}_cri{j}"))
+                continue
+
+            # ADR-044 D1（hco Q2）：DST 两-gather 链显式 abs_t emit —— 两 gather 隔 2N，标准 II-kernel
+            #   （kernel_map = global_t%iq_II）会把间隔 2N 的两 op 撞进同槽丢一个（19%2==37%2）。故带
+            #   dst_explicit_emit 标记的 op（ds_src_read/hi + rt_ds_src/hi + ds_gather/1）按各自 **global_t**
+            #   逐条落 abs_t（+2 对齐标准 body 偏移 INIT@0+HDR@1）、NOP(vld=0)填隙，不进 II-kernel。三条 IQ
+            #   （ur-r/rtovr-34/shiftdn）源于同一套 t_vars → abs_t 自然对齐。RTOVR route 用其 latch global_t。
+            if any(op.metadata.get("dst_explicit_emit") for op in ops):
+                DST_ABS_OFFSET = 2   # INIT@0 + HDR-equiv@1 → body from abs_t=global_t+2（VCS 逐拍可微调）
+                op_by_t = {int(op.metadata.get("global_t", 0)): op for op in ops}
+                max_gt = max(op_by_t)
+                physical_instructions.append(PhysicalInstruction(
+                    iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
+                    header=SMIHeader(vld=0, loops=0), payload={},
+                    stage="INIT", op_type=str(ops[0].op_type)))
+                is_ur_iq = "ur-" in iq_name.lower()
+                layout = None
+                if is_ur_iq:
+                    from src.core.memory_layout import PhysicalMemoryLayout
+                    layout = PhysicalMemoryLayout.from_spec(self.hw_spec)
+                for gt in range(0, max_gt + 1):
+                    abs_t_val = gt + DST_ABS_OFFSET
+                    if gt in op_by_t:
+                        op = op_by_t[gt]
+                        payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
+                        if layout is not None and op.op_type.upper() == "UR_READ":
+                            logical_addr = int(op.metadata.get("logical_addr", 0))
+                            orig_bank, orig_offset = layout.resolve(logical_addr)
+                            payload["BANK"] = orig_bank
+                            payload["ADDR"] = orig_offset % layout.bank_depth
+                        physical_instructions.append(PhysicalInstruction(
+                            iq_name=iq_name, abs_t=abs_t_val, header=SMIHeader(vld=1, inc=0, dly=0, inc_embed=0),
+                            payload=payload, stage="BODY", op_type=str(ops[0].op_type), trace_id=op.trace_id))
+                    else:
+                        physical_instructions.append(PhysicalInstruction(
+                            iq_name=iq_name, abs_t=abs_t_val, header=SMIHeader(vld=0), payload={},
+                            stage="BODY", op_type=str(ops[0].op_type), trace_id=f"nop_{iq_name}_{gt}"))
+                continue
+
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
                 header=SMIHeader(vld=0, loops=l_init - 1), payload={},

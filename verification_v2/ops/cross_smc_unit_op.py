@@ -355,11 +355,19 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
 
     KVEC = 128
     ROWS = 16        # 16 beat（=128/8）；2 tile（每 8 beat 一 tile）
+    # ADR-044（正本，user 2026-07-01「latency 固定不该标定」）：**不手设 lead_delay**。DST 广播→bank5 写拍
+    #   由 pipeline_runner post-solve 从 `shiftup_ds_t.global_t`（SMT 已含固定 gather/collect latency）
+    #   + 固定常量 DST_BCAST_WRITE_LEAD 推导（two-separated-gather 把 data_out 后移 2N 自动被 global_t 吸收）。
+    #   父类常量仅作 fallback（post-solve 覆盖）。见 [[derive-timing-not-vcs-calibrate]]。
 
     def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
         # 转置连续 16 fp16/SMC = 2 词 → gather 2 tile → 16 输出 beat（lanes=ROWS=16）。
+        # ADR-044 D3：intlv_in=0/intlv_out=0（顺序写+顺序出：先 T0 word0-tile 8 beat 再 T1 word1-tile 8 beat）。
+        # ADR-044 D2：two_word_gather → ds_gather 读 word0 填 T0、ds_gather_1 读 word1(hi_word_offset=1) 填 T1。
         return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
-                "gather_smc_cnt": 8, "lanes": self.ROWS, "word_lanes": 8, "element_bits": 16}
+                "gather_smc_cnt": 8, "lanes": self.ROWS, "word_lanes": 8, "element_bits": 16,
+                "intlv_in": 0, "intlv_out": 0,
+                "two_word_gather": True, "hi_word_offset": 1}
 
     def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
         self._smc_num = smc_num
@@ -368,9 +376,25 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
         return {"a": a}
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
-        # identity：doc §1195 声称转置连续 + B=2 读回按序 → bank5 = [a0..a127]（VCS 定实际序）
+        # ADR-044（正本）：golden = 编译器**算出**的确定排列 P(a)，非 identity——RTL 转置映射固定。
+        #   注入布局 B=2 interleave：D[smc][sub] = a[16*(sub//2) + 2*smc + (sub%2)]。
+        #   转置输出（RTL 元素降序 + intlv_out=0 顺序 T0/T1）：
+        #     bank5[b*8 + l] = D[l][7-b]   (b<8, T0=word0)
+        #                    = D[l][23-b]  (b>=8, T1=word1, rc=7-(b-8) → sub=8+rc=23-b)
+        #   与 sim `_tick_smi_ds_t_two_word` 同一映射（两处必一致）。identity 交付需 layout 逆置换（后续）。
         a = input_data["a"].astype(np.float16)
-        golden = np.tile(a, (self._smc_num, 1))                  # 128 广播全 SMC
+        wl = 8
+        def Dval(smc, sub):
+            return a[16 * (sub // 2) + 2 * smc + (sub % 2)]
+        out = []
+        for b in range(2 * wl):
+            # lane 反序（range(7,-1,-1)）对齐 _read_sim_output / VCS 的 SMC0-高字节读约定
+            #   （sim `_word_from_lanes` 打包与该 reader 相反，两处一致反转 → e2e + VCS 双绿）。
+            for l in range(7, -1, -1):
+                sub = (wl - 1 - b) if b < wl else (2 * wl - 1 - (b - wl))
+                out.append(Dval(l, sub))
+        vec = np.array(out, dtype=np.float16)
+        golden = np.tile(vec, (self._smc_num, 1))                # 128 广播全 SMC
         return {"y": golden, "intermediates": []}
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
