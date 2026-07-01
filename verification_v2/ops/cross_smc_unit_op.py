@@ -382,20 +382,24 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
         #     bank5[b*8 + l] = D[l][7-b]   (b<8, T0=word0)
         #                    = D[l][23-b]  (b>=8, T1=word1, rc=7-(b-8) → sub=8+rc=23-b)
         #   与 sim `_tick_smi_ds_t_two_word` 同一映射（两处必一致）。identity 交付需 layout 逆置换（后续）。
+        # ADR-044 identity-via-layout（正本，doc §1195「按序」）：inject_data_per_smc 用逆置换 D_new 注入，
+        #   使 RTL 转置输出恰为 [a0..a127] identity → golden = identity（广播全 SMC）。VCS 逐 beat 已证。
         a = input_data["a"].astype(np.float16)
-        wl = 8
-        def Dval(smc, sub):
-            return a[16 * (sub // 2) + 2 * smc + (sub % 2)]
-        out = []
-        for b in range(2 * wl):
-            # lane 反序（range(7,-1,-1)）对齐 _read_sim_output / VCS 的 SMC0-高字节读约定
-            #   （sim `_word_from_lanes` 打包与该 reader 相反，两处一致反转 → e2e + VCS 双绿）。
-            for l in range(7, -1, -1):
-                sub = (wl - 1 - b) if b < wl else (2 * wl - 1 - (b - wl))
-                out.append(Dval(l, sub))
-        vec = np.array(out, dtype=np.float16)
-        golden = np.tile(vec, (self._smc_num, 1))                # 128 广播全 SMC
+        golden = np.tile(a, (self._smc_num, 1))                  # 128 identity 广播全 SMC
         return {"y": golden, "intermediates": []}
+
+    @staticmethod
+    def _identity_layout_D(a: np.ndarray) -> "list":
+        """ADR-044 identity-via-layout：算逆置换 D_new[smc][sub]（16 fp16/SMC），使 RTL 转置输出 = a identity。
+        转置映射（VCS 实证）：bank5[b*8+i] = D[7-i][sub]，sub=(7-b) if b<8 else (23-b)。令 bank5[pos]=a[pos]
+        → D_new[smc][sub] = a[pos]，其中 i=7-smc、b=(7-sub) if sub<8 else (23-sub)、pos=b*8+i。"""
+        D = [[np.float16(0)] * 16 for _ in range(8)]
+        for smc in range(8):
+            for sub in range(16):
+                i = 7 - smc
+                b = (7 - sub) if sub < 8 else (23 - sub)
+                D[smc][sub] = a[b * 8 + i]
+        return D
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
                             vector_lanes: int, spec: Any = None):
@@ -404,10 +408,10 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
         src_logical = self.SRC_BANK * bank_depth
         if _inject_gather_magic(programs, src_logical, self.ROWS, 8):
             return
-        # ADR-043（据 doc §1073/§1188 示例）：向量转置间插存储 **B=2 element-pair 间插**（§1188「间插因子B为2」）：
-        #   SMC_x 持元素对轮转 [a[2x+16y], a[2x+16y+1]]（y=0..7）→ SMC0=[a0,a1,a16,a17,..]、SMC1=[a2,a3,..]。
-        #   §1195 向量读跨-SMC 按序取每 SMC 一对 → a[0..15] 按序 → 整向量按序、不需转置。
-        #   ⚠ `ur_vec_tran_inte` 默认 B=2·UR_BYTE/ELEM=16（对 128 退化成转置连续），故**显式建 B=2 layout**。
-        from core.cross_smc_layout import CrossSmcLayout, Unroll, inject_distributed
-        layout_b2 = CrossSmcLayout(smc_num=len(programs), mode=Unroll.INTERLEAVE, B=2)
-        inject_distributed(programs, a, layout_b2, src_logical)
+        # ADR-044 identity-via-layout（正本，doc §1195「按序」）：注入逆置换 D_new[smc]（每 SMC 16 fp16 =
+        #   word0[0:8]+word1[8:16]）→ 经固定 RTL 转置映射后 bank5 恰为 [a0..a127] identity。golden=identity。
+        #   （旧 B=2 interleave 注入产 RTL 自然排列 P、非按序；逆置换把 P^{-1} 前置到存储布局。）
+        D = self._identity_layout_D(a)
+        for smc, prog in enumerate(programs):
+            if smc < 8:
+                prog.inject_vector(src_logical, np.array(D[smc], dtype=np.float16), stride=1)
