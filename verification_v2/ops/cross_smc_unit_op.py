@@ -364,5 +364,9 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
         a = input_data["a"].astype(np.float16)                   # 128
         bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
         src_logical = self.SRC_BANK * bank_depth
-        from core.cross_smc_layout import ur_vec_tran_succ, inject_distributed
-        inject_distributed(programs, a, ur_vec_tran_succ(len(programs)), src_logical)
+        # ADR-043 DEBT-043-VEC-BEAT-FORMAT 反推（VCS 实证）：转置连续（ur_vec_tran_succ）**从一个 SMC 读向量**
+        #   （表78「输入向量较小时适用，依次从一个SMC中读取」）→ K=128 用它只交付 SMC0 的 word0（gather 实读
+        #   [a0..a7]、转置吐降序复制）。K=128>64 是**大向量**，须 **转置间插 ur_vec_tran_inte**（表78「输入向量较大」
+        #   「从多个 SMC 读取」）→ block 轮转分散全 SMC、gather 才跨-SMC 收集 128。
+        from core.cross_smc_layout import ur_vec_tran_inte, inject_distributed
+        inject_distributed(programs, a, ur_vec_tran_inte(len(programs)), src_logical)

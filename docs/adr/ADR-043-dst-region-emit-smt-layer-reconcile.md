@@ -133,6 +133,20 @@ harness 建（copy unit_ds_transpose_fp16 模板）、VCS 跑通。
 真值须对 doc §1187/1194-1195 的粒度模型 + VCS 逐 beat 反推正确 layout（下一步：从「a[7..0] 降序复制」反推
 当前 gather/transpose 实际读了什么，再设计使 128 distinct 按序落 16 beat）。
 
+## 反推 gather/transpose 实读了什么（2026-07-01，VCS i_crd_shiftdn + bank5 逐 beat 解码）
+**结论：DST 现广播 SMC0 的 word0、非跨-SMC 收集 128。**
+- **bank5 交付** = SMC0 word0 `[a0..a7]` **降序（a7 先）+ 每值 replicated 全 8 lane + B=2 doubled**，**转置连续/间插两种注入
+  bit-identical**（改注入不改 bank5）。
+- **replicated 全 lane ⟹ 转置输入 tile 每列恒定**（`M[row][col]=SMC0[col]` 对所有 row）⟹ **gather 把 SMC0 的 word
+  广播进全 8 tile 行**（`_build_smi_ds_t_chain` 的 `broadcast=1` gather 语义，ADR-038），**非各 SMC 收 1 distinct 行**。
+- 佐证：`i_crd_shiftdn` 在转置连续下 = SMC0 `[a0..a7]` 升序（8 beat）；转置间插下 gather 读变跨-SMC `[a0,a16,..a112]`
+  **但 bank5 不变**——因转置级仍广播 SMC0 word。
+- **即：128 交付的限制在 gather 的 broadcast 语义（读一个 SMC 的 word 广播），非注入 layout。** 修 128 delivery 须让
+  gather **各 SMC 收 distinct 行（broadcast=0 或多-word 收集）** + transpose 产 128 distinct 按序，是**config/机制设计**
+  （非注入微调）。DEBT-043-VEC-BEAT-FORMAT 未闭：下一步动 `_build_smi_ds_t_chain` 的 gather broadcast/多-word 语义 + 过 hco。
+  ⚠ unit_ds_transpose 同 chain（broadcast=1）却出 distinct——差在 unit 每 SMC 数据**列对齐**、transpose 真 8×8；须对比
+  unit 的 gather 为何不 replicate（可能 unit 的注入让每 SMC 数据落不同列）。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
