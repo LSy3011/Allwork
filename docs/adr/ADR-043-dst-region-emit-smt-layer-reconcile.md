@@ -107,6 +107,21 @@ schedule 实测 shiftup=transpose+35、rt_act=t77（was 48）。**回归干净**
    这是 K=8 向量经 B=2-paired SMI_DS_T 到 compute 8-lane 的**语义映射问题**，非相位——须 RTL/doc（表79 vector×matrix
    激活格式）厘清「向量该怎么摆进 8×8 使转置某 beat = [a0..a7] 8 distinct」。DEBT-043-VEC-BEAT-FORMAT。
 
+## DEBT-043-VEC-BEAT-FORMAT 厘清（2026-07-01，doc 表78/79 + §1187/1194-1195）
+**向量激活怎么摆进 8×8 的答案**：doc 的向量×矩阵机制是给 **K=128（基础粒度）** 的，非 K=8：
+- §1187：`基础计算粒度 = B*(UR_BYTE_CNT/ACT_BYTE)*SMC_NUM = 2*8*8 = 128` 元素向量，广播、与各 SMC 权重列点积。
+- **§1195（关键）**：激活存 **转置连续/间插**，B=2 读回**按顺序恰好是向量连续数据、「不需要进行转置即可发出广播」**——
+  存储**预排**成让硬件恒-8×8-转置变 passthrough、吐出**按序**向量。每拍广播 `UR_BYTE/ACT=8` fp16。16 beat×8=128 元素。
+  compute **流式扫 16 beat 累加** 128 元素点积（非读单 beat）。§1194：读耗 `SMC_NUM*2=16` 拍、**一半是气泡**。
+- **表78**：小向量（K< `UR_BYTE/ELEM*SMC_NUM`=64）用 **转置连续**（`ur_vec_tran_succ`，`cross_smc_layout.py:95` chunk=1
+  → **每 SMC 1 元素**）；大向量用转置间插（多 SMC）。
+- 🔴 **本会话 D2 的 col-0 8×8 layout 错**：正确 = 转置连续（`ur_vec_tran_succ`，= q_dst **原始**代码，被 D2 替掉）。
+- 🔴 **对 q_dst K=8（玩具、低于粒度）的启示**：转置连续 1 元素/SMC，B=2 读 → [a0..a7] 在**真数据 beat**（按序）+
+  其余气泡。**compute 应读真数据 beat（in-order），非 held 末 beat（K=8 时末 beat 是气泡）** → D1「采驻留末 beat」
+  对 K=8 玩具是错目标（对真 K=128 流式才读全 beat）。**修向**：① inject 回 `ur_vec_tran_succ`；② compute 采真数据
+  beat（VCS 定位 [a0..a7] 落哪拍）；③ 或直接把 q_dst 测试维度提到 K=64/128 让机制自然成立（更贴 doc、避免玩具边界）。
+  D1/D4 的相位-invariant 机制**仍对**（compute 采样拍锚 ds_transpose、是 SMT 不变量），只是「采哪个 beat」的目标要改。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
