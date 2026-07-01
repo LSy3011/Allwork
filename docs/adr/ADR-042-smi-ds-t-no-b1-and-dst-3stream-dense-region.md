@@ -73,8 +73,28 @@ region 整体发射**，与 compute loop II=10 解耦（RTL `session_active` 本
   firmware+integrity（mirror ADR-041 DEBT-041-ADDR-MAP 对 unit 的处理）。验收以 **VCS bank5 逐词 bit-match golden** 为准。
 - padding 第二 tile 的真值（zeros）+ beat 0 携激活的**确切 beat 序**（B=2 intlv 下）须 VCS 逐拍证（DEBT-042-BEAT-MAP）。
 
+## hco review 2（2026-07-01，landed diff b3753b7 + 2 open）
+通过：Change2 紧上界 GAP=2<II 不 desync verifier（区间内含）、门控只命中 SMI_DS_T datapath 不误伤 fma/matmul_n；
+Change3 datapath 边符合 smi_top.v:384；Change1 IQ 选择集正确。**3 处订正/BLOCK**：
+- 🔴 **BLOCK-1(root)→ DEBT-042-EMIT-SMT-LAYER**：见下。iq_II=2 emit 解耦 → DST IQ 真实 emit 时刻 ≠ SMT t_vars → 相位只 VCS 保。
+- 🔴 **BLOCK-2 → DEBT-042-DISTINCT-TILE**：padding tile2 赌「未初始化 UR=0」，硅上 UR 未必零 → tile2=X。见下。
+- **Q2 订正**：`data_out_vld` **RTL 可证 data-independent**（`smi_ds_t.v:88/301-309` 全 control/count、`shift_down.v:38-44` crd_vld 硬编码 1'b1）。
+  element-7/tile2-zero「不出数」**非真数据相关**，是 **TB AXI 加载时序随 ur_data 大小漂移**（本会话实证：注 4 词 tile2 零
+  → cri_vld 4081→4092 漂 +11、相位崩、hi_ready 饿死）→ 与 BLOCK-1 同源（相位 VCS-fragile，任何 ur_data/固件改动都崩）。
+- **Q3 订正**：pin compute latch 到 beat-14 **不 sound**——`shift_up.v:52-58` dr_shiftup_reg 每广播拍被覆盖、中段 beat 只活 1 拍；
+  且偏移 14>II=10 → verifier overwrite fail。**clean 修 = activation 排到 resident LAST_BEAT(15)**（流末拍 held 到下次广播）→ 现有
+  II-1 驻留窗直接够、无需改 verifier；哪种 element 映到 beat15 需 VCS。**拒 COND 握手**（shift_up 对 RTOVR 无 ready/valid）。
+
 ## Debts（升 Accepted 前须闭）
-- **DEBT-042-DISTINCT-TILE**：第二条 gather 须读 distinct padding tile（非复用同源）；ADR-038 复用源模型对 q_dst 失效。
+- 🔴 **DEBT-042-EMIT-SMT-LAYER（hco BLOCK-1，root，2026-07-01）**：assembler 对 DST IQ 用局部 iq_II=2 重 bucket/算 abs_t，
+  但 SMT 用全局 II=10 求 t_vars + verifier 用同一 t_vars 证时序 → **DST IQ 实际 emit 时刻脱离 SMT 模型**，SMT 对 DST 段的
+  「证明」变空、相位只能 VCS 保。这是「compute latch(t_vars/II=10, ~4101) vs activation 真实到达(iq_II=2 emit+16beat, ~4123)
+  差 22 拍」的**真根**——两者在两个不一致的层算。**任何在 axiom pin latch 的 Q3 方案改的是 t_vars、动不了 iq_II 层 → 治标不治本。**
+  修向：把 DST region emit 时刻回灌成 SMT 可见约束（或 SMT 直接以 DST 局部 II 建模该子图）。属 assembler 核心 II 假设变更、
+  应单列（decision-routing「流水线接口变更」）。**这是 bank5→硅出数的真正最后一里，非「VCS 逐拍调 3 参数」。**
+- **DEBT-042-DISTINCT-TILE（hco BLOCK-2）**：gather tile2(offset 0x20) 物理读未注入 UR、赌零初始化 → 硅上 X 风险。须**显式注零**
+  覆盖 tile2 读区。⚠ 但本会话实证：注零改动 ur_data 大小 → TB 时序漂移 → 破当前 VCS-fragile 相位（DEBT-042-EMIT-SMT-LAYER）
+  → **须与相位 reconcile 一起落**，不能单独注零。
 - **DEBT-042-REGION-DLY（2026-07-01 VCS 实测精确定位，未闭）**：结构三块（BLOCK-1/2/3）已落 + 波形验证——
   q_dst 现两 `cri_vld` 相邻（cyc 4081/4083，was 10 拍）、shiftdn 描述符 count=0x10 + offset 0x00/0x20 distinct
   （= unit 结构）、shiftup 16-beat 流。**但 `hi_ready` 仍 0 → data_out_vld 仍 0 → bank5 仍全零**，真因 = **相位**：
