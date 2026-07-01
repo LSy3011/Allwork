@@ -231,6 +231,18 @@ issue_cnt==2）。具体以 VCS 波形钉（DEBT-038-B2-GATHER）。
   `lanes=ROWS=16`（vs unit 8）或 2-tile（128=2×64）emit——不是 gather broadcast 语义、不是存储 B、不是 datapath 机制。
   DEBT-043-VEC-BEAT-FORMAT 收窄为**单点时序 bug**：SMC0 beat 为何早 32 拍。magic 测试工具（env-gated）留作回归证伪。
 
+## 32 拍 gap 根源排查（2026-07-01）：emit diff 为空、gap 是数据驱动，未完全 root-cause
+diff vec128 vs unit 的 gather emit：**完全一致**——shiftdn/ur-r0/smi-ds-t 各 2 body 行、同 II=2、同 HDR、
+ds_src_read 都是 shape=[1] prologue 读 1 词。**gap 不在 emit。** 排除项：
+- lanes=8（=unit）实测 gap 仍 32 拍、bank5 仍塌缩 → **lanes 不是因**。
+- num_iterations（vec128 128//8=16 vs unit 8）**假设错**——firmware body 行数一致（emit 不随 num_iter 变）。
+- 唯一差 = **注入数据量**（vec128 16 fp16/SMC vs unit 8；magic 同此差）。
+**VCS 机理（已明）**：vec128 SMI_DS_T lo_ready@1470/hi_ready@1478 **用 SMC0 单 beat 填满**（SMC0@1460 后
+i_crd_shiftdn 停在 SMC0 值 32 拍、crd_vld 恒 1 → 逐拍写 SMC0）→ 引擎 1478 fire；SMC1-7 gather beat 1492+ **迟到**。
+**未闭**：为何 SMC0 的 i_crd_shiftdn 值 hold 32 拍（SMC0 SHIFTDN vld 被 held 阻断 forwarding？还是 ds_src_read
+读 2 词的第二读 stall？）——固件相同、只数据量差，须**逐拍 trace ds_src_read UR 读事件 + shift_down 每 SMC vld_in**
+定位（下一步单点）。gap≈32=? 与 16 fp16/SMC 的关系待钉。**这是 vec128 交付 128 的唯一剩余卡点。**
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
