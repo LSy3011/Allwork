@@ -183,6 +183,14 @@ harness 建（copy unit_ds_transpose_fp16 模板）、VCS 跑通。
   smi_top.v:384 SHIFTUP 源硬连 ds_t_data_out → 张力：向量若也必经 SMI_DS_T，则 B=2 间插存储须使 8×8 转置输出恰按序）。
   **这一条 RTL 事实是落码前唯一待核**（向量读是否经 SMI_DS_T），过 hco/RTL；存储 B=2 与向量对读逻辑已由 doc 定死。
 
+## B=2 存储实验结果（2026-07-01，VCS）：转置输出**不按序**，坐实问题在 read datapath 非存储
+改存储 B=2（显式 CrossSmcLayout B=2）后 VCS bank5：`a49,a48,a33,a32,a17,a16,a1,a0` 降序 + 全 lane replicated。
+解码 = **SMC0 word0（B=2 下 =[a0,a1,a16,a17,a32,a33,a48,a49]）反序 + 复制**——与 B=16 **同款 broadcast-SMC0 行为**，
+只是 SMC0 内容变了。**⟹ B=2 存储没修好；输出恒 = SMC0 word 反序复制、与 B=2/16 无关。问题在 read datapath
+（DST 链读/广播 SMC0 一个 word），非存储 layout。** 坐实 ADR「vec128 走错 read datapath」：向量须**跨-SMC 对读
+（§1195，无转置）**，当前 unit 矩阵链（列对齐+转置+广播 SMC0）给不出。**下一步 = 设计/找向量 read datapath**
+（读时各 SMC 贡献自己的对、拼成按序，非广播单 SMC）——须对 RTL 确认向量读微指令（是否经 SMI_DS_T / 如何跨-SMC 拼），过 hco。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。

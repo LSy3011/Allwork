@@ -364,9 +364,10 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
         a = input_data["a"].astype(np.float16)                   # 128
         bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
         src_logical = self.SRC_BANK * bank_depth
-        # ADR-043 DEBT-043-VEC-BEAT-FORMAT 反推（VCS 实证）：转置连续（ur_vec_tran_succ）**从一个 SMC 读向量**
-        #   （表78「输入向量较小时适用，依次从一个SMC中读取」）→ K=128 用它只交付 SMC0 的 word0（gather 实读
-        #   [a0..a7]、转置吐降序复制）。K=128>64 是**大向量**，须 **转置间插 ur_vec_tran_inte**（表78「输入向量较大」
-        #   「从多个 SMC 读取」）→ block 轮转分散全 SMC、gather 才跨-SMC 收集 128。
-        from core.cross_smc_layout import ur_vec_tran_inte, inject_distributed
-        inject_distributed(programs, a, ur_vec_tran_inte(len(programs)), src_logical)
+        # ADR-043（据 doc §1073/§1188 示例）：向量转置间插存储 **B=2 element-pair 间插**（§1188「间插因子B为2」）：
+        #   SMC_x 持元素对轮转 [a[2x+16y], a[2x+16y+1]]（y=0..7）→ SMC0=[a0,a1,a16,a17,..]、SMC1=[a2,a3,..]。
+        #   §1195 向量读跨-SMC 按序取每 SMC 一对 → a[0..15] 按序 → 整向量按序、不需转置。
+        #   ⚠ `ur_vec_tran_inte` 默认 B=2·UR_BYTE/ELEM=16（对 128 退化成转置连续），故**显式建 B=2 layout**。
+        from core.cross_smc_layout import CrossSmcLayout, Unroll, inject_distributed
+        layout_b2 = CrossSmcLayout(smc_num=len(programs), mode=Unroll.INTERLEAVE, B=2)
+        inject_distributed(programs, a, layout_b2, src_logical)
