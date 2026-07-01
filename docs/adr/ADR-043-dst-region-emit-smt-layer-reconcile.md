@@ -214,6 +214,23 @@ issue_cnt==2）。具体以 VCS 波形钉（DEBT-038-B2-GATHER）。
 **证伪测试**（8 SMC 各灌不同 magic、断言 crd_shiftdn_chain[0] 8 拍 8-distinct）对 unit + vec128 都跑，钉死谁真谁假。
 连带风险：本会话「matmul 引擎出数」若 gather 也塌缩，则 compute 读的激活可能也非真跨-SMC（VCS data_out_vld 拉高≠数据对）。
 
+## 证伪测试结论（2026-07-01，magic 每 SMC 灌常量 s+1，VCS）：gather 两者都 OK，collapse 在下游时序
+`AIACC_GATHER_MAGIC=1`（`cross_smc_unit_op._inject_gather_magic`）每 SMC_s 源灌常量 (s+1)，VCS 解码：
+| | gather `i_crd_shiftdn` | 输出 bank5 |
+|---|---|---|
+| **unit** | SMC **1..8 distinct**（cyc 1460,1464,..1476 紧凑 2-apart）| `[4,4,3,3,2,2,1,1]`/`[8,8,7,7,6,6,5,5]`——**全 8 SMC 在**✅ |
+| **vec128** | SMC **1..8 distinct**（但 cyc 1460 后 **32 拍 gap** 到 1492,1494..1504）| **全 beat = SMC0(1)**❌ 塌缩 |
+
+**结论（订正 hco Q3）**：
+- 🔴 **hco「broadcast=1 静态塌缩 gather 到 SMC0」被证伪**——两者 gather `i_crd_shiftdn` 都 8-distinct（vld 是**移动前沿**、
+  非静态保持；emit 实际产前沿）。hco 从 `shift_down.v:38-50` 推的「静态塌缩」前提与实际 emit 不符。
+- ✅ **unit VCS 输出全 8 SMC distinct → unit 非 model-A 假绿**（hco 存疑亦证伪）；连带**本会话 matmul 引擎 gather VCS-real、不塌缩**，前述 DST 工作站得住。
+- 🔴 **vec128 collapse = gather 时序 bug（非 broadcast、非存储、非机制）**：SMC0 beat 被 **32 拍 gap 孤立**（1460 独在、SMC1-7 挤在 1492-1504）→
+  SMI_DS_T slot 收集窗只捕到 SMC0 那 1 拍、重复填 8 行 → 输出 SMC0 replicated。unit beats 紧凑 2-apart → 8 拍全落窗内 → 全 SMC。
+- **修向（精确化）**：修 vec128 gather 的 **SMC0-孤立 32 拍 gap**（让 8 SMC beat 紧凑落进 SMI_DS_T 收集窗）。根源疑在 vec128 的
+  `lanes=ROWS=16`（vs unit 8）或 2-tile（128=2×64）emit——不是 gather broadcast 语义、不是存储 B、不是 datapath 机制。
+  DEBT-043-VEC-BEAT-FORMAT 收窄为**单点时序 bug**：SMC0 beat 为何早 32 拍。magic 测试工具（env-gated）留作回归证伪。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。

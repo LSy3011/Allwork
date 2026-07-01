@@ -13,8 +13,20 @@ AIACC 指令集架构）只钦定**固定 datapath 流程**，单元只在流程
 VCS 分工：本仓库产 iq_*.hex + ur_data + golden（过 verification_v2/tools/export_golden_hex.py 导
 vcs_expected）；VCS 在 RTL 环境跑、对 vcs_expected 比对。golden 编码功能终值期望，VCS 对齐时序/搬运段。
 """
+import os
 import numpy as np
 from typing import List, Dict, Any
+
+
+def _inject_gather_magic(programs, src_logical, n_per_smc, k_smc) -> bool:
+    """证伪测试（ADR-043 hco）：AIACC_GATHER_MAGIC 时，每 SMC_s 源 bank 灌常量 (s+1)。
+    gather 串行 → i_crd_shiftdn 8 拍出 1,2,..,8 distinct；塌缩 → 全 = SMC0 的 1。返回是否命中 magic 模式。"""
+    if not os.environ.get("AIACC_GATHER_MAGIC"):
+        return False
+    for s, prog in enumerate(programs):
+        if s < k_smc:
+            prog.inject_vector(src_logical, np.full(n_per_smc, float(s + 1), dtype=np.float16), stride=1)
+    return True
 
 from .base import BaseOperator
 from ir.mir.builder import MIROpBuilder
@@ -327,6 +339,8 @@ class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
         a = input_data["a"].astype(np.float16)
         bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
         src_logical = self.SRC_BANK * bank_depth
+        if _inject_gather_magic(programs, src_logical, self.ROWS, self.K):
+            return
         for k, prog in enumerate(programs):
             if k < self.K:
                 prog.inject_vector(src_logical, a[k], stride=1)   # SMC k 整行 8 fp16（1 词）
@@ -364,6 +378,8 @@ class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
         a = input_data["a"].astype(np.float16)                   # 128
         bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
         src_logical = self.SRC_BANK * bank_depth
+        if _inject_gather_magic(programs, src_logical, self.ROWS, 8):
+            return
         # ADR-043（据 doc §1073/§1188 示例）：向量转置间插存储 **B=2 element-pair 间插**（§1188「间插因子B为2」）：
         #   SMC_x 持元素对轮转 [a[2x+16y], a[2x+16y+1]]（y=0..7）→ SMC0=[a0,a1,a16,a17,..]、SMC1=[a2,a3,..]。
         #   §1195 向量读跨-SMC 按序取每 SMC 一对 → a[0..15] 按序 → 整向量按序、不需转置。
