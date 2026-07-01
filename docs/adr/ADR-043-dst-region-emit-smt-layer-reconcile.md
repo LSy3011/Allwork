@@ -243,6 +243,21 @@ i_crd_shiftdn 停在 SMC0 值 32 拍、crd_vld 恒 1 → 逐拍写 SMC0）→ �
 读 2 词的第二读 stall？）——固件相同、只数据量差，须**逐拍 trace ds_src_read UR 读事件 + shift_down 每 SMC vld_in**
 定位（下一步单点）。gap≈32=? 与 16 fp16/SMC 的关系待钉。**这是 vec128 交付 128 的唯一剩余卡点。**
 
+## 32 拍 gap 根因**定死**（2026-07-01，per-SMC vld_in trace）：num_iterations 撑长 gather vld-hold
+trace `u_smc/gen_smc_extra.smc_more[k].u_shift_down.vld_in`：
+| | SMC0 vld_in held | num_iterations(=输出词数) |
+|---|---|---|
+| unit | 1457→1463 = **6 拍** | 64/8=8 |
+| vec128 | 1457→1491 = **34 拍** | 128/8=**16** |
+8 SMC vld_in 交错拉高（SMC0@1457..SMC7@1464 移动前沿 1/hop）后**全 held**到 1491——`shift_down.v:46` 只在
+`vld_in=0` 才转发上游 → vld 全高期间**无转发**、每 SMC 只注入自己、终端 SMC0 输出 SMC0 word 达 34 拍 → SMI_DS_T
+1478 就用 SMC0 填满 fire、SMC1-7 前沿要等 vld 落（1491）才走 → 塌缩。**vld-hold 时长 ∝ num_iterations**（assembler
+`is_smi_ds_t_dp` 的 `eff_num_iter=max(num_iterations,2)` 把 gather loop 绑到**输出词数**；vec128 16 词→34 拍、unit 8 词→6 拍）。
+🔴 **订正「firmware identical」**：body II-块同 2 行，但 **HDR loop 次数不同**（我先前 JSON 提取 loops=None 误判）；vec128 loop ~2×长。
+**修向（定死）**：gather（SHIFTDN）的 loop/vld-hold 须**与输出词数解耦**——gather 只需跑完移动前沿（8 SMC）+ B=2（~固定短），
+非 num_iterations。改 assembler：smi_ds_t_gather IQ 的 eff_num_iter 用**gather 专属计数（8-front/B=2）**而非 max(num_iterations,2)。
+⚠ 须保 unit 不破（unit num_iter=8 恰好 hold 6 拍够短能 work，改后须仍 6 拍级）。过 hco（emitter 物理语义）。这是 vec128 交付 128 的**最后一修**。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
