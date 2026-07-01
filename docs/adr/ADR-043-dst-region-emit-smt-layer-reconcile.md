@@ -3,10 +3,11 @@ adr_id: ADR-043
 title: DST datapath 的 emit/SMT 双层 reconcile —— 让 broadcast→compute 相位成为 SMT 建模的不变量（非 VCS-fragile）
 decided: 2026-07-01
 last_verified: 2026-07-01
-still_holds: proposed（问题已 VCS+hco 定位；reconcile 方案设计待 hco 复核 + 实现 + VCS 验证）
+still_holds: proposed（问题已 VCS+hco 定位；方案 hco APPROVE-可实现带 3 BLOCK-条件已解，待实现 + VCS 验证）
 builds_on: ADR-041, ADR-042
 implements: ADR-042 DEBT-042-EMIT-SMT-LAYER
-hco_review: pending（本 ADR 提出方案，须过 hco —— 触碰 SMT 调度模型 + assembler 核心 II 假设）
+partial_supersedes: ADR-041 D2（对 resident-sampling 边：WINDOW 进 RAW latency；streaming-to-bank 边仍 19，见 D1）
+hco_review: APPROVE-可实现（2026-07-01，Opt-A 原理上足以成 SMT 不变量、Opt-B 非必需仅 VCS 兜底；3 BLOCK 已解，下方 D1'/D2'/D4）
 ---
 
 # ADR-043 · DST datapath emit/SMT 双层 reconcile
@@ -65,6 +66,24 @@ resident 窗（`dependency_axioms.py:128-133`，II-1）直接够、免额外 ext
 ### D3. tile2 显式注零 + 与相位一起落〔hco BLOCK-2 / DEBT-042-DISTINCT-TILE〕
 padding tile2 显式注零（硅 X 风险），但注零改 ur_data 大小 → TB 时序漂 → **必须在 D1/D2 把相位变成 SMT 不变量之后**
 一起落（否则再次崩脆相位）。相位一旦是 SMT 建模的不变量，ur_data 大小变化由 SMT 重排吸收、不再崩。
+
+### hco 落码门控（2026-07-01，3 BLOCK 已解 + 2 订正，实现须照此）
+- **D1'（BLOCK-1 gating）**：D1 的 q_dst-specific 门控**不能用 `dst_datapath_value`**——unit（`cross_smc_unit_op.py:190/193/197`）
+  与 q_dst（`matmul_op.py:1549`）都设它、会误伤。须在 q_dst 注入点加**独立 marker `dst_compute_resident=True`**，D1 边权只
+  门控这个新 flag；**不**用「下游是否 FP16MUL」图推断（fp32 q_dst 下游是 FP32ADDTREE5TO1、会漏）。unit 不设 → 自然留 19。
+- **D1''（BLOCK-2 verifier override）**：`ucode_solver.py:232` 的 `lat=delays.get(res_type)` **无 per-edge override 钩子**；
+  axiom 用 35、verifier 用 19 → 维度6 overwrite（`:249` `t_c>=t+lat+II`）误杀 → Synthesis failed。须在 `ucode_solver.py:232`
+  **和** `dependency_axioms.py:37` 两处都加「consumer 带 `dst_compute_resident` → lat = `SMI_DS_T_RESIDENT`」的一致取值。
+- **D4（BLOCK-3 常量单点）**：把 `SMI_DS_T_RESIDENT = SMI_DS_T(19) + SMI_DS_T_WINDOW(16) = 35` 落成 `pipeline_delays.yaml`
+  **受控常量**（单点定义、axiom+verifier 共读），并在 yaml 注释显式声明「对 resident-sampling 边 partial-supersede
+  ADR-041 D2『WINDOW 不进 RAW latency』」（该结论对 streaming-to-bank 的 unit 仍成立）。35 = (WINDOW−1) + shiftup reg +1
+  的相消（`shift_up.v:54` +1 / `smi_ds_t.v:58` LAST_BEAT=15），非「+整窗」；VCS 校 ±1~2。
+- **D2' 订正（beat15 = 跨 slot、非 index+1）**：`smi_ds_t.v:68-70` intlv_out=1 下 beat14[0]=0→**lo slot**、beat15[0]=1→**hi slot**。
+  故「activation 放 beat15」= **把 element-0 路由到 hi-slot gather（`ds_gather_1`，`matmul_op.py:223`）**，是真实数据路由改动、
+  非布局参数微调。DEBT-043-BEAT15-LAYOUT 按此写。
+- **Q4 残余风险 → 验收判据**：rt_act 在 compute-IQ（`iq_II=II`）abs_t 被模运算量化到 II 栅格、ds_transpose 在 iq_II=2 IQ →
+  t_var 差 35 ≠ abs_t 差 35。只要量化 slack 落在 beat15 resident 窗（≈II）内即吸收。**验收须量测 rt_act abs_t 落在 beat15
+  resident 窗内的 margin**——若超窗（compute 落流中段）才上 Opt-B。**别事后猜，把 margin 量测写进验收。**
 
 ## Options considered
 - **Opt-A（选，= D1+D2）**：建模到 resident 末 beat 的 latency + activation 排驻留拍。最小改动闭合相位、不碰 stream emit 结构。
