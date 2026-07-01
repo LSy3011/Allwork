@@ -191,6 +191,29 @@ harness 建（copy unit_ds_transpose_fp16 模板）、VCS 跑通。
 （§1195，无转置）**，当前 unit 矩阵链（列对齐+转置+广播 SMC0）给不出。**下一步 = 设计/找向量 read datapath**
 （读时各 SMC 贡献自己的对、拼成按序，非广播单 SMC）——须对 RTL 确认向量读微指令（是否经 SMI_DS_T / 如何跨-SMC 拼），过 hco。
 
+## hco RTL 取证：向量读经 SMI_DS_T，跨-SMC 靠 SHIFTDN 时序串行 gather（2026-07-01）
+**Q1 向量是否经 SMI_DS_T = 是，无第二条路。** SHIFTUP 广播 payload 唯一硬连 `ds_t_data_out`（`smi_top.v:384`，只 IQ14
+拿 128b，其余 `wrd_data=0`）。向量/矩阵共用 `UR读→DVR_SHIFTDN_S→SHIFTDN 链 gather→SMI_DS_T→ds_t_data_out→IQ14
+广播`。doc §1195「不需转置」≠「绕过 SMI_DS_T」——是 SMI_DS_T 配成输出已按序（无真转置重排），数据仍穿 smi_ds_t 模块。
+**Q2 跨-SMC 怎么拼 = SHIFTDN 菊花链「移动 vld 注入前沿」时序串行 gather**（非单条静态广播）。链 `aiacc_top_f.v:2024-2026`
+SMC_k 读 chain[k+1]、出 chain[k]，SMC_0 = 终端喂 SMI（`:1821`）。`shift_down.v:38-50`：**`vld_in=1` → 该 SMC 注入自己的
+`dvr_shiftdn_s`、不转发上游；只 `vld_in=0` → 才透传上游**。按序 = vld 前沿每拍下移一跳（1 lat/hop），8 拍依次落
+SMC7..SMC0 的 word 填满 SMI_DS_T 一 slot 的 8 行（`smi_ds_t.v:301-317`，WR_BEATS=8）。
+**Q3 我载体恒广播 SMC0 = `broadcast=1` 静态保持塌缩到链终端 SMC0（真 bug、非布局）。** `matmul_op.py:204/228` 两 gather
+都 `broadcast=1,smc_id_en=cnt-1` → 每个使能 SMC 都注入、**永不进 `:46` 转发** → 终端 SMC_0 独活 → `i_crd_shiftdn` 恒
+SMC0 word → SMI_DS_T 8 行全写 SMC0 同 word → 转置吐单元素 replicated（逐字对上 VCS「SMC0 word 反序全 lane 复制」；
+反序 = `smi_ds_t.v:304/316`）。与 B=2/16 无关（塌缩在 SHIFTDN 注入级、上游于 UR 布局）。
+🔴 **订正 ADR-038**：`matmul_op.py:198-204` 注释「gather 须 broadcast=1」与 RTL **相反**——`broadcast=1` 静态塌缩 SMC0、
+`broadcast=0` 静态只匹配 SMC 注入（非匹配保持不转发）**都不给 8-distinct**；跨-SMC 累积**必须靠 vld_in=0 时序转发**。
+**Q4 修向**：禁静态 broadcast gather，改**时序串行 gather**——vld 前沿每拍下移一 SMC（`broadcast=0`+逐拍步进 `smc_id_en=k`
+或单拍 vld 依赖链转发造前沿），使 `i_crd_shiftdn` 8 拍出 8 distinct SMC word；对齐 SMI_DS_T pair（每 slot 8 beat ready +
+issue_cnt==2）。具体以 VCS 波形钉（DEBT-038-B2-GATHER）。
+🔴 **hco 存疑（须证伪测试）**：unit_ds_transpose「distinct 列对齐」若也发 broadcast=1，VCS 应同样塌缩 SMC0 → hco 判
+矩阵 distinct **大概率 model-A 假绿**（`_tick_smi_ds_t_trigger` 直读各 SMC storage、对 broadcast/smc_id_en 全盲）。
+⚠ **但我 VCS 实测 unit i_crd_shiftdn = (SMC0,e0)..(SMC7,e0) distinct**（moving-front）——与 hco 判断张力；须
+**证伪测试**（8 SMC 各灌不同 magic、断言 crd_shiftdn_chain[0] 8 拍 8-distinct）对 unit + vec128 都跑，钉死谁真谁假。
+连带风险：本会话「matmul 引擎出数」若 gather 也塌缩，则 compute 读的激活可能也非真跨-SMC（VCS data_out_vld 拉高≠数据对）。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
