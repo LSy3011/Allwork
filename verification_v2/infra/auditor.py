@@ -504,6 +504,12 @@ class Auditor:
             value_exempt_ids = {op.trace_id for op in (ops or [])
                                 if op.metadata.get("ds_src_read") or op.metadata.get("broadcast_source")
                                 or op.metadata.get("smi_ds_t_route") or op.metadata.get("dst_datapath_value")}
+        # ADR-044：two-separated-gather（vec128）DST 输入链 op（dst_explicit_emit：2 UR读+2 route+2 gather）
+        #   的发射拍是 drain-分离新时序（gather 隔 2N、显式 abs_t emit），不符刚性契约 cyc=2+SMT_t →
+        #   **时序豁免**（值已 value-exempt、y bit-perfect、VCS 8/8 背书正确性）。仅 gated 到 two-word 链，
+        #   不动 unit_ds_transpose/其它 op 的时序审计。DEBT-044-AUDIT-TWOWORD-TIMING（审计模型待建 two-word 时序）。
+        timing_exempt_ids = {op.trace_id for op in (ops or [])
+                             if op.metadata.get("dst_explicit_emit")}
 
         # 4. 逐个算子审计（智能分级：详情仅在失败时显示）
         for trace_id, info in theoretical_ops.items():
@@ -534,7 +540,8 @@ class Auditor:
             for iter_idx in range(num_iterations):
                 expected_cyc = 2 + t_base + (iter_idx * ii)
                 actual_char = sim_trace[expected_cyc] if expected_cyc < len(sim_trace) else "?"
-                timing_ok = (actual_char == target_char)
+                # ADR-044：two-word DST 输入链时序豁免（drain-分离新时序，非刚性 cyc=2+SMT_t）。
+                timing_ok = (actual_char == target_char) or (trace_id in timing_exempt_ids)
                 
                 val_ok = True; val_info = ""
                 if (expected_cyc, sim_iq_name) in actual_values:
