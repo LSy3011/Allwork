@@ -143,10 +143,16 @@ class PhysicalAssembler:
             # 始终做 **2 slot（B=2）** 迭代——issue_cnt==2 才出数 + 两 slot 各须 8 beat 填满。这与输出词数
             # （num_iterations）**无关**：fp16(8 元素=1 词)num_iterations=1 → 只 1 issue + gather 只送 1 slot
             # → hi 槽 open 不 fill → hi_ready=0 → 永不出数（VCS tb_dst_fp16 实证）。fp32(2 词)是
-            # num_iterations=2 巧合凑够。故对这些 IQ 用 eff_num_iter=max(num_iterations,2)，与输出词数解耦。
+            # num_iterations=2 巧合凑够。
+            # 🔴 ADR-043 修（2026-07-01，vec128 32 拍 gap 根因）：原 `max(num_iterations,2)` **不是**解耦——它随
+            #   输出词数 scale UP：vec128（128 元素→num_iter=16）→ gather IQ loop 16 次 → SHIFTDN vld_in held 34 拍
+            #   → shift_down.v:46 只在 vld_in=0 转发 → 链 34 拍不转发 → SMI_DS_T 用终端 SMC0 单 word 填满 fire →
+            #   跨-SMC 塌缩（per-SMC vld_in trace 定死）。真解耦 = **固定 B=2**（gather/CRI 只需 2：ds_gather/ds_gather_1
+            #   两 tile + 2 CRI 配对；输出 16 beat 由 SMI_DS_T 引擎内部 beat_rd 产、非 gather loop）。unit（num_iter=8）
+            #   原 held 6 拍 work，改固定 2 后 held 更短仍 work（不破）。输出词数走 ur-w0 stream_beats、不受本改影响。
             # （is_smi_ds_t_dp / iq_II 已在 IQ 循环头计算；stream IQ 已在上方 N-条显式分支提前 continue。）
             if is_smi_ds_t_dp:
-                eff_num_iter = max(num_iterations, 2)
+                eff_num_iter = 2   # B=2 配对固定，与输出词数（num_iterations）解耦
             else:
                 eff_num_iter = num_iterations
             total_iterations_needed = (max_t_global // iq_II) + eff_num_iter
