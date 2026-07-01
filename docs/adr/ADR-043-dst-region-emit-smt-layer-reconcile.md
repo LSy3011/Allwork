@@ -147,6 +147,25 @@ harness 建（copy unit_ds_transpose_fp16 模板）、VCS 跑通。
   ⚠ unit_ds_transpose 同 chain（broadcast=1）却出 distinct——差在 unit 每 SMC 数据**列对齐**、transpose 真 8×8；须对比
   unit 的 gather 为何不 replicate（可能 unit 的注入让每 SMC 数据落不同列）。
 
+## 对比 unit_ds_transpose gather + 文档示例一致性（2026-07-01，VCS 逐 beat 反推）
+**文档有两条不同 datapath（关键！）**：
+- **向量×矩阵（§1194-1195）**：读回数据**按序恰好是向量、「不需要转置即可发出广播」**（passthrough，无真转置；
+  转置间插存储预排成让硬件恒-转置变 no-op）。每拍广播 8 元素。
+- **矩阵×矩阵（§1237-1240）**：读回**列对齐**Tile（每拍一列的一部分）→ **激活矩阵排序微指令真转置**为行对齐 → 广播。
+
+**VCS 反推对比**：
+- **unit_ds_transpose gather = (SMC0,e0),(SMC1,e0),…,(SMC7,e0)**（各 SMC 的 element0 = **列0 跨 SMC**）→ **列对齐 distinct**
+  → 转置产 distinct 输出。**✅ 与文档矩阵×矩阵示例（§1238）一致**——unit 就是矩阵真转置载体。
+- **vec128 转置连续 gather = (SMC0,e0..e7)**（全 SMC0 一行）→ **非列对齐**→ 转置广播复制。**❌ 不一致**。
+- **根因 = 机制错配（非 layout 微调）**：vec128 是**向量**、该走 §1195 向量 passthrough（转置间插存储 + 无真转置读），
+  但我把它路由进了 **unit 的矩阵×矩阵真转置 datapath** → 用错机制。故 128 向量无法按序交付。
+
+**修向（DEBT-043-VEC-BEAT-FORMAT，须过 hco）**：vec128 须走**向量 datapath**——① 激活转置间插存储（预排使硬件转置=no-op）；
+② gather 读须产**按序向量**（§1195「读回按序恰好是向量连续数据」，非矩阵列对齐→转置）；③ 确认 RTL SMI_DS_T 对向量
+存储是否真出 no-op（doc §1225「转置实际不需要进行操作」= 逻辑 relabel）——即 8×8 转置作用于转置间插向量存储是否
+恰好吐按序。这需对着 §1195 的读时序 + 转置间插存储的具体元素排布逐拍推，或直接问 user/RTL「向量存储怎么摆使
+恒-转置输出按序」。**当前 unit 载体（矩阵）不能直接复用给向量。**
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
