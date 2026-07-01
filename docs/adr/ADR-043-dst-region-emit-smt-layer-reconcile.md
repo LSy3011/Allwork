@@ -258,6 +258,18 @@ trace `u_smc/gen_smc_extra.smc_more[k].u_shift_down.vld_in`：
 非 num_iterations。改 assembler：smi_ds_t_gather IQ 的 eff_num_iter 用**gather 专属计数（8-front/B=2）**而非 max(num_iterations,2)。
 ⚠ 须保 unit 不破（unit num_iter=8 恰好 hold 6 拍够短能 work，改后须仍 6 拍级）。过 hco（emitter 物理语义）。这是 vec128 交付 128 的**最后一修**。
 
+## vec128 real-data 验（2026-07-01，assembler fix 后）：塌缩已修，但未按序 + 只 64
+bank5 real-data：**全 8 SMC 数据都在**（塌缩消 ✅），但：
+- **只交付 64 元素**（index 0-63、各 B=2 doubled = 128 槽），**非 128**。gather 只读 word0（1 词/SMC）；两 gather
+  （ds_gather/ds_gather_1）读**同一词**非 word0+word1（DEBT-042-DISTINCT-TILE 复现）→ word1（64-127）未 gather。
+- **顺序是转置置换非按序**（beat14=[6,4,2,0]、beat12=[7,5,3,1]、beat0=[55,53,51,49]…）——matrix-transpose datapath
+  仍在**真转置**、非向量 passthrough。转置间插存储 + 此转置 = 结构化置换、≠ [a0..a127]。
+**⟹ 塌缩 fix 是大解锁（gather 跨-SMC 通了），但按序 128 还差两步**：
+1. **ds_gather_1 读 distinct word1**（非同 word0）→ 128（DEBT-042-DISTINCT-TILE）；
+2. **转置产按序**（§1195 向量 passthrough：转置间插存储预排使 8×8 转置=relabel 出按序）或走真·向量读路。当前 matrix
+   datapath 出置换。须对 §1195 的向量存储→转置=identity 的具体元素排布逐拍推 or RTL 核（可能 vec128 载体本就该
+   用向量读微指令而非 matrix 转置载体，回到「向量 vs 矩阵两条 datapath」——unit 矩阵载体产真转置置换正是矩阵语义）。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
