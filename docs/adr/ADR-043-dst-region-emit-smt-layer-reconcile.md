@@ -166,6 +166,23 @@ harness 建（copy unit_ds_transpose_fp16 模板）、VCS 跑通。
 恰好吐按序。这需对着 §1195 的读时序 + 转置间插存储的具体元素排布逐拍推，或直接问 user/RTL「向量存储怎么摆使
 恒-转置输出按序」。**当前 unit 载体（矩阵）不能直接复用给向量。**
 
+## 向量转置间插存储怎么摆（2026-07-01，直接据文档 §1070-1099 + §1188-1195 示例）
+**结论（doc 权威，无需问 user）**：
+- **存储 = 转置间插 B=2（§1073 定义 + §1188 示例明确「间插因子B为2」）**：`Slice_x = Tensor[B·x+B·y·SMC_NUM : …]`。
+  B=2/SMC_NUM=8 → 每 SMC 持**元素对轮转**：SMC0=[a0,a1, a16,a17, a32,a33, … a112,a113]、SMC1=[a2,a3, a18,a19,…]、
+  … SMC7=[a14,a15,…]。（🔴 我 vec128 用的 `ur_vec_tran_inte(8)` 默认 **B=16**=§1092 typical=**对 128 元素退化成转置连续**，
+  从没真跑过 B=2 间插——这是第一个 bug。）
+- **读 = 向量读（§1195 passthrough）**：**跨-SMC 按 SMC 序读每 SMC 的一对** → a0,a1|a2,a3|…|a14,a15=a[0..15] 按序，
+  下一 y-块 a[16..31]… → 整向量按序、**「不需要转置」**（无排序微指令）。B=2 间插存储正是让「跨-SMC 对读」出按序的原因。
+- **与 unit_ds_transpose（矩阵 §1238-1240）本质不同**：矩阵读**列对齐** + 应用**排序(转置)微指令**；向量读**跨-SMC 对读** +
+  **无转置**。同一 fabric 上是**两条不同读微指令**。
+- **vec128 两 bug**：① 间插因子用 B=16（=转置连续、单-SMC 读）而非示例 B=2；② 走了 unit 的矩阵 datapath（列对齐+转置+
+  SMC0 广播）而非向量对读（无转置）。
+- **修向**：① 存储改 B=2 element-pair 间插（`ur_vec_tran_inte` 传 B=2 / 或新 helper）；② 读走**向量 datapath（无排序微指令、
+  跨-SMC 对读）**——须确认 RTL 能否读+SHIFTUP 广播**不经** SMI_DS_T 转置（doc 向量无排序，但 [[shiftup-shiftdn-only-dst-datapath]]
+  smi_top.v:384 SHIFTUP 源硬连 ds_t_data_out → 张力：向量若也必经 SMI_DS_T，则 B=2 间插存储须使 8×8 转置输出恰按序）。
+  **这一条 RTL 事实是落码前唯一待核**（向量读是否经 SMI_DS_T），过 hco/RTL；存储 B=2 与向量对读逻辑已由 doc 定死。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
