@@ -270,6 +270,15 @@ bank5 real-data：**全 8 SMC 数据都在**（塌缩消 ✅），但：
    datapath 出置换。须对 §1195 的向量存储→转置=identity 的具体元素排布逐拍推 or RTL 核（可能 vec128 载体本就该
    用向量读微指令而非 matrix 转置载体，回到「向量 vs 矩阵两条 datapath」——unit 矩阵载体产真转置置换正是矩阵语义）。
 
+## distinct-tile（word1）尝试 + blocker（2026-07-01）
+试 `ds_gather_1` 读 distinct word1（cfg `hi_word_offset=1`）：加第二源读 `ds_src_read_1`（src_addr+1）+ 第二 RTOVR
+`rt_ds_src_1_SHIFTDN_S` 路由 → **SMT 排程 drop 第二 RTOVR**（`schedule[rt_ds_src_1_SHIFTDN_S]` 缺失 → pipeline_runner:66
+KeyError crash）。根因：**两个 RTOVR 路由到同一 DVR slot（SHIFTDN_S=rtovr-34）**，solver/emit 假设每 DVR slot 单路由。已回退。
+**修向（未落，须careful）**：不加第二 RTOVR，改 **`ds_src_read` 读 2 词**（`hi_word_offset>0` 时 shape=[2]/inner_loops=1/stride=1）
+→ DVR_SHIFTDN_S 连续吐 word0(iter0)/word1(iter1)→ B=2 两 gather（ds_gather 早读 word0、ds_gather_1 松弛边晚 1 拍读 word1）
+读连续 distinct tile，复用单 RTOVR。须同步 sim `_tick_smi_ds_t_trigger` 2-词 gather 建模 + 过 hco。或 solver 支持每 slot
+多路由（更大改）。当前 vec128 = 塌缩已修、交付 64（word0）、转置置换——**distinct-tile（→128）+ 向量按序 passthrough 两项仍开**。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。
