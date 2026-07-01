@@ -330,3 +330,39 @@ class UnitDataShuffleTransposeFp16Operator(UnitDataShuffleTransposeOperator):
         for k, prog in enumerate(programs):
             if k < self.K:
                 prog.inject_vector(src_logical, a[k], stride=1)   # SMC k 整行 8 fp16（1 词）
+
+
+class UnitDstVec128Operator(UnitDataShuffleTransposeFp16Operator):
+    """ADR-043 path B 隔离验证（user 2026-07-01 选）：DST datapath 能否把 **128 元素向量按序交付 bank5**
+    （不做 compute）。128 元素向量、**转置连续**存全 8 SMC（每 SMC 16 fp16=2 词）→ DST gather 2 tile →
+    SMI_DS_T → SHIFTUP 广播 **16 beat=128 元素、无 doubling**（§1195「按顺序恰好是向量连续数据」，区别 unit
+    8×8 矩阵的 64-distinct-doubled）→ 各 SMC bank5 写全 16 beat。golden=[a0..a127] identity（doc 声称按序）；
+    **VCS 逐 beat 定实际序**，不符则订正 layout（DEBT-043-VEC-BEAT-FORMAT 收口）。"""
+
+    KVEC = 128
+    ROWS = 16        # 16 beat（=128/8）；2 tile（每 8 beat 一 tile）
+
+    def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
+        # 转置连续 16 fp16/SMC = 2 词 → gather 2 tile → 16 输出 beat（lanes=ROWS=16）。
+        return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
+                "gather_smc_cnt": 8, "lanes": self.ROWS, "word_lanes": 8, "element_bits": 16}
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        self._smc_num = smc_num
+        rng = np.random.default_rng(0)
+        a = rng.uniform(1.0, 5.0, self.KVEC).astype(np.float16)   # 128 元素向量
+        return {"a": a}
+
+    def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
+        # identity：doc §1195 声称转置连续 + B=2 读回按序 → bank5 = [a0..a127]（VCS 定实际序）
+        a = input_data["a"].astype(np.float16)
+        golden = np.tile(a, (self._smc_num, 1))                  # 128 广播全 SMC
+        return {"y": golden, "intermediates": []}
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = input_data["a"].astype(np.float16)                   # 128
+        bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
+        src_logical = self.SRC_BANK * bank_depth
+        from core.cross_smc_layout import ur_vec_tran_succ, inject_distributed
+        inject_distributed(programs, a, ur_vec_tran_succ(len(programs)), src_logical)

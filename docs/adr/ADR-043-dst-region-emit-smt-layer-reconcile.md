@@ -122,6 +122,17 @@ schedule 实测 shiftup=transpose+35、rt_act=t77（was 48）。**回归干净**
   beat（VCS 定位 [a0..a7] 落哪拍）；③ 或直接把 q_dst 测试维度提到 K=64/128 让机制自然成立（更贴 doc、避免玩具边界）。
   D1/D4 的相位-invariant 机制**仍对**（compute 采样拍锚 ds_transpose、是 SMT 不变量），只是「采哪个 beat」的目标要改。
 
+## path B 隔离验证（2026-07-01，user 选「先只验 DST 交付 128 元素」）
+新建 `unit_dst_vec128`（`cross_smc_unit_op.py:UnitDstVec128Operator`，注册 main_verify）：128 元素向量、转置连续存
+（`ur_vec_tran_succ`，16 fp16/SMC）→ DST → bank5 全 16 beat，golden=[a0..a127] identity。SAT@II=2、firmware 出、
+harness 建（copy unit_ds_transpose_fp16 模板）、VCS 跑通。
+🔴 **VCS 实测：DST 现**不**按序交付 128**：bank5 = **a[7..0] 降序、每值 replicated 全 8 lane、B=2 doubled（2 beat/值）、
+16 beat 后全零**——即只交付**前 8 个值、降序+复制**（= unit_ds_transpose 的 8×8 单列转置 pattern），非 128 distinct 按序。
+→ **`ur_vec_tran_succ` + unit 配置不产生 doc §1195 的按序 128 交付**。DEBT-043-VEC-BEAT-FORMAT 未闭：128 元素的
+转置连续 → 8×8-tile → 转置 → 按序输出的**布局映射须设计**（2 tile 各 8×8、B=2 无 doubling、16 beat 128 distinct）。
+真值须对 doc §1187/1194-1195 的粒度模型 + VCS 逐 beat 反推正确 layout（下一步：从「a[7..0] 降序复制」反推
+当前 gather/transpose 实际读了什么，再设计使 128 distinct 按序落 16 beat）。
+
 ## Consequences / Debts
 - **DEBT-043-RESIDENT-LAT-VCS**：`SMI_DS_T_FIRST_BEAT + WINDOW ≈ 35` 是推算，真值（含 broadcast 跨-SMC 传播）须 VCS
   逐拍标定（transpose_CRI → activation-at-dr_shiftup_d）。落进 `pipeline_delays.yaml` 成受控常量（连同 `SMI_DS_T_WINDOW`）。

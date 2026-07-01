@@ -14,13 +14,14 @@ from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
 from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
-from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator
+from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator, UnitDstVec128Operator
 
 OPERATOR_MAP = {
     # 文档钦定流程的 8-SMC 功能测例（VCS 对齐，自底向上）
     "unit_fpadd": UnitFpAddOperator,                       # Flow A: 单一计算指令（FPADD, para 4828）
     "unit_ds_transpose": UnitDataShuffleTransposeOperator,  # Flow B: 数据整理 datapath（para 4676）
     "unit_ds_transpose_fp16": UnitDataShuffleTransposeFp16Operator,  # ADR-039 fp16 最小载体（闭合 bank5）
+    "unit_dst_vec128": UnitDstVec128Operator,  # ADR-043 path B：DST 交付 128 元素向量隔离验证
     "horner": HornerOperator,
     "sin3":   HornerOperator,
     "sin5":   HornerOperator,
