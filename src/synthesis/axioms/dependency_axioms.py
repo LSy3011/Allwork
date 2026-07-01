@@ -59,6 +59,23 @@ class DependencyAxioms(AxiomBase):
                     DependencyAxioms._add_constraint(
                         solver, t_vars[op.trace_id] >= t_vars[dep_id] + lat, label
                     )
+                    # ADR-042 DEBT-042-REGION-DLY（相位对齐）：SHIFTDN gather → SMI_DS_T transpose 的 RAW
+                    #   边默认 `>=` 让 SMT 把 gather 排 ASAP、而 transpose 被下游 shiftup(dst_datapath_value)
+                    #   的 `==` 边钉在 compute 前（q_dst t=11）→ gather 数据窗比两 CRI 齐(both_open)早 ~8 拍流、
+                    #   早 beat 在 slot 未 enable 时被 RTL 丢 → hi slot 饿死 → data_out_vld 恒 0 → bank5=0
+                    #   （VCS 实证 2026-07-01；对照 unit crd→both_open Δ5 works vs q_dst Δ11）。加**紧上界**
+                    #   把 gather 拉到 transpose 附近（ALAP），使 CRI 与 gather 数据窗对齐。GAP<II 保持在
+                    #   counter-verifier 区间 [t+lat, t+lat+II) 内 → 不破维度6。仅命中 smi_ds_t_gather 生产者
+                    #   → SMI_DS_T 消费者，不动其他 SHIFTDN/边。
+                    if (op_type == "SHIFTDN"
+                            and producer.metadata.get("smi_ds_t_gather")
+                            and op.op_type.upper() == "SMI_DS_T"):
+                        DST_GATHER_GAP = 2
+                        DependencyAxioms._add_constraint(
+                            solver,
+                            t_vars[op.trace_id] <= t_vars[dep_id] + lat + DST_GATHER_GAP,
+                            f"smi_ds_t_gather_tight_{op.trace_id}_{dep_id}_{mode}"
+                        )
 
             # === RTOVR 增广边约束（Step 2）===
             latch_vars = kwargs.get("latch_vars")

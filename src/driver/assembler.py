@@ -66,9 +66,18 @@ class PhysicalAssembler:
             
         physical_instructions = []
         for iq_name, ops in iq_buckets.items():
+            # ADR-042 BLOCK-3：SMI_DS_T 数据通路 IQ（smi-ds-t + 喂它的 SHIFTDN gather）须以**紧凑局部 II**
+            #   发射，与 compute II 解耦。RTL pair 引擎（smi_ds_t.v）需 2 CRI 相邻（前后两拍）+ 2 tile/16 拍
+            #   gather 才 hi_ready；compute II=10 会把 B=2 配对拉到 10 拍 → hi slot 饿死 → data_out_vld 恒 0
+            #   → bank5=0（VCS 实证，hco 2026-07-01）。unit_ds_transpose（II=2）正因 II 小而 VCS 8/8。
+            #   故这些 IQ 用 iq_II=DST_REGION_II（=2，mirror unit）而非全局 compute II。其余 IQ 不变。
+            is_smi_ds_t_dp = ("smi-ds-t" in iq_name.lower()
+                              or any(op.metadata.get("smi_ds_t_gather") for op in ops))
+            DST_REGION_II = 2
+            iq_II = DST_REGION_II if is_smi_ds_t_dp else II
             t_min_iq = min(op.metadata.get("global_t", 0) for op in ops)
-            skip_iterations = t_min_iq // II
-            l_init = (skip_iterations * II) + 1
+            skip_iterations = t_min_iq // iq_II
+            l_init = (skip_iterations * iq_II) + 1
 
             iq_max_stride = 0
             for op in ops:
@@ -135,14 +144,12 @@ class PhysicalAssembler:
             # （num_iterations）**无关**：fp16(8 元素=1 词)num_iterations=1 → 只 1 issue + gather 只送 1 slot
             # → hi 槽 open 不 fill → hi_ready=0 → 永不出数（VCS tb_dst_fp16 实证）。fp32(2 词)是
             # num_iterations=2 巧合凑够。故对这些 IQ 用 eff_num_iter=max(num_iterations,2)，与输出词数解耦。
-            is_smi_ds_t_dp = ("smi-ds-t" in iq_name.lower()
-                              or any(op.metadata.get("smi_ds_t_gather") for op in ops))
-            # （stream IQ 已在上方 N-条显式分支提前 continue；此处只剩非-stream IQ。）
+            # （is_smi_ds_t_dp / iq_II 已在 IQ 循环头计算；stream IQ 已在上方 N-条显式分支提前 continue。）
             if is_smi_ds_t_dp:
                 eff_num_iter = max(num_iterations, 2)
             else:
                 eff_num_iter = num_iterations
-            total_iterations_needed = (max_t_global // II) + eff_num_iter
+            total_iterations_needed = (max_t_global // iq_II) + eff_num_iter
             loops_val = total_iterations_needed - skip_iterations - 1
 
             physical_instructions.append(PhysicalInstruction(
@@ -157,14 +164,14 @@ class PhysicalAssembler:
             #   时序非真），连续 beat 会在 scatter 填 feed 前就读 → 取零、sim 全 0 FAIL。即此修法无法在
             #   现 sim 验证（sim 时序盲），强行落只会换一种假绿/真退化。故保持 II-slot kernel（II-spaced
             #   strided），DEBT-041-STREAM-DLY 留待 VCS + sim 流式模型升级（DEBT-038-B2-GATHER/spec §6）一并解。
-            kernel_map: Dict[int, Any] = {op.metadata["global_t"] % II: op for op in ops}
-            for k in range(II):
+            kernel_map: Dict[int, Any] = {op.metadata["global_t"] % iq_II: op for op in ops}
+            for k in range(iq_II):
                 if k in kernel_map:
                     op = kernel_map[k]
                     op_stride = int(op.metadata.get("stride", 0))
                     logical_addr = op.metadata.get("logical_addr", 0)
                     iq_start_t = min(o.metadata.get("global_t", 0) for o in ops)
-                    relative_skip = op.metadata.get("global_t", 0) // II - iq_start_t // II
+                    relative_skip = op.metadata.get("global_t", 0) // iq_II - iq_start_t // iq_II
                     addr = (logical_addr - op_stride * relative_skip)
                     
                     op_mask = 0x1 if (is_memory_iq and op_stride != 0) else 0
@@ -187,7 +194,7 @@ class PhysicalAssembler:
                     trace_id = f"nop_{iq_name}_{k}"
 
                 abs_t_val = l_init + 1 + k
-                if k == II - 1: header.embed_end = 1
+                if k == iq_II - 1: header.embed_end = 1
                 physical_instructions.append(PhysicalInstruction(
                     iq_name=iq_name, abs_t=abs_t_val, header=header, payload=payload,
                     stage="BODY", local_id=k, op_type=str(ops[0].op_type), trace_id=trace_id

@@ -1498,31 +1498,65 @@ class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
 
     SRC_BANK = 6   # 列对齐 FP16 激活存放 bank（避让 a=0 / b0-3=1-4 / y=5；hco NOTE-3）
 
+    ROWS = 8   # ADR-042 D2：按 8×8 tile 呈现（RTL SMI_DS_T pair 引擎无 B=1、需 2 tile/16 拍）
+
     def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
-        # gather 全 K=8 个 SMC（每 SMC lanes=1 个 FP16 元素）→ 转置 1×8 → 写回 SMC_0 bank0（FP16 1 词）
+        # ADR-042 D2：K=8 激活向量按 **8×8 tile（col-0 填 [a0..a7] + padding）** 呈现——RTL pair 引擎
+        #   （smi_ds_t.v）硬编码需 2 full tile / 16 拍 gather / 2 CRI，无 B=1（hco 2026-07-01）。lanes=1（旧）
+        #   只产 8 拍单 tile → hi slot 饿死 → data_out_vld 恒 0 → bank5=0（VCS 实证）。改 lanes=ROWS=8 mirror
+        #   unit_ds_transpose_fp16（VCS 8/8）的 8×8 机制：gather 8×8（col0=[a0..a7]、rest 0）→ 转置 →
+        #   **row0=[a0..a7]**（转置把 col0 变 row0）→ B=2 → row0 落 beat0 → compute 读 beat0。
         return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
-                "gather_smc_cnt": self.K, "lanes": 1, "element_bits": 16, "word_lanes": 8}
+                "gather_smc_cnt": self.K, "lanes": self.ROWS, "element_bits": 16, "word_lanes": 8}
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
                             vector_lanes: int, spec: Any = None):
-        a = input_data["a"]                                      # K=8 FP16 激活向量
+        a = np.asarray(input_data["a"], dtype=np.float16)        # K=8 FP16 激活向量
         bank_depth = self._get_hw_param(spec, "PARAM_UR_BANK_DEPTH", 256)
         src_logical = self.SRC_BANK * bank_depth
         for c in range(self.COLS):
             b_addr = self.get_bank_addr(f"b{c}", spec)
             for k, prog in enumerate(programs):
                 prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)   # 权重列 c per-SMC
-        # 激活 K=8 列对齐存全 8 SMC（每 SMC 持 1 元素 a[k]）= 文档 §1091 UR_Vec_Tran_Succ
-        #   转置连续分散（chunk=1）。改调跨-SMC 分散布局模型，替代手搓 `a[k]→SMC_k` loop
-        #   （一致性等价，由 test_fp16_matmul_q_dst_e2e_exit0 守护）。不注入 bank0：SMI_DS_T
-        #   转置后写回行对齐激活（供 SHIFTUP 广播读）。
-        from core.cross_smc_layout import ur_vec_tran_succ, inject_distributed
-        inject_distributed(programs, np.asarray(a, dtype=np.float16),
-                           ur_vec_tran_succ(len(programs)), src_logical)
+        # ADR-042 D2：激活按 8×8 col-0 tile 存全 8 SMC——SMC_s bank{SRC_BANK} 持 **1 词 = [a[s], 0×7]**
+        #   （a[s] 在 element 0、其余 7 padding 0）。gather 全 8×8 = col0 列向量 [a0..a7]（其余列全 0）→
+        #   SMI_DS_T 转置 8×8 → row0 = [a0..a7]。padding 满足 RTL「2 full tile/16 拍」完整性（ADR-042 D1）。
+        # ADR-042 DEBT-042-REGION-DLY（beat 对齐，未闭）：activation 放 element 0 → 转置降序发落 data_out
+        #   **beat 14**（VCS cyc 4116，unit `e=(ROWS-1)-k//2`）；element 7→beat 0 实测**引擎不出数**（regress，
+        #   待查，可能 B=2/intlv 边界）。故留 element 0（引擎出数已验，data_out_vld@4102）；compute 采样对齐
+        #   （现 rt_act ~4101 早于 activation 到 dr_shiftup_d ~4123）是最后一步，见 ADR-042 DEBT-042-REGION-DLY。
+        for s, prog in enumerate(programs):
+            if s < self.K:
+                row = np.zeros(self.ROWS, dtype=np.float16)
+                row[0] = a[s]                                     # col-0 对齐：SMC_s 持 a[s] 于 element 0
+                prog.inject_vector(src_logical, row, stride=1)
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
-        # fp16_matmul_n 的 SMC 内 DFG（FP16MUL 满 32 乘 + SHIFTUP 广播）+ SMI_DS_T 转置前端注入
+        # fp16_matmul_n 的 SMC 内 DFG（FP16MUL 满 32 乘 + SHIFTUP 广播）+ SMI_DS_T 转置前端注入。
+        # ADR-04X（本会话，VCS bank5=0 修）：激活广播**必经 SMI_DS_T datapath**
+        # （[[matmul-addtree-dataflow-authoritative]]）。共享 `_inject_smi_ds_t_transpose` 只把 a_read 锚到
+        # ds_transpose（调度边），广播 SHIFTUP 仍经 a_read **2-edge 路径** → SMT 把 SHIFTUP 排到
+        # SMI_DS_T data_out_vld 窗口尾后（+SMI_DS_T(19)+ur_latency）→ RTL SHIFTUP 负载硬连 ds_t_data_out
+        # （[[shiftup-shiftdn-only-dst-datapath]]）此时已 deassert → 广播空 → compute 乘零 → bank5=0（VCS 实证）。
+        # 修：广播 SHIFTUP **直接锚 ds_transpose**（1 条 SMI_DS_T(19) RAW 边落进窗口），compute 链经
+        # rt_act→FP16MUL 透传跟随，整条 compute 相位自动后移。镜像 unit_ds_transpose（ADR-041，VCS 8/8）。
+        # 仅本 q_dst 路径改写，不动共享 helper → fp32 DST / fma / matmul_n 不受影响（ADR-041 BLOCK-2 隔离）。
         ops = super().get_dfg(spec)
+        chain_nodes, ds_transpose = _build_smi_ds_t_chain(self.smi_ds_t_config(spec), spec)
+        sup = next((o for o in ops if o.trace_id == "shiftup_a_read"), None)
+        if sup is not None:
+            sup.metadata["depends_on"] = [ds_transpose.trace_id]
+            sup.metadata["dst_datapath_value"] = True   # 值经 data_out datapath 流入 → rigid 审计豁免（仅校时序）
+            sup.metadata["math"] = "shiftup_broadcast(SMI_DS_T.data_out)"
+            # ADR-042 BLOCK-2：广播 SHIFTUP 须**密集 16-beat 流**（stream_beats=SMI_DS_T_WINDOW），逐拍取
+            #   data_out beat；单脉冲只广播窗口尾后空 beat（VCS 稀疏 3 行 → compute 取零）。门控仍
+            #   producer.op_type==SMI_DS_T（ADR-041 BLOCK-2）——此 sup 明证 depends_on ds_transpose==SMI_DS_T。
+            window = 16
+            if spec is not None and hasattr(spec, "delays"):
+                window = int(spec.delays.get("SMI_DS_T_WINDOW", 16))
+            sup.metadata["stream_beats"] = window
+            return list(ops) + chain_nodes
+        # COLS<4（无 SHIFTUP 广播）退回共享 a_read 锚（保持兼容）
         return _inject_smi_ds_t_transpose(ops, self.smi_ds_t_config(spec), spec)
 
 
