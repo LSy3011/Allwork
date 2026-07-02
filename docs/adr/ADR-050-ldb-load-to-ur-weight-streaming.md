@@ -112,7 +112,13 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 **emit 验证正确**：iq_ldb-axi HDR LOOPS=3+INC=16、body INC_EMBED=0x01；iq_ldb HDR LOOPS=3+ur_addr=4096 驻留；两 CRU 同拍 t=10；II=48（WAR 强制）。
 🔴 **VCS 执行 bug 根因定位（波形，2026-07-02）**：`iq_inst_vld` **bit26(LDB)/bit27(LDBAXI) 只在起始 2 拍(cyc15065-67=INIT+HDR)置高、之后不 replay**；bit2(fp16mul)10 次、bit17(ur-r1/b_read)9 次贯穿循环。→ **LDB IQ 处理完 INIT+HDR 就停、不 replay kernel body**（body slot10 从不 fetch → o_cru_ldb 恒 0 → bank1=0）。
 **关键对照**：ldb 与 ur-r1 hex **结构完全相同**（INIT/HDR LOOPS=3/EMBED_LOOPS=1/EMBED_END@line49，仅 body slot 12 vs 4），但 ur-r1 循环正常、ldb 不循环（ldb INIT LOOPS=0 skip=0 vs ur-r1 INIT LOOPS=48）。→ **SMI 对 LSU IQ(slot 24-27) 的 loop-replay 机制 ≠ UR/compute IQ**（同结构不同行为）。这解释单-shot(LOOPS=0 无需 replay)能发、循环(LOOPS=3 需 replay)不发。
-**下一步 = hco 第 4 轮**：取证 smi_iq LSU IQ(24-27) 的 loop/EMBED replay 机制——是否被 **outstanding/done 握手门控循环推进**（LSU IQ 须等 LDB inst 完成才 replay，异于自由 replay 的 compute/UR IQ）、或 LSU 循环另有 RTL 要求（smi_iq.v LOOP_CYCLE/EMBED_LOOP + LSU 分支 vs compute/UR 分支）。据此定 emit 侧循环 LDB 的正确 replay 编码。
+**下一步 = hco 第 4 轮**：取证 smi_iq LSU IQ(24-27) 的 loop/EMBED replay 机制。
+
+### ✅ hco 第 4 轮根因（2026-07-02，RTL 行级）+ 方案 z
+**根因非 emit、在 RTL**：LSU IQ(24-27) 走 `smi_iq_dly_queen.v:148` 的 **outstanding/done 信用门控发射变体**（4 深 `r_executing_inst_cnt`：每发射++（含 NOP replay）、只有真 LDB 回 `crd_i[4]=done` 才--）。循环 kernel 的 NOP replay 吃信用不还 → 信用耗尽 → `dly_queen_afull=1` → `smi_iq_iic` 所有 loop-replay 分支被 `~afull` 冻结 → body 永不 fetch。UR/compute IQ 走 free-run 无门控变体（crd_i=0）故循环正常。单-shot 能发=发射条数≤4。iic 循环状态机 LSU/compute **无差异**（分叉全来自 dly_queen 变体）。COND 否决（EN_COND=0 编译期常量）、INIT stagger 无关。
+**方案 z（hco 推荐）**：unrolled 多条单-shot LDB（每 tile LOOPS=0，绕 replay 通路、每条真 LDB 回 done 自 drain 信用）。已落码（EMIT_LDB_STREAM 改 unrolled，commit 见 git）。
+🟠 **VCS 部分通（待续）**：K32-stream bank5=80.14（部分，golden 268），**bank1[0..2]=0 只 bank1[3] 写** —— 4 条 unrolled LDB 只**末条** fire。待续查：疑 credit 只 1 in-flight 完成 / inst_id 配对（各 i%4 distinct）/ kernel slot 交互；末条写而非首条 → 非简单信用耗尽（否则首条应写）。可能 4 条 ldb 在同 II=4 kernel 4 slot 的发射-完成时序问题，或多条同 iq 的 done 回流/inst_id 匹配。
+**DEBT-050-LSU-LOOP**：真 O(1) UR 循环 LDB 流式需 RTL 债务解（信用不计 NOP / iq_II=1 消 NOP）。当前 unrolled 多-LDB 是 UR-bounded（N line，K≤~1 bank）非 O(1)。
 
 ### 其余阶段 2（deferred）
 2D stride/line 语义、pre/post fill、per-SMC 交织(gr_intlv 真跨-SMC 分散)、并发 LDB+compute(端口冲突 SMT axiom, ADR-008 延伸)、LDB done-握手变延迟建模。
