@@ -78,7 +78,18 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 - [ ] **4b. LSU IQ header 变体（hco RTL 取证已解，`smi_iq.v:58,86`）**：LSU（slot 24/25/26/27）header=**50bit**，与 compute 41bit **唯一差异 = INC 字段 4→13bit（+9）**，其上字段 offset 整体 +9、无新增字段。LSU header 逐字段（offset:width）：INC_EMBED 0:6 / **INC 6:13** / DLY 19:3 / COND 22:7 / LOOPS 29:10 / EMBED_END 39:6 / EMBED_LOOPS 45:3 / JUMP 48:1 / VLD 49:1 = 50。packer 需按 unit_type 选 header 变体（compute 41 / LSU 50）。阶段 1 单次搬运：INC/INC_EMBED/LOOPS/EMBED*/COND 全 0，VLD=1，body 各字段填值。⚠ modules.yaml STB stub=7bit 是错的（真 body=50，CRU_STB_W=50）——阶段 1 不实现 STB 可留 DEBT-050-STB-STUB。无 NEEDS-USER-FACT（三方 bit_len 吻合）。
 - [ ] **5. DFG/frontend**：加 2 op —— `ldb_axi_op`(LDB_AXI, gr_base_addr=0/brst=lines) + `ldb_op`(LDB, ur_addr=bank1 base/ur_wr_line_cnt=K//8) deps=[ldb_axi_op]；`b_read` deps 加 `ldb_op`（RAW，权重 ready 后读）。LDB 一次性（inner_loops=0）填 bank1[0..K//8-1]，compute 循环随后。⚠ 变延迟 → 相位隔离（保守大 latency 或 DFG 边强制 LDB 先于 b_read），非精确 add_latency_axiom。
 - [ ] **6. HBM hex 生成**：weight tile 按 128b/line（8 fp16/line）打包 `memory_init0.hex`（line k↔byte k×16）；放 aiacc_rtl/data_engine/sram/ 或 g_hbm_init_path 指向。
-- [ ] **7. 算子 + harness**：ManualFp16MatmulK16LdbOperator（bank1 不 inject、改 LDB load + 复用 K16 matmul）；VCS 预载 HBM hex + bank5 bit-match + 负向断言（不预载→变）。
+- [x] **7. 算子 + harness**（commit 02b0f0e/27034af）：ManualFp16MatmulK16LdbOperator（fp16_matmul_k16_ldb，bank1 不 inject + prepare_hbm_hex + 复用 K16 matmul）；VCS harness = 权重写 aiacc_rtl/data_engine/sram/memory_init1.hex（SMC0=gsi+1，tb:2087）+ cp build 到 test_atomic_ops。
+
+## VCS 调试进度（2026-07-02，阶段 1 未完）
+**读路径全链已硅证 ✓（最难的 AXI/NOC/HBM 连通性）**：
+- HBM 预载 ✓（`[HBM] smc0 <- memory_init1.hex`，mem[0/1]=权重）。
+- 修 2 bug（commit 27034af）：① resolve_iq_type 前缀吞并（ldb-axi 误当 LDB 56b→修精确匹配优先，iq_ldb-axi.hex 现 154bit✓）；② 相位隔离（pipeline_delays LDB=40 保守上界，b_read@t43）。
+- `o_cru_ldb_axi_r` VALID=1@cyc1912 → `ldb_arvalid`@1915 → **`ldb_rvalid`@1920（HBM 数据返回）** ✓✓。
+
+🔴 **剩余断点：LDB 写侧 UR-write 未 firing**（bank5=0/bank1 空）：
+- 第一次跑（LDB lat=1）：`o_cru_ldb_r` VALID=1@1913 发射，但 `ldb_ur_we` 不 firing（写描述符@1913 早于数据@1920）。
+- 加 LDB=40 后：schedule 挪动（ldb@t3/b_read@t43），`o_cru_ldb_r` **全程不发射**（写侧 IQ VALID 槽随时序移动不再被 fetch）。
+- **下一步**：LDB 两 CRU「必须同时发射」（hco 契约）——ldb_axi 与 ldb 应同拍发射（去掉 ldb→ldb_axi dep），且写描述符须持续/对齐 rvalid 数据返回（@~1920）。读 `ldb_ur_axi_conv.v:1389-1464` UR-write FSM（o_cru_ldb 描述符 latch vs rvalid drain 时序）。相位隔离 latency 与写侧发射时序需协调（LDB=40 不能让写指令被挤出 fetch 窗）。可能需 hco 第 3 轮（LDB UR-write FSM 时序 + 两 CRU 对齐）。
 
 ## 验收（阶段 1 升 Accepted）
 - [ ] VCS：SMC0 预载 K=16 tile 进 HBM → LDB load bank1 → matmul → bank5 bit-match golden + 负向断言（不预载→变）。
