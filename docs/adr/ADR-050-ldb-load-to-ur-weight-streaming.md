@@ -123,7 +123,15 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 - ① no-dep：满足同拍、背靠背覆盖 → 只 bank1[末] 写（bank5 部分 80.14）。
 - ② 串行 dep（latency 40）：满足间隔、破 ldb_axi/ldb 同拍（拉到不同拍）→ bank1 全空（bank5=0）。
 - ③ **修向(x) per-op DLY**（用户要求，assembler 已加 per-op DLY infra，body 读 op.metadata['dly']）：LDB DLY=3 正确 emit 但 **VCS 结果不变**（仍只 bank1[末]）——DLY 延迟指令**效果**、非 SMI 对下条 fetch/描述符到达间隔，LDB_AXI 单描述符仍背靠背覆盖。
-**下一步**：wave-trace DLY 实际效果（确认为何不 spacing）/ RTL done-COND 串行（EN_COND 编译期常量=0，需改 RTL）/ 大 II 使各 LDB 落独立 fetch 窗（需 compute 也大 II 或 LDB 独立 IQ 调度）。per-op DLY assembler 机制已留 infra（默认 0 无副作用）。
+### ✅ hco 第 5 轮定论（2026-07-02，波形逐拍取证）：真根因 = brst=0 RTL 死锁，推翻全部 unrolled/looped 前提
+**真根因**：LDBAXI RECV→DONE 守卫（`ldb_ur_axi_conv.v:829`）`burst_send_len==(brst-1)`；brst=0（4bit）→ brst-1=15，单-beat 读永到不了 15 → **FSM 死锁在 RECV_DATA** → rd_cnt 冻结 → 队列后续指令永不处理、crd 不回。**RTL 不对称 bug**：DONE 状态特判了 brst==0（:835/945），但 RECV→DONE 守卫**漏了** `||(brst==0)` → 单-beat load 死锁。
+**模型订正**（推翻旧「单描述符覆盖」）：LDB/LDBAXI **各有 4 深 inst_array**（:238-264，非单寄存器，背靠背入队不覆盖）；inst_id 被 SMI `r_inst_cnt_cycle` 按发射序覆盖（emit 设的无效）；两队列位置流式配对须顺序对齐。credit 非瓶颈（3 条已入队）；瓶颈是单元 FSM 第 1 条 brst=0 死锁拖垮全部。
+**我踩坑**：unrolled 每条载 1 line 都 brst=0 → 全死锁；stage-1 K16/K128 用 brst=lines-1≥1 真 burst 故通。
+**结论 = 正解**：O(1) 循环流式（1 line/LDB=brst=0）被 RTL bug 封死；**真大 K 正解 = 单条多行 burst LDB**（EMIT_LDB_WEIGHT，brst=lines-1≥1）。retire EMIT_LDB_STREAM。K32StreamLdb 改单条多行(brst=3)→ **VCS bank5=268.0354 bit-match ✓**。
+**K 上限**：单条字段可达 8191 行，真上限 = UR bank 深 256 = **K2048**（K128 已证 16 行）。K>248(>31 行) line_byte_cnt=16×lines 溢 9bit → 须 **2D line_byte_cnt 模式**（ur_wr_line_cnt=行数 / line_byte_cnt=15 单行满 / line_stride），NEEDS-USER-FACT-050-LINE2D（依目标 UR 布局）。
+**RTL 债务**（反馈 owner zhuzhenglong，本仓不改 RTL）：DEBT-050-LDBAXI-BRST0（RECV→DONE 补 `||(brst==0)` 才能单-beat/真 O(1) 流式）+ DEBT-050-LSU-LOOP（LSU IQ 循环信用门控）。
+### 旧尝试（皆 brst=0 死锁的表象，已由第5轮定论解释）
+①no-dep ②串行 dep ③DLY(x) —— 全因 brst=0 死锁只处理 1 条；per-op DLY assembler 机制留 infra（默认 0 无副作用）。
 **对齐理解**：`outstanding=4` = 4 条在途上限（信用），非总数封顶（done 回流可发>4、节流非封顶）；LDB 单描述符 reg 才是背靠背覆盖的真因。
 **DEBT-050-LSU-LOOP**：真 O(1) UR 循环 LDB 流式需 RTL 债务解（信用不计 NOP / iq_II=1 消 NOP）。当前 unrolled 多-LDB 是 UR-bounded（N line，K≤~1 bank）非 O(1)。
 
