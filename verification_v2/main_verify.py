@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulK2048Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator, UnitDstVec128Operator
 
@@ -51,6 +51,8 @@ OPERATOR_MAP = {
     # ADR-049 后续：扩 K 多-tile 累加（K24=3 tile/K32=4 tile，复用 K16 参数化核）
     "fp16_matmul_k24": ManualFp16MatmulK24Operator,
     "fp16_matmul_k32": ManualFp16MatmulK32Operator,
+    # 满-bank 示例：K=2048 激活填满整 bank（256 tile），单-SMC 单列极限
+    "fp16_matmul_k2048": ManualFp16MatmulK2048Operator,
     # ADR-032 S2：FP16 matmul 满 32 乘（4 列稠密，1 FP16MUL → 8 D → 4 ADDTREE8TO1）
     "fp16_matmul_q": ManualFp16MatmulQOperator,
     # ADR-032 S3：FP16 matmul 8-SMC N 维广播（满 32 乘/SMC，partitioned 输出）

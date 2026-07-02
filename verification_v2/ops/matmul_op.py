@@ -1390,6 +1390,18 @@ class ManualFp16MatmulK32Operator(ManualFp16MatmulK16Operator):
     K = 32
 
 
+class ManualFp16MatmulK2048Operator(ManualFp16MatmulK16Operator):
+    """满-bank 示例（DEBT-025-MULTITILE 边界）：K=2048 = **256 tile = 激活填满整 bank0**
+    （256 词 × 8 fp16 = 2048 fp16 = bank 深 256）。inner_loops=255（≤ BITS_LOOPS=10 上限 1023）。
+
+    🔑 单-SMC 单列长点积的**极限**：激活 2048 fp16=4KB 占满 bank0、权重 2048 fp16=4KB 占满 bank1、
+    输出 1 标量 bank5——共 2 bank，放得下单 SMC 32KB UR（**单列不撞 bank 墙**）。bank 墙的真障碍是
+    **多列/全矩阵**（真权重 8–33MB ≫ UR → 必须跨-SMC 分散 + HBM/LDB 流式，见 [[ur-bank-capacity-and-llm-fit]]，
+    本算子不涉）。结构完全复用 K16 参数化核（DFG/golden/prepare_input 全依 self.K），验累加环 256 迭代
+    ×(II=4) 长跑时序 + 满-bank 逐词读地址推进（inner_inc=1，addr 0..255 不出 bank）。"""
+    K = 2048
+
+
 class ManualFp16MatmulQOperator(BaseOperator):
     """ADR-032 S2：FP16 推理 matmul 满 32 乘（单 SMC，K=8，4 列稠密）。
 
