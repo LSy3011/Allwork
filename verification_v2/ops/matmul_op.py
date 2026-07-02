@@ -1304,8 +1304,11 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
             l2 = f32(p[4] + p[5]); l3 = f32(p[6] + p[7])
             return f32(f32(l0 + l1) + f32(l2 + l3))
 
-        # 5to1 accumulate 片间：acc = reduce8(tile0) + reduce8(tile1)（K=16 dot）
-        s = f32(reduce8(a[0:8], b[0:8]) + reduce8(a[8:16], b[8:16]))
+        # 5to1 accumulate 片间：acc 从 0（reset）逐 tile 累加（顺序对齐硬件 iter0=0+t0→iter1+t1…，
+        # K16 VCS 实证 acc reset=0 成立）。泛化到任意 K=8·T（K24/K32 子类只改 self.K）。
+        s = f32(0.0)
+        for t in range(self.K // 8):
+            s = f32(s + reduce8(a[t * 8:(t + 1) * 8], b[t * 8:(t + 1) * 8]))
         golden = np.zeros(4, dtype=np.float32)
         golden[0] = s
         return {"y": golden, "intermediates": []}
@@ -1372,6 +1375,19 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
         out = next(o for o in ops if o.trace_id == "out_obj_0")
         out.metadata.update({"inner_inc": 0, "outer_inc": 0, "stride": 0})
         return ops
+
+
+class ManualFp16MatmulK24Operator(ManualFp16MatmulK16Operator):
+    """ADR-049 后续：K=24 = 3 个 K=8 tile。inner_loops=2（3 迭代 5to1 累加）。
+    结构完全复用 K16（DFG/golden/prepare_input 全参数化于 self.K）；只验更多迭代的累加环时序。
+    存储：每 SMC 3 词 a + 3 词 b（≤6/2048 词/bank，远未撞 bank 墙）。"""
+    K = 24
+
+
+class ManualFp16MatmulK32Operator(ManualFp16MatmulK16Operator):
+    """ADR-049 后续：K=32 = 4 个 K=8 tile。inner_loops=3（4 迭代 5to1 累加）。
+    结构复用 K16；累加环 4 迭代（loop-carried II≥4 跨迭代深度更大）。"""
+    K = 32
 
 
 class ManualFp16MatmulQOperator(BaseOperator):
