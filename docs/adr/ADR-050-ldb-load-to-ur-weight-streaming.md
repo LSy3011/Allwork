@@ -105,7 +105,12 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 | LDB(50) 步 ur_addr(驻留) | 0 | 0 | 0 | num_tiles-1 |
 **实现三步**：① assembler.py:94 `is_memory_iq` 加 `"ldb"` 子串匹配即够（复用 UR level-1 embed-loop，已 VCS 证明；body op_mask=0x1 when stride!=0 → LDB_AXI 开、LDB 关；`hdr_inc_embed=max(stride,1)` 对 stride=16 语义错但 RTL 忽略 HDR inc_embed → 无害，建议显式写 0x1）。② DFG：LDB/LDB_AXI inner_loops=num_tiles-1、stride 如上、b_read 驻留读 bank1[0]。③ **SMT 加 WAR 边 `LDB_{i+1}←compute_i`**（单驻留 buffer 强制逐 tile 串行，outstanding=4 不能 pipeline）。
 🔴 **HBM 同步策略（决策 (a)，AI 自决 2026-07-02，user 暂离；同 stage-1 bring-up 套路 + hco 推荐序）**：HBM/AXI 读延迟**非编译期固定**。**首期 (a) 保守大固定 II bring-up**（覆盖 HBM 往返上界 + WAR 串行）过 VCS bit-match，标 **DEBT-050-VARLAT「非硅安全」**；**升 Accepted 前必转 (b) done-握手事件建模**（COND/crd，硅安全）。hco 判：HBM 往返是「时序要算不要调」的**合法例外**（该用握手非算拍），(a)→(b) 序成立。user 回来可 override 到直接 (b)。
-载体建议：K32-stream（4 tile 驻留 1-line buffer）VCS bit-match。
+载体：K32-stream（4 tile 驻留 1-line buffer）。
+
+### 🟠 循环 LDB 实现进度（2026-07-02，commit 800b482，emit 正确/VCS 执行 bug 待续）
+**三步已落**：①assembler is_memory_iq 加 "ldb"（pytest 186 安全，单-shot 不受影响）②K16 get_dfg 加 EMIT_LDB_STREAM 分支（LDB_AXI stride=16/LDB stride=0 驻留/b_read stride=0 驻留/两 CRU 同拍均挂 WAR loop-carried←b_read:8/LDB inner_loops 保留）③ManualFp16MatmulK32StreamLdbOperator（fp16_matmul_k32_stream_ldb）。
+**emit 验证正确**：iq_ldb-axi HDR LOOPS=3+INC=16、body INC_EMBED=0x01；iq_ldb HDR LOOPS=3+ur_addr=4096 驻留；两 CRU 同拍 t=10；II=48（WAR 强制）。
+🔴 **VCS 执行 bug（待续）**：循环模式 `o_cru_ldb`/`o_cru_ldb_axi` **全程不发射**（events=0）→ bank1=0/bank5=0。单-shot（K16/K128 LDB）能发射、循环不发。**下一步查**：loop kernel replay（HDR LOOPS=3）与 SMI fetch/dispatch 交互 / II=48 slot 位置 / 驻留 b_read(stride=0) 对 schedule/INIT 的影响。带波形追 SMI 的 LDB IQ fetch（为何 VALID slot 在 loop kernel 里没被 issue）。疑与单-shot 的差异=INIT/HDR LOOPS 结构 or 大-II kernel 的 LDB body slot 未被 replay 命中。
 
 ### 其余阶段 2（deferred）
 2D stride/line 语义、pre/post fill、per-SMC 交织(gr_intlv 真跨-SMC 分散)、并发 LDB+compute(端口冲突 SMT axiom, ADR-008 延伸)、LDB done-握手变延迟建模。
