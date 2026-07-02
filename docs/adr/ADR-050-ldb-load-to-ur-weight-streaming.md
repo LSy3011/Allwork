@@ -128,7 +128,9 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 **模型订正**（推翻旧「单描述符覆盖」）：LDB/LDBAXI **各有 4 深 inst_array**（:238-264，非单寄存器，背靠背入队不覆盖）；inst_id 被 SMI `r_inst_cnt_cycle` 按发射序覆盖（emit 设的无效）；两队列位置流式配对须顺序对齐。credit 非瓶颈（3 条已入队）；瓶颈是单元 FSM 第 1 条 brst=0 死锁拖垮全部。
 **我踩坑**：unrolled 每条载 1 line 都 brst=0 → 全死锁；stage-1 K16/K128 用 brst=lines-1≥1 真 burst 故通。
 **结论 = 正解**：O(1) 循环流式（1 line/LDB=brst=0）被 RTL bug 封死；**真大 K 正解 = 单条多行 burst LDB**（EMIT_LDB_WEIGHT，brst=lines-1≥1）。retire EMIT_LDB_STREAM。K32StreamLdb 改单条多行(brst=3)→ **VCS bank5=268.0354 bit-match ✓**。
-**K 上限**：单条字段可达 8191 行，真上限 = UR bank 深 256 = **K2048**（K128 已证 16 行）。K>248(>31 行) line_byte_cnt=16×lines 溢 9bit → 须 **2D line_byte_cnt 模式**（ur_wr_line_cnt=行数 / line_byte_cnt=15 单行满 / line_stride），NEEDS-USER-FACT-050-LINE2D（依目标 UR 布局）。
+**K 上限（订正，查文档 v0.4.19 表57 + VCS）**：文档表57 权威字段——line_byte_cnt=**每行字节数≤511**（非总字节）、line_stride=**行地址间距(相邻行差 16×line_stride)**、ur_wr_line_cnt=行数(8bit≤255)、outstanding=4(发满等 done)。**但真上限 = brst 4-bit(≤15=16 beats) → 单条 LDB AXI 读 ≤16 行 = K128**（非 ur_wr_line_cnt/line_byte_cnt 限，是 AXI burst 位宽）。K128 已 VCS bit-match(16 行 brst=15)。K256 单条不可行。
+配法：暂用已证特例 `ur_wr_line_cnt=lines / line_byte_cnt=16×lines / line_stride=0`（K16/K32/K128 全 bit-match）；文档-per-line 配法 `line_byte_cnt=16/line_stride=1` K128 通但 K32 nan（小行数回归待查）。
+**DEBT-050-KGT128**：K>128 须**多条 16-行-chunk LDB**（每条 brst=15、载 16 行进连续 bank1 区、4 深队列串行、避 1-line brst=0 死锁）——unrolled 多-chunk（每 chunk≥2 行 brst≥1 避死锁）是下一步，非 O(1) 流式（那需 RTL 修 brst=0）。
 **RTL 债务**（反馈 owner zhuzhenglong，本仓不改 RTL）：DEBT-050-LDBAXI-BRST0（RECV→DONE 补 `||(brst==0)` 才能单-beat/真 O(1) 流式）+ DEBT-050-LSU-LOOP（LSU IQ 循环信用门控）。
 ### 旧尝试（皆 brst=0 死锁的表象，已由第5轮定论解释）
 ①no-dep ②串行 dep ③DLY(x) —— 全因 brst=0 死锁只处理 1 条；per-op DLY assembler 机制留 infra（默认 0 无副作用）。
