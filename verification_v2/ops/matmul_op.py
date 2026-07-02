@@ -1462,13 +1462,15 @@ class ManualFp16MatmulK16LdbOperator(ManualFp16MatmulK16Operator):
 
 
 class ManualFp16MatmulK32StreamLdbOperator(ManualFp16MatmulK16LdbOperator):
-    """ADR-050 阶段2 循环 LDB（方案 a）：K=32 = 4 tile，权重经**循环 LDB 流式**逐 tile 载入 bank1[0]
-    **驻留 buffer**（O(1) UR，真大 K 通路）。每迭代 LDB 载 1 line（INC=16 步进 HBM），matmul 读+累加，
-    下迭代覆盖。区别于 K128（单 LDB 载全部）：此为 K>248/权重≫UR 的流式模型（虽 K=32 小，验机制）。
-    b_read 驻留读 bank1[0]（stride=0）；ldb WAR loop-carried ←b_read 强制 II≥48（逐 tile 串行）。
-    DEBT-050-VARLAT：保守大 II 非硅安全，升 Accepted 转 done-握手。"""
+    """ADR-050 阶段2（hco 第5轮订正）：K=32 = 4 tile。**循环/unrolled 1-line-LDB 流式是死路**——
+    RTL 双 bug 堵死：① LDBAXI RECV→DONE 守卫漏 brst==0（单-beat load 死锁 RECV，ldb_ur_axi_conv.v:829）
+    → 每条载 1 line(brst=0) 卡死；② LSU IQ 循环信用门控（NOP replay 吃信用）。故 **retire EMIT_LDB_STREAM**，
+    改用**单条多行 burst LDB**（EMIT_LDB_WEIGHT，brst=lines-1≥1 真 burst）—— 这才是硬件设计意图的大 K 正解
+    （stage-1 K128 16 行已 VCS bit-match）。K 上限 = UR bank 深 256 = K2048；K>248(>31 行)须 2D line_byte_cnt
+    模式(line_byte_cnt=15/ur_wr_line_cnt=行数/line_stride，NEEDS-USER-FACT-050-LINE2D)避 9bit 溢出。
+    K32(4 行,line_byte_cnt=64,brst=3) 单条搞定。DEBT-050-LSU-LOOP/UNROLL(真 O(1) 流式需 RTL 修 brst=0)。"""
     K = 32
-    EMIT_LDB_STREAM = True
+    EMIT_LDB_WEIGHT = True   # 单条多行 burst（brst=3），非 stream（RTL brst=0 死锁）
 
 
 class ManualFp16MatmulK128LdbOperator(ManualFp16MatmulK16LdbOperator):
