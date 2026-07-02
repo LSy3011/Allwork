@@ -1428,6 +1428,14 @@ class ManualFp16MatmulK16LdbOperator(ManualFp16MatmulK16Operator):
         return lines
 
 
+class ManualFp16MatmulK128LdbOperator(ManualFp16MatmulK16LdbOperator):
+    """ADR-050 阶段 2 首步：K=128 = 16 tile，权重经**单条 LDB** 从 HBM 载入 16 line（多-tile 大 K）。
+    line_byte_cnt=16×16=256 < 9bit 上限 511（单 LDB 最大 ~31 line/248 元素）→ 单 LDB 可覆盖 K≤248。
+    matmul 循环 16 tile 累加。验 LDB 多-tile 扩展 + 累加环随 LDB-载入权重的正确性。
+    （K>248 需循环 LDB / 多 LDB + INC 步进 gr_base_addr，见 ADR-050 阶段 2 循环 LDB。）"""
+    K = 128
+
+
 class ManualFp16MatmulK24Operator(ManualFp16MatmulK16Operator):
     """ADR-049 后续：K=24 = 3 个 K=8 tile。inner_loops=2（3 迭代 5to1 累加）。
     结构完全复用 K16（DFG/golden/prepare_input 全参数化于 self.K）；只验更多迭代的累加环时序。
