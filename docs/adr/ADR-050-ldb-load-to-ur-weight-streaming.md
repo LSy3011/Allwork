@@ -28,6 +28,13 @@ user_decision: user 2026-07-02「数据的加载在架构中，就是通过 load
 
 **握手**：crd_ldb(6b:valid/done/inst_id) + crd_ldbaxi(7b:valid/done/inst_id/err)。两流须**同时发射**（ldbaxi 取数、ldb 写 UR 消费之）。
 
+### TB IQ 名→槽集成表（`aiacc_rtl/generate_data_list_coverage.py` IQ_LAYOUT_MAP，权威）
+- **slot 26 iq_name="LDB"** bit_len=106（=56b CRU body + ~50b IQ header）byte[228:241]
+- **slot 27 iq_name="LDB-AXI"** bit_len=154（=104b CRU body + ~50b header）byte[242:261]
+- （对照 slot 24 STB bit_len=100 / 25 STB-AXI 152 / 92 DS 80 / 93 SMI_DS_T 46）
+- RTL 侧 `smi_iq.v` PARA_IQ_ID 26/27 = LDB/LDB-AXI，`smi_top.v:677-678` `o_cru_ldb_r`/`o_cru_ldb_axi_r`，dispatcher 地址范围 iq_hit[26/27]。
+- **emit 集成**：编译器出 `iq_ldb.hex`（name "ldb"）+ `iq_ldb-axi.hex`（name "ldb-axi"），TB 按 iq_name 归位槽 26/27（同 fp16mul-s0123/s4567 '-'→'_' 归一化范式，复用 micro_variant 分桶机制）。IQ header ~50b（含 EN_LOOPS/DLY 等，LSU 比 compute 单元多）。
+
 ### AXI→HBM 映射（`ldb_ur_axi_conv.v:390-424` + `ae350_ram_subsystem.v:68-71`）
 `araddr = gr_base_addr + smc_id × gr_intlv_addr`；per-SMC **独立** 1MB HBM；mem 索引 = `araddr>>4`（16B/line）；**hex 第 k 行 = 字节地址 k×16**。单-SMC(SMC0) gr_intlv 无关、araddr=gr_base。
 
@@ -62,6 +69,15 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 - URA vs BRAM_PORTA：LDB 在 ASIC 走哪个 UR 写通道（BRAM_PORTA 注释标「仅 FPGA-IP 初始化」）→ **VCS 首跑前逐字确认**。
 - AXI 突发对齐：小 tile 务必 16B 对齐、strb 全有效，否则 <16B fill 分支介入改数据。
 - axism/DS 反压：LDB 数据路径不经 DS（连续 load），但 VCS 首跑确认 axism 未被反压。
+
+## 阶段 1 实现清单（契约已全闭合，可直接实现）
+1. **hw_config**：modules.yaml 加 `LDB`（code_bits 56, 字段如上）+ `LDB_AXI`（code_bits 104）；specs/units + master 同步（sim 不建模 LDB → 可仅占位，sim 对 LDB 盲同 q_dst，VCS 为准）。
+2. **iq_registry**（system_core.yaml）：加 LDB / LDB-AXI 条目（映射到 TB slot 26/27 的 iq_name "ldb"/"ldb-axi"）；修正/并存 STB。
+3. **ResourceType**（hw_resource.py）：加 LDB / LDB_AXI；hw_constants IQ id。
+4. **payload_factory**：LDB/LDB-AXI 两组字段编码（cru_ldb 10 字段 / cru_ldbaxi 9 字段）。复用 emitter micro_variant 分桶（ldb / ldb-axi）出 `iq_ldb.hex` / `iq_ldb-axi.hex`。
+5. **DFG/frontend**：新 op 类型 LDB（写 UR bank1，非 compute）；matmul UR_READ bank1 依赖 LDB done。⚠ 变延迟 → 阶段 1 用相位隔离（LDB 排 compute 前 + 保守拍隔离），非 add_latency_axiom。
+6. **HBM hex 生成**：weight tile 按 128b/line 打包 `memory_init0.hex`（line k↔byte k×16）；harness copy 时放入 aiacc_rtl/data_engine/sram/（或 g_hbm_init_path 指向路径）。
+7. **算子 + harness**：ManualFp16MatmulK16LdbOperator（LDB load bank1 + 复用 K16 matmul）；VCS 预载 HBM hex + 跑 + bank5 bit-match + 负向断言。
 
 ## 验收（阶段 1 升 Accepted）
 - [ ] VCS：SMC0 预载 K=16 tile 进 HBM → LDB load bank1 → matmul → bank5 bit-match golden + 负向断言（不预载→变）。
