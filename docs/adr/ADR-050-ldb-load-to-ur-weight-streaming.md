@@ -71,13 +71,14 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 - axism/DS 反压：LDB 数据路径不经 DS（连续 load），但 VCS 首跑确认 axism 未被反压。
 
 ## 阶段 1 实现清单（契约已全闭合，可直接实现）
-1. **hw_config**：modules.yaml 加 `LDB`（code_bits 56, 字段如上）+ `LDB_AXI`（code_bits 104）；specs/units + master 同步（sim 不建模 LDB → 可仅占位，sim 对 LDB 盲同 q_dst，VCS 为准）。
-2. **iq_registry**（system_core.yaml）：加 LDB / LDB-AXI 条目（映射到 TB slot 26/27 的 iq_name "ldb"/"ldb-axi"）；修正/并存 STB。
-3. **ResourceType**（hw_resource.py）：加 LDB / LDB_AXI；hw_constants IQ id。
-4. **payload_factory**：LDB/LDB-AXI 两组字段编码（cru_ldb 10 字段 / cru_ldbaxi 9 字段）。复用 emitter micro_variant 分桶（ldb / ldb-axi）出 `iq_ldb.hex` / `iq_ldb-axi.hex`。
-5. **DFG/frontend**：新 op 类型 LDB（写 UR bank1，非 compute）；matmul UR_READ bank1 依赖 LDB done。⚠ 变延迟 → 阶段 1 用相位隔离（LDB 排 compute 前 + 保守拍隔离），非 add_latency_axiom。
-6. **HBM hex 生成**：weight tile 按 128b/line 打包 `memory_init0.hex`（line k↔byte k×16）；harness copy 时放入 aiacc_rtl/data_engine/sram/（或 g_hbm_init_path 指向路径）。
-7. **算子 + harness**：ManualFp16MatmulK16LdbOperator（LDB load bank1 + 复用 K16 matmul）；VCS 预载 HBM hex + 跑 + bank5 bit-match + 负向断言。
+- [x] **1. hw_config**（commit c4e4bca）：modules.yaml 加 `LDB`（56b,10 字段）+ `LDB_AXI`（104b,9 字段），字段位和==code_bits 校验过。sim 不建模 LDB（同 q_dst 盲，VCS 为准）。
+- [x] **2. iq_registry**（c4e4bca）：LDB:50 / LDB_AXI:51。⚠ **config 的 system_core 取自 master yaml（hw_spec.py:186 master 优先）→ master + system_core 两处都改**。get_iq_name 加 LDB/LDB_AXI 单名特例 → assembler '_'→'-' → iq_ldb.hex/iq_ldb-axi.hex → TB slot 26/27。
+- [x] **3. ResourceType**（c4e4bca）：加 LDB / LDB_AXI。
+- [x] **4. payload_factory**（免）：全动态按 code_fields 从 op.metadata 取值，VALID/smc_id_en 自动。emit 分桶天然（get_iq_name→assembler→iq_{name}.hex），无需 micro_variant。**只要 DFG op 带对字段名即可，无需改 payload_factory。**
+- [ ] 🔴 **4b. LSU IQ header gap（新 blocker，须 RTL 取证）**：编译器 IQ header 固定 41bit（`packer.py:4 ISA_V5_HEADER`，VLD@bit40，全局锁死）。TB IQ_LAYOUT_MAP 期望 **LDB=106bit=50 header+56 CRU**、**LDB-AXI=154=50+104**（LSU header=50bit ≠ compute 41bit，多 9bit）。验证：FP16MUL 41+8=49✓/SHIFTUP 41+135=176✓/UR_READ 41+17=58✓ 全对，但 LSU 差 9bit。**须 RTL 取证 LSU 50bit header 的精确字段组成**（哪 9 bit：loop/dly/inc/cond 差异？STB 同理 stub 7bit vs 真 body），再定 packer 出 LSU header 变体。**猜错=VCS bit 错位。下一步先解此 gap（疑另一轮 hco / smi_iq LSU header RTL）。**
+- [ ] **5. DFG/frontend**：加 2 op —— `ldb_axi_op`(LDB_AXI, gr_base_addr=0/brst=lines) + `ldb_op`(LDB, ur_addr=bank1 base/ur_wr_line_cnt=K//8) deps=[ldb_axi_op]；`b_read` deps 加 `ldb_op`（RAW，权重 ready 后读）。LDB 一次性（inner_loops=0）填 bank1[0..K//8-1]，compute 循环随后。⚠ 变延迟 → 相位隔离（保守大 latency 或 DFG 边强制 LDB 先于 b_read），非精确 add_latency_axiom。
+- [ ] **6. HBM hex 生成**：weight tile 按 128b/line（8 fp16/line）打包 `memory_init0.hex`（line k↔byte k×16）；放 aiacc_rtl/data_engine/sram/ 或 g_hbm_init_path 指向。
+- [ ] **7. 算子 + harness**：ManualFp16MatmulK16LdbOperator（bank1 不 inject、改 LDB load + 复用 K16 matmul）；VCS 预载 HBM hex + bank5 bit-match + 负向断言（不预载→变）。
 
 ## 验收（阶段 1 升 Accepted）
 - [ ] VCS：SMC0 预载 K=16 tile 进 HBM → LDB load bank1 → matmul → bank5 bit-match golden + 负向断言（不预载→变）。
