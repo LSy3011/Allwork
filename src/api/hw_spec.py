@@ -316,8 +316,9 @@ class HardwareSpec(BaseModel):
             if iq_id in ids:
                 idx = iq_id - ids[0]
                 u_u = unit_type.upper()
-                if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT", 
-                           "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16"]:
+                if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT",
+                           "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16",
+                           "LDB", "LDB_AXI"]:   # ADR-050：单实例流，名不带 idx 后缀（assembler '_'→'-' → ldb / ldb-axi）
                     return u_u.lower()
                 p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
                 if "-r" in p_name or "-w" in p_name:
@@ -331,8 +332,9 @@ class HardwareSpec(BaseModel):
             if iq_id in ids:
                 idx = iq_id - ids[0]
                 u_u = u_type.upper()
-                if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT", 
-                           "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16"]:
+                if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT",
+                           "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16",
+                           "LDB", "LDB_AXI"]:   # ADR-050：单实例流，名不带 idx 后缀（assembler '_'→'-' → ldb / ldb-axi）
                     return u_u.lower()
                 p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
                 return f"{p_name}-{idx}"

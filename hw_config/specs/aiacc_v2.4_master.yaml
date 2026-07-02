@@ -44,6 +44,8 @@ system_core:
       SHIFTDN: 1
       RTOVR: 64
       SMI_DS_T: 1   # ADR-034: SMI_DS_T 跨-SMC 转置（SMI 中心单实例）
+      LDB: 1        # ADR-050: Load-Buffer 两流
+      LDB_AXI: 1
     # ADR-018 v7 D1: 显式 per-SMC schema（值同 unit_instances，语义为每 SMC 一套）
     unit_instances_per_smc:
       FPMUL: 1
@@ -62,6 +64,8 @@ system_core:
       SHIFTDN: 1
       RTOVR: 64
       SMI_DS_T: 1   # ADR-034
+      LDB: 1        # ADR-050
+      LDB_AXI: 1
     smc_shared_units: []
   iq_registry:
     UR_READ: 30
@@ -83,6 +87,8 @@ system_core:
     SHIFTDN: 34
     STB: 7
     SMI_DS_T: 40   # ADR-034: base id 40（清晰空档，避让 0-38 + 100+ RTOVR；单实例 → [40]）
+    LDB: 50        # ADR-050: Load-Buffer 两流逻辑 id（emit→iq_ldb.hex / iq_ldb-axi.hex → TB 槽 26/27）
+    LDB_AXI: 51
   iq_header:
   - field: INC_EMBED
     width: 6

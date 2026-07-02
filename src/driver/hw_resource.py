@@ -23,6 +23,8 @@ class ResourceType(Enum):
     SHIFTUP = "SHIFTUP"
     SHIFTDN = "SHIFTDN"
     SMI_DS_T = "SMI_DS_T"   # ADR-034: 跨-SMC 转置（SMI 中心单实例，指令驱动）
+    LDB = "LDB"             # ADR-050: Load-Buffer UR 写侧（iq_inst[26]，56b CRU）
+    LDB_AXI = "LDB_AXI"     # ADR-050: Load-Buffer AXI 读侧（iq_inst[27]，104b CRU）
 
 class PortSlot(IntEnum):
     """

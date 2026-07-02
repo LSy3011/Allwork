@@ -152,6 +152,41 @@ modules:
       - {name: vld, bits: 1}
       - {name: slot_id, bits: 6}
 
+  # ADR-050：LDB Load-Buffer（外部 HBM 经 AXI → UR）。两条 CRU 微指令流（同 fp16mul s0123/s4567 分桶范式）：
+  #   LDB（iq_inst[26], 56b, UR 写侧）+ LDB_AXI（iq_inst[27], 104b, AXI 读侧）。字段逐位对齐 RTL
+  #   ldb_ur_axi_conv.v:271-303 + smi_iq_cru_widths.vh:104-113（hco 行级取证）。emit iq_ldb.hex + iq_ldb-axi.hex。
+  #   变延迟 DMA+done 握手（非固定流水）→ 阶段 1 latency 取保守上界 + 相位隔离（DEBT-050-VARLAT）。
+  LDB:
+    type: transfer
+    latency: 1        # 占位：LDB 变延迟，阶段 1 靠 DFG 相位隔离（LDB done 后 compute 读 bank），非此常数
+    code_bits: 56
+    code_fields:
+      - {name: VALID, bits: 1}            # [0]
+      - {name: ur_addr, bits: 15}         # [15:1]  字节地址：bank=[14:12]/depth=[11:4]/byteoff=[3:0]
+      - {name: ur_wr_line_cnt, bits: 8}   # [23:16] 写 UR 行数
+      - {name: line_byte_cnt, bits: 9}    # [32:24] 每行字节数
+      - {name: line_stride, bits: 6}      # [38:33] UR 行步长（字节步=<<4）
+      - {name: const, bits: 6}            # [44:39] 填充常量选择
+      - {name: pre_fill, bits: 1}         # [45]
+      - {name: post_fill, bits: 1}        # [46]
+      - {name: inst_id, bits: 4}          # [50:47] 完成握手匹配
+      - {name: smc_id_en, bits: 5}        # [55:51]
+
+  LDB_AXI:
+    type: transfer
+    latency: 1
+    code_bits: 104
+    code_fields:
+      - {name: VALID, bits: 1}            # [0]
+      - {name: first_byte_strb, bits: 4}  # [4:1]
+      - {name: last_byte_strb, bits: 4}   # [8:5]
+      - {name: brst, bits: 4}             # [12:9]  AXI burst len → arlen
+      - {name: gr_base_addr, bits: 40}    # [52:13] HBM 字节基址
+      - {name: gr_intlv_addr, bits: 40}   # [92:53] per-SMC 交织步长（araddr=gr_base+smc_id×gr_intlv）
+      - {name: inst_id, bits: 4}          # [96:93]
+      - {name: smc_id_en, bits: 5}        # [101:97]
+      - {name: tid, bits: 2}              # [103:102]
+
   INTADD:
     type: compute
     latency: 1
