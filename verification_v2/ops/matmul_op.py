@@ -1324,24 +1324,24 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
         b_read_deps = []
         b_read_stride = 1
         if getattr(self, "EMIT_LDB_STREAM", False):
-            # ADR-050 阶段2 循环 LDB（方案 a）：每迭代 LDB 载 1 tile(1 line=16B) 进 bank1[0] **驻留 buffer**
-            #   （下迭代覆盖），matmul 读+累加。LDB_AXI 靠 INC=stride=16 每迭代步进 gr_base_addr +16B 读
-            #   HBM 下一 line（hco：micro_addr=min_base+INC×loop_cnt 字节直加，assembler is_memory_iq 含 ldb
-            #   → body op_mask 开 level-1）。LDB stride=0 → ur_addr 驻留 bank1[0]。两 CRU 同拍（均无依赖）。
-            #   ldb WAR loop-carried ←b_read：LDB_{i+1} 写须晚于 compute_i 读（单驻留 buffer 逐 tile 串行 →
-            #   II≥40(LDB lat)+8=48 覆盖 HBM 往返；DEBT-050-VARLAT 非硅安全、升 Accepted 转 done 握手）。
-            # 两 CRU 同拍：两者都挂同一 WAR loop-carried ←b_read（否则只 ldb 被压后、ldb_axi 停 slot0 →
-            #   错拍，违 stage-1 证的「同拍」契约）。同约束 → SMT 同排同 slot。
-            ldb_axi = b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
-                                gr_base_addr=0, gr_intlv_addr=0, brst=0,
-                                first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0, stride=16,
-                                loop_carried_depends_on={"b_read": 8})
-            ldb = b.make_op("LDB", "ldb", RT.LDB, [], iq_id=50,
-                            ur_addr=(1 << 12), ur_wr_line_cnt=1, line_byte_cnt=16,
-                            line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0, stride=0,
-                            loop_carried_depends_on={"b_read": 8})
-            b_read_deps = [ldb]
-            b_read_stride = 0   # 驻留读 bank1[0]（每迭代同址，靠 LDB 覆盖换 tile）
+            # ADR-050 阶段2（方案 z，hco 第4轮）：循环 LDB 被 RTL LSU IQ 信用门控死锁 —— LSU IQ(24-27) 走
+            #   smi_iq_dly_queen.v:148 的 outstanding-gated 发射变体（4 深信用，每发射++、只有真 LDB 回 crd
+            #   done 才--；循环 kernel 的 NOP replay 吃信用不还 → dly_queen_afull → iic 冻结 loop-replay →
+            #   body 永不 fetch）。改 **unrolled 多条单-shot LDB**：每 tile 一条 LOOPS=0 LDB（绕开 replay 通路、
+            #   复用已 VCS 证的单-shot 路径；每条真 LDB 回 done 自 drain 信用、不死锁）。tile i：gr_base_addr=i×16
+            #   读 HBM line i、写 bank1 byte offset i×16。b_read stride=1 读 bank1[0..N-1]（UR 用 N line，K≤~1 bank）。
+            #   真 O(1) UR 循环 LDB 流式待 RTL 债务解（DEBT-050-LSU-LOOP：信用不计 NOP / iq_II=1）。
+            nt = self.K // 8
+            all_ldb = []
+            for i in range(nt):
+                b.make_op("LDB_AXI", f"ldb_axi_{i}", RT.LDB_AXI, [], iq_id=51,
+                          gr_base_addr=i * 16, gr_intlv_addr=0, brst=0,
+                          first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=i % 4)
+                ldb_i = b.make_op("LDB", f"ldb_{i}", RT.LDB, [], iq_id=50,
+                                  ur_addr=(1 << 12) + i * 16, ur_wr_line_cnt=1, line_byte_cnt=16,
+                                  line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=i % 4)
+                all_ldb.append(ldb_i)
+            b_read_deps = all_ldb    # b_read 依赖所有 LDB 完成（相位隔离，DEBT-050-VARLAT 保守）
         elif getattr(self, "EMIT_LDB_WEIGHT", False):
             lines = self.K // 8              # 每 tile 8 fp16 = 1 line(128b=16B)；K//8 lines
             # hco 契约：两条 CRU（AXI 读侧 + UR 写侧）**必须同拍发射**（ldb 写侧 FSM latch 描述符、
@@ -1412,12 +1412,11 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
                                 "inner_inc": 1, "outer_inc": 0})
         out = next(o for o in ops if o.trace_id == "out_obj_0")
         out.metadata.update({"inner_inc": 0, "outer_inc": 0, "stride": 0})
-        # ADR-050：单-shot LDB（EMIT_LDB_WEIGHT）一次性搬整 tile（ur_wr_line_cnt 一条写完）→ inner_loops=0。
-        #   循环 LDB（EMIT_LDB_STREAM）则**保留** inner_loops（=num_tiles-1，每迭代载 1 tile，INC 步进）。
-        if not getattr(self, "EMIT_LDB_STREAM", False):
-            for op in ops:
-                if op.op_type.upper() in ("LDB", "LDB_AXI"):
-                    op.metadata.update({"shape": [1], "inner_loops": 0, "inner_inc": 0})
+        # ADR-050：所有 LDB/LDB_AXI 均单-shot（EMIT_LDB_WEIGHT 一条搬整 tile；EMIT_LDB_STREAM 方案z 每 tile
+        #   一条 unrolled 单-shot）→ inner_loops=0（绕开 RTL LSU IQ 循环信用门控死锁，hco 第4轮）。
+        for op in ops:
+            if op.op_type.upper() in ("LDB", "LDB_AXI"):
+                op.metadata.update({"shape": [1], "inner_loops": 0, "inner_inc": 0})
         return ops
 
 
