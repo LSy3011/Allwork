@@ -16,10 +16,15 @@ class UnitPayloadFactory:
     def resolve_iq_type(iq_name: str, hw_spec: Any) -> str:
         """从 hw_spec.modules 动态推断单元类型"""
         iq_lower = iq_name.lower()
-        # [SSoT] 动态匹配
+        # [SSoT] 动态匹配。ADR-050：精确匹配优先，避免 "ldb-axi" 被 "ldb" 前缀吞并（→ 误当 LDB 56b
+        #   而非 LDB_AXI 104b，VCS 上 AXI 侧 body 全错位）。前缀匹配按 normalized 最长优先兜底。
         for unit_type in hw_spec.modules.keys():
+            if iq_lower == unit_type.lower().replace("_", "-"):
+                return unit_type
+        for unit_type in sorted(hw_spec.modules.keys(),
+                                key=lambda u: -len(u.replace("_", "-"))):
             normalized = unit_type.lower().replace("_", "-")
-            if iq_lower == normalized or iq_lower.startswith(normalized + "-"):
+            if iq_lower.startswith(normalized + "-"):
                 return unit_type
         # 兼容旧的前缀命名约定
         if "ur-r" in iq_lower: return "UR_READ"
