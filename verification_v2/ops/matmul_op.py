@@ -1338,15 +1338,21 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
             #   串行→满足(b) 违(a)：ldb_axi/ldb 被拉到不同拍→bank1 全空。**修向**：需能表达「tile 内同拍 +
             #   tile 间隔 N 拍」的调度约束（如 ldb_axi_i/ldb_i 同挂 loop-carried 或显式 abs_t 锚定 + DLY 间隔），
             #   或换硬件 done-COND 串行（EN_COND 需 RTL 开）。
+            # 修向(x) 已试**无效**（VCS 实证）：DLY=3 正确 emit（body DLY=3）但结果不变（仍只 bank1[末] 写）——
+            #   DLY 延迟指令**效果**、非 SMI 对下条的 fetch/描述符到达间隔，LDB_AXI 单描述符仍背靠背被覆盖。
+            #   已试三法皆未通：no-dep(背靠背覆盖只末条) / 串行 dep(破 ldb_axi-ldb 同拍→bank1 全空) / DLY(不 spacing)。
+            #   真修待续（DEBT-050-UNROLL）：wave-trace DLY 实际效果 / 或 RTL done-COND 串行(EN_COND 需 RTL 开)
+            #   / 或大 II 使 LDB 落独立窗。per-op DLY 机制(assembler)已留作 infra。留 DLY=0（无效果、洁净）。
+            LDB_DLY = 0
             nt = self.K // 8
             all_ldb = []
             for i in range(nt):
                 b.make_op("LDB_AXI", f"ldb_axi_{i}", RT.LDB_AXI, [], iq_id=51,
                           gr_base_addr=i * 16, gr_intlv_addr=0, brst=0,
-                          first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=i % 4)
+                          first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=i % 4, dly=LDB_DLY)
                 ldb_i = b.make_op("LDB", f"ldb_{i}", RT.LDB, [], iq_id=50,
                                   ur_addr=(1 << 12) + i * 16, ur_wr_line_cnt=1, line_byte_cnt=16,
-                                  line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=i % 4)
+                                  line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=i % 4, dly=LDB_DLY)
                 all_ldb.append(ldb_i)
             b_read_deps = all_ldb
         elif getattr(self, "EMIT_LDB_WEIGHT", False):

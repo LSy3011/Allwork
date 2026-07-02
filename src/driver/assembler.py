@@ -250,7 +250,10 @@ class PhysicalAssembler:
                     addr = (logical_addr - op_stride * relative_skip)
                     
                     op_mask = 0x1 if (is_memory_iq and op_stride != 0) else 0
-                    header = SMIHeader(vld=1, inc=0, dly=0, inc_embed=op_mask)
+                    # ADR-050 修向(x)：per-op DLY（BITS_DLY=3，0-7 拍发射延迟）——unrolled 多-LDB 用 DLY 拉开
+                    #   同-IQ 背靠背描述符（LDB_AXI 单描述符 reg 否则被覆盖），使每条 AXI 读在下条前发出。
+                    op_dly = int(op.metadata.get("dly", 0)) & 0x7
+                    header = SMIHeader(vld=1, inc=0, dly=op_dly, inc_embed=op_mask)
                     payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
                     
                     # [Phase 2 SSoT] 统一使用 PhysicalMemoryLayout 解析地址
