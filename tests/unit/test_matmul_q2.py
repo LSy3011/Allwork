@@ -158,6 +158,10 @@ class TestBroadcastLatchRelax(unittest.TestCase):
         class _Spec:
             delays = {"SHIFTUP": 1, "FPMUL": 4, "UR_READ": 1}
 
+            def micro_delay(self, op_type, micro_variant=None):
+                # ADR-049：镜像 HardwareSpec.micro_delay——本 mock 无 micro_groups，直接 fallback delays
+                return self.delays.get(op_type.upper(), 1)
+
         prod = MIROp(op_type=producer_optype, logic_cycle=0, trace_id="prod",
                      metadata=dict(producer_meta))
         cons = []

@@ -27,9 +27,13 @@ class MicroGroup(BaseModel):
 
     每组独立 code_bits + code_fields。单微指令单元（30+ 现存）不用此字段，
     走顶层 code_bits/code_fields（向后兼容红线：绝不动 ModuleSpec.code_bits:int 签名）。
+
+    ADR-049：可选 per-group `latency`——load 微指令是寄存器 latch（1 拍生效，fp16mul.v:108-220
+    posedge 写 s*_bank_r），区别于 compute 的乘法流水 latency（5 拍 trigger→DR）。None=用单元级 delays。
     """
     code_bits: int
     code_fields: List[ModuleField] = []
+    latency: Optional[int] = None
 
 
 class ModuleSpec(BaseModel):
@@ -67,6 +71,25 @@ class HardwareSpec(BaseModel):
     delays: Dict[str, int]
     system_core: Optional[Dict[str, Any]] = None
     rtovr_config: Dict[str, Any] = {}
+
+    def micro_delay(self, op_type: str, micro_variant: Optional[str] = None) -> int:
+        """RAW/latch 边延迟：多微指令单元按 micro_variant 取 per-group latency
+        （FP16MUL load_s0123/s4567 = latch 1 拍，区别于 compute 的 5 拍乘法流水）。
+        未命中 micro_variant 或该组无 latency → fallback 单元级 delays（pipeline_delays.yaml）。
+
+        🔴 ADR-049：三处 latency lookup 必须统一调用此 helper，否则 axiom↔verifier desync → Synthesis failed：
+          · dependency_axioms.add_latency_axiom RAW 下界（producer.micro_variant）
+          · ucode_solver latch lifetime 上界（dep.micro_variant，:388）
+          · ucode_solver.validate_physical_schedule 维度6 RAW+overwrite（op.micro_variant，:247/255）
+        """
+        key = op_type.upper()
+        if micro_variant:
+            mod = self.modules.get(key)
+            if mod and mod.micro_groups:
+                grp = mod.micro_groups.get(micro_variant)
+                if grp is not None and grp.latency is not None:
+                    return grp.latency
+        return self.delays.get(key, 1)
 
     @classmethod
     def load(cls, config_dir: str):

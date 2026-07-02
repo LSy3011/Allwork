@@ -559,5 +559,43 @@ class TestEmitterPerSMCStagger(unittest.TestCase):
                   "断言 emitter 在 post-stagger verify 阶段抛错")
 
 
+class TestFp16MulLoadLatchLatency(unittest.TestCase):
+    """ADR-049: fp16mul load 微指令 = latch latency(1) 非乘法 latency(5)。"""
+
+    def setUp(self):
+        self.spec = HardwareSpec.load("hw_config")
+        self.synthesizer = UCodeSynthesizer(self.spec)
+
+    def test_micro_delay_contract(self):
+        """ADR-049 D1：micro_delay 对 load 组返 1、compute/未命中 fallback 单元 delays（=5）。
+        守 modules.yaml load_s0123/s4567 的 latency:1 + MicroGroup.latency 字段 + helper 契约。"""
+        self.assertEqual(self.spec.micro_delay("FP16MUL", "load_s0123"), 1)
+        self.assertEqual(self.spec.micro_delay("FP16MUL", "load_s4567"), 1)
+        # compute（无 per-group latency）+ 未命中 variant → fallback 单元 latency
+        self.assertEqual(self.spec.micro_delay("FP16MUL", "compute"), self.spec.delays["FP16MUL"])
+        self.assertEqual(self.spec.micro_delay("FP16MUL", None), self.spec.delays["FP16MUL"])
+        self.assertNotEqual(self.spec.delays["FP16MUL"], 1)  # 前提：compute 口径确实 != latch
+
+    def test_load_operand_survives_loop(self):
+        """ADR-049 D2/D3：K16 循环核（load→load→compute + loop-carried 累加）中，compute 采样操作数
+        寄存器须落在其活窗内——t(compute) - t(load_s0123) < II，否则 iter1 的 load 抢先覆盖（WAR，
+        VCS 实证 157.365≠155.14）。旧模型（load 边=5）会把 compute 推到 load 后 10 拍 >> II → 本断言失败。"""
+        import sys
+        from pathlib import Path
+        sys.path.append(str(Path(__file__).parent.parent.parent))
+        from verification_v2.ops.matmul_op import ManualFp16MatmulK16Operator
+        op = ManualFp16MatmulK16Operator()
+        ops = op.get_dfg(self.spec)
+        res = self.synthesizer.solve_with_units(ops, MII=1, MAX_II=32)
+        self.assertIsNotNone(res)
+        sched = res["schedule"]   # {trace_id: 绝对调度拍 t}
+        II = res["II"]
+        t_load = sched["load_s0123"]
+        t_compute = sched["inl_fp16mul"]
+        self.assertLess(t_compute - t_load, II,
+                        f"操作数活窗违规: compute@{t_compute} - load@{t_load} = {t_compute-t_load} >= II={II} "
+                        f"→ iter1 load 会覆盖 s0（ADR-049 WAR）")
+
+
 if __name__ == "__main__":
     unittest.main()

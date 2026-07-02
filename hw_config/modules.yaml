@@ -69,12 +69,14 @@ modules:
           - {name: smc_id_en, bits: 5}
       load_s0123:     # 表513 CRU_FP16MUL_S0123：load 广播源 S0-S3 进 DR 寄存器堆
         code_bits: 7
+        latency: 1    # ADR-049：latch 1 拍（write_enable→s*_bank_r posedge，fp16mul.v:98/108-220），非乘法 5 拍
         code_fields:
           - {name: VALID, bits: 1}
           - {name: src3210_high_id, bits: 1}
           - {name: smc_id_en, bits: 5}
       load_s4567:     # 表514 CRU_FP16MUL_S4567：load 本地源 S4-S7（low_id 选 4/5/6/7）
         code_bits: 9
+        latency: 1    # ADR-049：latch 1 拍（write_enable→s*_bank_r posedge，fp16mul.v:106/108-220），非乘法 5 拍
         code_fields:
           - {name: VALID, bits: 1}
           - {name: src7654_high_id, bits: 1}

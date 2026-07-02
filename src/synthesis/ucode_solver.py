@@ -229,7 +229,9 @@ class UCodeSynthesizer:
                 iq_to_modulo.setdefault(iq_name, set()).add(s)
 
             # 6. RAW + Latch overwrite（compute-to-compute 路径）
-            lat = self.hw_spec.delays.get(res_type, 1)
+            # ADR-049（三点同步之三）：与 add_latency_axiom / latch 上界统一——load 微指令 producer
+            #   用 latch latency（1）。三处若不一致（如此处仍 5、axiom 已 1）→ RAW/overwrite 误判 → Synthesis failed。
+            lat = self.hw_spec.micro_delay(res_type, op.metadata.get("micro_variant"))
             # ADR-021 (fold-is-bug): 删除 SHIFTUP/SHIFTDN chain worst-case fold。
             # 与 dependency_axioms 同步——边权 = unit lat，chain 物理延迟由 emitter
             # per-SMC INIT shift 补偿，不在此处建模。(原 ADR-018 D3.b `lat += smc_id_en`
@@ -379,7 +381,10 @@ class UCodeSynthesizer:
                 if dep_id not in t_vars:
                     continue  # RTOVR 节点已被 compute_ops 过滤
                 dep = nodes_by_id[dep_id]
-                delay = self.hw_spec.delays.get(dep.op_type.upper(), 1)
+                # ADR-049（三点同步之二）：latch lifetime 上界——load 微指令边用 latch latency（1）→
+                #   上界 t_c < t_load+1+II 精确绑定操作数活窗 [t_load+1, t_load+1+II)，逼 compute 靠近 load
+                #   （既有 ADR-006 上界即 WAR，修对 delay 即修好，无需额外反依赖）。
+                delay = self.hw_spec.micro_delay(dep.op_type, dep.metadata.get("micro_variant"))
                 is_inv = (dep.metadata.get("is_invariant", False) or
                           dep.metadata.get("is_const", False) or
                           dep.metadata.get("stride", 1) == 0 or

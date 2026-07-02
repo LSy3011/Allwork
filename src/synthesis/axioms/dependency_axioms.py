@@ -34,9 +34,10 @@ class DependencyAxioms(AxiomBase):
                 if mode == "v5":
                     if op_type not in spec.delays:
                         raise KeyError(f"Critical SMT-V5 Error: Latency for '{op_type}' (Trace: {producer.trace_id}) missing in hardware spec!")
-                    lat = spec.delays[op_type]
-                else:
-                    lat = spec.delays.get(op_type, 1)
+                # ADR-049（三点同步之一）：load 微指令边 = latch latency（1），非单元乘法 latency（5）。
+                #   否则 load_s0123→compute 链吃满 5 拍 → 距离 >> II → 循环中 iter1 的 load 抢先覆盖
+                #   s*_bank 操作数（WAR，K16 VCS 实证 157.365≠155.14）。micro_delay 未命中 → fallback delays。
+                lat = spec.micro_delay(op_type, producer.metadata.get("micro_variant"))
                 
                 # ADR-041 D5/BLOCK-3 (EXACT 锚定)：SMI_DS_T → dst-datapath SHIFTUP 的 RAW 边必须
                 #   是**等式**而非 >= 下界。RTL `shift_up` 无握手——SHIFTUP vld 早/晚 1 拍即取 SMI_DS_T

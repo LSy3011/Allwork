@@ -1291,6 +1291,7 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
     ⚠ model-A sim 8/8 仅终值 parity，不验跨-tile 时序（同 ADR-023/033，升 Accepted 需 VCS）。"""
 
     K = 16   # 2 个 K=8 tile
+    EMIT_FP16MUL_LOAD = True   # ADR-047 D1：发 load_s0123/s4567 微指令 latch s*_bank（缺则 RTL 乘积恒 0）
 
     def get_golden(self, input_data: Dict[str, np.ndarray], vector_lanes: int) -> Dict[str, Any]:
         a = input_data["a"].astype(np.float16)
@@ -1319,7 +1320,22 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
                        role="input", iq_id=31, precision="fp16")
         rt_a = b.make_op("RTOVR", "rt_a_FP16MUL_S0", PS.FP16MUL_S0, [ar])
         rt_b = b.make_op("RTOVR", "rt_b_FP16MUL_S4567", PS.FP16MUL_S4567, [br])
-        mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, [rt_a, rt_b], iq_id=18)
+        # ADR-047 D1：fp16mul 乘法器读内部 s*_bank（非 dvr 总线），须显式 load 微指令（IQ3/IQ4 写使能）
+        #   把 dvr latch 进 s_bank，否则 s_bank 恒 0 → 乘积恒 0（RTL 实证，被 sim auto-latch 假绿掩盖）。
+        #   K16 单列（S0=权重a × S4=激活b，D0/D1=S0×S4）→ load 比 Q（4 列）简单：s0 一条 + s4 一条。
+        if getattr(self, "EMIT_FP16MUL_LOAD", False):
+            # load_s0123：latch s0=a。deps 位置序 [rt_a, rt_b] → rt_a→S0、rt_b→S4567（后者仅建路由，
+            #   供 load_s4567 latch s4 用；load_s0123 只 latch s0-s3，s1-s3 无源留 0，本列不用）。
+            load_s0123 = b.make_op("FP16MUL", "load_s0123", RT.FP16MUL, [rt_a, rt_b],
+                                   iq_id=18, micro_variant="load_s0123")
+            # load_s4567：单列只用 S4（D0/D1=S0×S4）→ 一条 low_id=0 latch s4。deps=[load_s0123]（FP16MUL
+            #   非 RTOVR）不触发路由重解析、并保证晚于 load_s0123（dvr_s4567 已稳定驻留）。
+            load_s4567 = b.make_op("FP16MUL", "load_s4567_0", RT.FP16MUL, [load_s0123],
+                                   iq_id=18, micro_variant="load_s4567", src7654_low_id=0)
+            mul_deps = [load_s0123, load_s4567]
+        else:
+            mul_deps = [rt_a, rt_b]
+        mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, mul_deps, iq_id=18)
         # 片内：FP16MUL D0/D1 → FP32ADDTREE8TO1（dst_id=0 缺省，纯 8→1，cumulative=False）→ 部分和
         rt_d0 = b.make_op("RTOVR", "rt_d0_FP32ADDTREE8TO1_S0", PS.FP32ADDTREE8TO1_S0,
                           [mul], dep_port="D0")
