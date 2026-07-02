@@ -119,7 +119,11 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 **方案 z（hco 推荐）**：unrolled 多条单-shot LDB（每 tile LOOPS=0，绕 replay 通路、每条真 LDB 回 done 自 drain 信用）。已落码（EMIT_LDB_STREAM 改 unrolled，commit 见 git）。
 🟠 **VCS 未通（诊断完整，DEBT-050-UNROLL）**：波形追 4 条 ldb done 时序定位——**LDB_AXI FSM 单描述符寄存器**：背靠背发射（o_cru_ldb_axi 连续拍 1912/13/14）被覆盖 → 只**末条**发 AXI 读（arvalid 1 次 @1915→rvalid@1920→写 bank1[末]@1927）→ 只 1 tile 写、bank5 部分。
 **根本约束冲突（新发现）**：unrolled 多-LDB 需**同时**满足：(a) tile 内 ldb_axi_i/ldb_i **同拍**（stage-1 证：错拍→写 FSM 不 latch→bank1=0）；(b) tile 间**间隔**（LDB_AXI 单描述符 reg，背靠背覆盖）。当前 dep 机制**难兼得**：无 dep → 满足(a)违(b)（4 条同排背靠背→只末条写）；串行 dep → 满足(b)违(a)（ldb_axi/ldb 被拉不同拍→bank1 全空）。
-**修向（DEBT-050-UNROLL）**：需能表达「tile 内同拍 + tile 间隔 N 拍」的调度约束（ldb_axi_i/ldb_i 同挂 loop-carried 或显式 abs_t 锚定 + DLY 间隔），或硬件 done-COND 串行（EN_COND 需 RTL 开）。
+**修向（DEBT-050-UNROLL，已试 3 法皆未通）**：
+- ① no-dep：满足同拍、背靠背覆盖 → 只 bank1[末] 写（bank5 部分 80.14）。
+- ② 串行 dep（latency 40）：满足间隔、破 ldb_axi/ldb 同拍（拉到不同拍）→ bank1 全空（bank5=0）。
+- ③ **修向(x) per-op DLY**（用户要求，assembler 已加 per-op DLY infra，body 读 op.metadata['dly']）：LDB DLY=3 正确 emit 但 **VCS 结果不变**（仍只 bank1[末]）——DLY 延迟指令**效果**、非 SMI 对下条 fetch/描述符到达间隔，LDB_AXI 单描述符仍背靠背覆盖。
+**下一步**：wave-trace DLY 实际效果（确认为何不 spacing）/ RTL done-COND 串行（EN_COND 编译期常量=0，需改 RTL）/ 大 II 使各 LDB 落独立 fetch 窗（需 compute 也大 II 或 LDB 独立 IQ 调度）。per-op DLY assembler 机制已留 infra（默认 0 无副作用）。
 **对齐理解**：`outstanding=4` = 4 条在途上限（信用），非总数封顶（done 回流可发>4、节流非封顶）；LDB 单描述符 reg 才是背靠背覆盖的真因。
 **DEBT-050-LSU-LOOP**：真 O(1) UR 循环 LDB 流式需 RTL 债务解（信用不计 NOP / iq_II=1 消 NOP）。当前 unrolled 多-LDB 是 UR-bounded（N line，K≤~1 bank）非 O(1)。
 
