@@ -96,12 +96,16 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 ### ✅ 多-tile 大 K 单 LDB（2026-07-02，commit 58a4f3f）
 `ManualFp16MatmulK128LdbOperator`（K=128=16 tile）单条 LDB 载 16 line（line_byte_cnt=256）→ matmul 累加 16 tile → **VCS bank5=1246.8252 bit-match**。证 LDB 多-tile 扩展。**单 LDB 上限 K≤248**（line_byte_cnt 9bit=511B=31 line）。
 
-### 🔴 循环 LDB（K>248 / 权重≫UR 流式，未实现）——契约门控
-单 LDB 装不下 K>248 → 需**循环 LDB + 驻留 buffer** 流式（O(1) UR）：loop num_tiles，每迭代 LDB 载 tile_i(1 line) 进 bank1[0] 驻留 buffer、matmul 读 + 累加，下迭代覆盖。三大障碍：
-1. **assembler loop-path 不认 LDB**：`is_memory_iq` 仅 "ur-"/"rtovr"（assembler.py:94）→ LDB inner_loops>0 走通用 loop 但 `inc_embed=0`（body op_mask=0，:247）→ **INC 不按 loop level 步进地址**。需让 "ldb"/"ldb-axi" 参与 memory-IQ INC 掩码（或加 flag）。
-2. **INC 步进 gr_base_addr 语义（NEEDS-USER-FACT-050-INC）**：hco 取证 INC(13bit 带符号)步进 gr_base_addr(smi_iq_iic.v:256)，但**每 tile +16 字节的 INC 值/scaling 未定**（是字节数 16？还是 line 数？须 RTL/hco）。LDB_AXI INC=tile 步进、LDB INC=0(驻留)。
-3. **大-II 相位隔离**：驻留 buffer → LDB_i→compute_i→LDB_{i+1} 须串行（WAR on bank1[0]）；II ≥ LDB DMA latency(~40)/tile → 慢但正确。或换 done-握手变延迟建模(DEBT-050-VARLAT)。
-建议：hco 第 3 轮取证 INC-address-stepping 契约（LDB_AXI 循环 gr_base_addr scaling）+ 定 assembler LDB loop-path，再实现。载体 K32-stream（4 tile 驻留 1-line buffer）VCS bit-match。
+### 🟡 循环 LDB（K>248 / 权重≫UR 流式）——契约已全取证（hco 第3轮），剩 HBM 同步策略 user 决断
+单 LDB 装不下 K>248 → **循环 LDB + 驻留 buffer** 流式（O(1) UR）：loop num_tiles，每迭代 LDB 载 tile_i(1 line) 进 bank1[0] 驻留 buffer、matmul 读+累加，下迭代覆盖。
+**INC 契约（hco RTL 行级取证 smi_iq_iic.v:228,236,256）**：`micro_addr = min_base_addr + INC×loop_cnt`（同域直加、无缩放）；gr_base_addr 无缩放直连 AXI 字节地址（ldb_ur_axi_conv.v:295→393→893）→ **每迭代 +16B ⇒ INC=16**。INC 13bit 带符号(packer LSU 已 [6:13])。**INC_EMBED(body)=0x01**(bit0 选 level-1；HDR 的被 RTL 忽略)。**LOOPS=num_tiles-1**(10bit 上限 num_tiles≤1024=K≤8192)。
+| CRU | stride(meta) | HDR.INC | body.INC_EMBED | LOOPS |
+|---|---|---|---|---|
+| LDB_AXI(51) 步 gr_base | 16 | 16 | 0x01 | num_tiles-1 |
+| LDB(50) 步 ur_addr(驻留) | 0 | 0 | 0 | num_tiles-1 |
+**实现三步**：① assembler.py:94 `is_memory_iq` 加 `"ldb"` 子串匹配即够（复用 UR level-1 embed-loop，已 VCS 证明；body op_mask=0x1 when stride!=0 → LDB_AXI 开、LDB 关；`hdr_inc_embed=max(stride,1)` 对 stride=16 语义错但 RTL 忽略 HDR inc_embed → 无害，建议显式写 0x1）。② DFG：LDB/LDB_AXI inner_loops=num_tiles-1、stride 如上、b_read 驻留读 bank1[0]。③ **SMT 加 WAR 边 `LDB_{i+1}←compute_i`**（单驻留 buffer 强制逐 tile 串行，outstanding=4 不能 pipeline）。
+🔴 **user 决断（hco NEEDS-USER-FACT）**：HBM/AXI 读延迟**非编译期固定**→ (a) 保守大固定 II 过 sim(快、**非硅安全**、标 DEBT) vs (b) done-握手事件建模(COND/crd,硅安全,升 Accepted 必须)。hco 判：HBM 往返是「时序要算不要调」的**合法例外**(该用握手非算拍)，首期可 (a) bring-up 但须转 (b)。
+载体建议：K32-stream（4 tile 驻留 1-line buffer）VCS bit-match。
 
 ### 其余阶段 2（deferred）
 2D stride/line 语义、pre/post fill、per-SMC 交织(gr_intlv 真跨-SMC 分散)、并发 LDB+compute(端口冲突 SMT axiom, ADR-008 延伸)、LDB done-握手变延迟建模。
