@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK16LdbOperator, ManualFp16MatmulK128LdbOperator, ManualFp16MatmulK32StreamLdbOperator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulK2048Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK16LdbOperator, ManualFp16MatmulK128LdbOperator, ManualFp16MatmulK256LdbOperator, ManualFp16MatmulK32StreamLdbOperator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulK2048Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator, UnitDstVec128Operator
 
@@ -51,6 +51,8 @@ OPERATOR_MAP = {
     # ADR-050 阶段 1：K16 权重经 LDB 从外部 HBM 流式载入（load/store 权重流式）
     "fp16_matmul_k16_ldb": ManualFp16MatmulK16LdbOperator,
     "fp16_matmul_k128_ldb": ManualFp16MatmulK128LdbOperator,
+    # ADR-050 阶段 2（DEBT-050-KGT128）：K256 多-chunk explicit-N；chunk0 通、chunk1 blocked on RTL residue
+    "fp16_matmul_k256_ldb": ManualFp16MatmulK256LdbOperator,
     "fp16_matmul_k32_stream_ldb": ManualFp16MatmulK32StreamLdbOperator,
     # ADR-049 后续：扩 K 多-tile 累加（K24=3 tile/K32=4 tile，复用 K16 参数化核）
     "fp16_matmul_k24": ManualFp16MatmulK24Operator,

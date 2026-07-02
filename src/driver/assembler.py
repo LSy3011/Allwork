@@ -201,6 +201,34 @@ class PhysicalAssembler:
                             stage="BODY", op_type=str(ops[0].op_type), trace_id=f"nop_{iq_name}_{gt}"))
                 continue
 
+            # ADR-050 DEBT-050-KGT128：多描述符 LDB/LDBAXI **显式-N emit**（hco 字段级定论，走结构 B）。
+            #   绕开下方 memory-IQ mod-II 折叠（:242 kernel_map=global_t%iq_II）+ level-1 loop（:230-234）
+            #   —— 那会把 N 个 chunk 撞进循环 kernel，RTL `smi_iq_iic.v:427 LOOP_PARA_SET` 走多元素
+            #   array-replay 分支卡死 → dly_data_valid 恒 0 → 连 chunk0 都不 fire（bank1 全空，VCS 实证）。
+            #   本路：INIT@0(vld=0) + N 条 BODY(vld=1, **level=0**, loops=0, inc_embed=0, 连续 abs_t) +
+            #   尾 E_END(vld=0, embed_end=1) = N+2 行。RTL smi_iq_iic.v:400 `~(|w_embed)`→level-0 datapath
+            #   每条 fire 一次(:652 dly_data_valid<=1)+rdi_addr+1 顺序取 → 各描述符独立入 4 深 FIFO
+            #   （ldb_ur_axi_conv.v:238）、按 emit(chunk_idx) 序位置配对。红线：任何行 level≠0 都会重回
+            #   array-replay 死路；地址已 baked 进 payload → inc_embed 必须 0（stride=0）。
+            if any(op.metadata.get("explicit_descriptor") for op in ops):
+                chunk_ops = sorted(ops, key=lambda o: int(o.metadata.get("chunk_idx", 0)))
+                physical_instructions.append(PhysicalInstruction(
+                    iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
+                    header=SMIHeader(vld=0, level=0, loops=0), payload={},
+                    stage="INIT", op_type=str(ops[0].op_type)))
+                for c, op in enumerate(chunk_ops):
+                    payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
+                    physical_instructions.append(PhysicalInstruction(
+                        iq_name=iq_name, abs_t=1 + c,
+                        header=SMIHeader(vld=1, level=0, loops=0, inc=0, dly=0, inc_embed=0),
+                        payload=payload, stage="BODY", local_id=c,
+                        op_type=str(ops[0].op_type), trace_id=op.trace_id))
+                physical_instructions.append(PhysicalInstruction(
+                    iq_name=iq_name, abs_t=1 + len(chunk_ops), trace_id=f"eend_{iq_name}",
+                    header=SMIHeader(vld=0, level=0, loops=0, embed_end=1), payload={},
+                    stage="BODY", op_type=str(ops[0].op_type)))
+                continue
+
             physical_instructions.append(PhysicalInstruction(
                 iq_name=iq_name, abs_t=0, trace_id=f"init_{iq_name}",
                 header=SMIHeader(vld=0, loops=l_init - 1), payload={},

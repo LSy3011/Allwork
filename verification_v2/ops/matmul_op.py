@@ -1357,22 +1357,66 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
             b_read_deps = all_ldb
         elif getattr(self, "EMIT_LDB_WEIGHT", False):
             lines = self.K // 8              # 每 tile 8 fp16 = 1 line(128b=16B)；K//8 lines
-            # hco 契约：两条 CRU（AXI 读侧 + UR 写侧）**必须同拍发射**（ldb 写侧 FSM latch 描述符、
-            #   等 ldbaxi 取回数据后写 UR）。故两者**均无依赖** → SMT 同排 t=0 同拍；不加 ldb→ldb_axi
-            #   dep（否则错开 + 曾致 o_cru_ldb 写指令随 latency 挪动被挤出 fetch 窗，VCS 实证 bank1=0）。
-            ldb_axi = b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
-                                gr_base_addr=0, gr_intlv_addr=0, brst=max(lines - 1, 0),
-                                first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0)
-            # 配法（stage-1 VCS 证 K16/K32/K128 bit-match）：ur_wr_line_cnt=lines / line_byte_cnt=16×lines /
-            #   line_stride=0。⚠ 文档表57 语义是 line_byte_cnt=每行字节(≤511)/line_stride=行距(16×)，本配法
-            #   是「单逻辑行含全 tile 连续字节」的等价特例；文档-per-line 配法(line_byte_cnt=16/stride=1)在 K128
-            #   通但 K32 nan(小行数回归,待查) → 暂用已证特例。🔴 **单条 LDB 真上限=16 行=K128**（brst 4-bit
-            #   ≤15=16 beats，非 line_byte_cnt/ur_wr_line_cnt 限）。K>128 须多条 16-行-chunk LDB（每条 brst=15，
-            #   4 深队列串行；避 1-line brst=0 死锁）——待续 DEBT-050-KGT128。
-            ldb = b.make_op("LDB", "ldb", RT.LDB, [], iq_id=50,
-                            ur_addr=(1 << 12), ur_wr_line_cnt=lines, line_byte_cnt=16 * lines,
-                            line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0)
-            b_read_deps = [ldb]
+            # 🔴 **单条 LDB 真上限=16 行=K128**（brst 4-bit ≤15=16 beats，非 line_byte_cnt/ur_wr_line_cnt 限）。
+            #   K>128（>16 行）→ **多条 16-行-chunk LDB**（DEBT-050-KGT128，hco 第5轮定论）：每 chunk 一条
+            #   单-shot LDB(brst=chunk_lines-1)，写连续 bank1 区（chunk c → byte offset row×16），LDB/LDBAXI
+            #   各 4 深 inst_array 背靠背入队不覆盖（旧「单描述符覆盖」模型已被推翻）。**避 1-line chunk**
+            #   （brst=0 → RTL RECV→DONE 守卫死锁，ldb_ur_axi_conv.v:829，DEBT-050-LDBAXI-BRST0）→ 尾 chunk
+            #   为 1 行时从前一 chunk 借 1 行凑成 (15,2)。K≤128 → 单 chunk，与 stage-1 已证 K16/K32/K128 完全一致。
+            CHUNK = 16
+            chunk_lines = []
+            rem = lines
+            while rem > CHUNK:
+                chunk_lines.append(CHUNK)
+                rem -= CHUNK
+            if rem == 1 and chunk_lines:      # 尾 1 行 → 借前 chunk 1 行凑 (15,2) 避 brst=0 死锁
+                chunk_lines[-1] -= 1
+                rem = 2
+            chunk_lines.append(rem)
+            multi = len(chunk_lines) > 1
+            if not multi:
+                # 单 chunk（K≤128）：已证对称 1-write/1-read（memory-IQ 循环路径，K16/K32/K128 VCS bit-match）。
+                #   配法：ur_wr_line_cnt=lines / line_byte_cnt=16×lines / line_stride=0（「单逻辑行=全 tile
+                #   连续字节」等价特例，≤16 行=256B<9bit）。两 CRU 均无 dep→SMT 同拍，b_read 依赖 ldb（相位隔离）。
+                b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
+                          gr_base_addr=0, gr_intlv_addr=0, brst=max(lines - 1, 0),
+                          first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0)
+                ldb = b.make_op("LDB", "ldb", RT.LDB, [], iq_id=50,
+                                ur_addr=(1 << 12), ur_wr_line_cnt=lines, line_byte_cnt=16 * lines,
+                                line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0)
+                b_read_deps = [ldb]
+            else:
+                # 多 chunk（K>128）：**对称 explicit-N**（每 chunk 1 write + 1 read 描述符，1:1 配对）。
+                #   assembler 显式-N 分支：INIT + N 条 level=0 BODY + 尾 E_END，绕 mod-II 折叠 + level-1
+                #   array-replay（hco 定论）→ RTL smi_iq_iic.v:400 顺序 fire 各入 4 深 FIFO。
+                #   ✅ VCS 实证：chunk0（描述符 0）完美加载 bank1[0:15]（explicit-N 让第 1 描述符 fire 成功，
+                #     根因修对）。🔴 **chunk1（描述符 1）we 塌 1 字节**——RTL 写侧连续流缓冲 r_data_array 的
+                #     head/tail/residue 不按描述符 re-baseline（ldb_ur_axi_conv.v:1198-1222 只 rst_n 复位），
+                #     back-to-back 出队时 LDBAXI 预取 chunk1 污染 chunk0 残留 → we 塌（DEBT-050-LDB-STREAM-REBASE，
+                #     RTL 债务反馈 owner，本仓不改）。**契约级正解 = done-握手串行**（chunk_{i+1} gate 在
+                #     chunk_i done，silicon-safe，需 RTL cond 接线；EN_COND 现为编译期常量待 owner 确认）。
+                #     非对称 1-write/N-read 已证伪（VCS bank1=0，RTL 要求 LDB:LDBAXI 1:1 配对）。见 ADR-050。
+                #   ⚠ 当前多-chunk 仅 chunk0 正确、非 bit-match；K>128 完整支持 blocked on RTL（DEBT-050-KGT128）。
+                # chunk 间 40-latency 串行 dep：仅为 b_read 相位隔离定时（发射序由 assembler abs_t=chunk_idx 定）。
+                all_ldb = []
+                row = 0
+                prev_ldb = None
+                for c, clines in enumerate(chunk_lines):
+                    byte_off = row * 16
+                    ldb_deps = [prev_ldb] if prev_ldb is not None else []
+                    b.make_op("LDB_AXI", f"ldb_axi_{c}", RT.LDB_AXI, [], iq_id=51,
+                              gr_base_addr=byte_off, gr_intlv_addr=0, brst=max(clines - 1, 0),
+                              first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=c,
+                              explicit_descriptor=True, chunk_idx=c)
+                    ldb_c = b.make_op("LDB", f"ldb_{c}", RT.LDB, ldb_deps, iq_id=50,
+                                      ur_addr=(1 << 12) + byte_off, ur_wr_line_cnt=clines,
+                                      line_byte_cnt=16 * clines, line_stride=0,
+                                      const=0, pre_fill=0, post_fill=0, inst_id=c,
+                                      explicit_descriptor=True, chunk_idx=c)
+                    all_ldb.append(ldb_c)
+                    prev_ldb = ldb_c
+                    row += clines
+                b_read_deps = [all_ldb[-1]]
         br = b.make_op("UR_READ", "b_read", RT.UR_READ, b_read_deps,
                        meta_name="b", logical_addr=1 * 256 + 0, stride=b_read_stride,
                        role="input", iq_id=31, precision="fp16")
@@ -1483,6 +1527,16 @@ class ManualFp16MatmulK128LdbOperator(ManualFp16MatmulK16LdbOperator):
     matmul 循环 16 tile 累加。验 LDB 多-tile 扩展 + 累加环随 LDB-载入权重的正确性。
     （K>248 需循环 LDB / 多 LDB + INC 步进 gr_base_addr，见 ADR-050 阶段 2 循环 LDB。）"""
     K = 128
+
+
+class ManualFp16MatmulK256LdbOperator(ManualFp16MatmulK16LdbOperator):
+    """ADR-050 阶段 2（DEBT-050-KGT128）：K=256 = 32 tile = 32 line，超单条 LDB 16-行(brst 4-bit)上限 →
+    多-chunk **对称 explicit-N**（每 chunk 1 write+1 read 描述符，各 brst=15，写连续 bank1 区）。
+    ✅ chunk0（描述符0）VCS 完美加载 bank1[0:15]（explicit-N 让第1描述符 fire 成功，根因修对）；
+    🔴 chunk1（描述符1）we 塌 1 字节 —— RTL 写侧连续流缓冲跨-描述符不 re-baseline（DEBT-050-LDB-STREAM-REBASE，
+    RTL 债务）。契约级正解 = done-握手串行（需 RTL cond 接线）。非对称 1-write/N-read 已证伪（bank1=0，
+    RTL 要求 LDB:LDBAXI 1:1）。**当前非 bit-match，K>128 完整支持 blocked on RTL，见 ADR-050 DEBT-050-KGT128。**"""
+    K = 256
 
 
 class ManualFp16MatmulK24Operator(ManualFp16MatmulK16Operator):

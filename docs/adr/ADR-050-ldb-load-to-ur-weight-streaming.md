@@ -137,6 +137,26 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 **对齐理解**：`outstanding=4` = 4 条在途上限（信用），非总数封顶（done 回流可发>4、节流非封顶）；LDB 单描述符 reg 才是背靠背覆盖的真因。
 **DEBT-050-LSU-LOOP**：真 O(1) UR 循环 LDB 流式需 RTL 债务解（信用不计 NOP / iq_II=1 消 NOP）。当前 unrolled 多-LDB 是 UR-bounded（N line，K≤~1 bank）非 O(1)。
 
+### 🟠 DEBT-050-KGT128 攻坚（2026-07-02，hco 3 轮字段级 + 4 次 VCS）：explicit-N 修对第1描述符，chunk1 blocked on RTL 写侧 residue defect
+**背景**：K256=32 行 > 单条 LDB 16-行(brst 4-bit)上限 → 多 chunk。原计划「多条 16-行-chunk LDB 4 深队列串行」（memory 记「无 RTL 阻塞」）**被本轮证伪：有 RTL 阻塞**。
+
+**发现链（每步 VCS 实证）**：
+1. **首次多-chunk（memory-IQ 路径 + same_cycle + 40-latency 串行）→ bank1 全空**。hco 静态根因（`assembler.py:242 kernel_map=global_t%iq_II`）：汇编器按 mod-II 把 2 chunk 折叠进循环 kernel（SMT 的 t 值被取模丢弃）→ HDR level=1 → RTL `smi_iq_iic.v:427 LOOP_PARA_SET` 走多元素 array-replay 分支 stall → `dly_data_valid` 恒 0 → 连 chunk0 都不 fire。
+2. **改 explicit-N（结构 B：INIT + N 条 level=0 BODY + 尾 E_END，绕 mod-II 折叠 + level-1 loop）→ chunk0 完美**。hco 字段级证（`smi_iq.v:56-74` = packer `LSU_HEADER_MAP` 逐位一致，EMBED_LOOPS=SMIHeader.level 在 header-rel[47:45]）：**决定循环/顺序的开关是 level 不是 loops**；level=0 → `:400 ~(|w_embed)` level-0 datapath 每条 fire 一次(:652)+rdi_addr+1 顺序取 → 各描述符独立入 4 深 FIFO。**VCS：bank1[0:15]=chunk0 完美加载、bank5=1230.94（chunk0 前16 tile 部分和）**。根因修对。
+3. **chunk1（第2描述符）只写 line16 末字节 `0x69`（=HBM 真实末字节）**。hco 写侧 FSM 定论：描述符字段 + 行计数器**会**按描述符复位（IDLE dispatch），但**共享连续流缓冲** `r_data_array` 的 `r_array_head_post`/`r_array_tail_post`/`r_axism_s_residue_byte_sum`（`ldb_ur_axi_conv.v:1198-1222`）**只 rst_n 复位、不按描述符 re-baseline** + :1212-1222 组合逻辑缺 final else(latch 推断)。back-to-back 出队时 LDBAXI 预取 chunk1 进共享缓冲、污染 chunk0 残留 residue → chunk1 首行 `residue≥16` 检查不成立、只 1 残留字节可发 → we 塌单字节、1 行即 DONE。**= DEBT-050-LDB-STREAM-REBASE（RTL 债务，反馈 owner，本仓不改）**。
+4. **非对称 1-write/N-read（写侧单条 ur_wr_line_cnt=lines 无跨-write-descriptor residue + 读侧 N burst 填流）→ VCS bank1=0（证伪）**。per-line 2D 配法(line_byte_cnt=16/stride=1) bank1=0；total-byte 配法(line_byte_cnt=16×lines) K248(31 行,496B<511) 也 bank1=0。→ **RTL 要求 LDB:LDBAXI 1:1 配对**（1 写 + 2 读 → 写侧拿不到匹配数据、全空）。原以为可扩 K128→K248 的路**不成立**。
+
+**当前状态**：K256 多-chunk = 对称 explicit-N，**chunk0 正确、chunk1 塌缩、非 bit-match**。explicit-N + level=0 顺序 fire 机制已落 assembler（`explicit_descriptor` metadata gate，单-chunk K≤128 零回归走已证循环路径）。删了无效的 `same_cycle_as`（ucode_solver §2.6）。
+
+**契约级正解（待定，需 user/owner 决断）**：
+- **[主推,silicon-safe] done-握手串行**：chunk_{i+1} IQ 发射 gate 在 chunk_i 的 LDB done（`smi_iq_iic.v:277,430-444` COND/crd 机制）→ chunk0 流排空后 chunk1 才入 → residue 干净。**= memory「升 Accepted 转 done-握手」roadmap**。⚠ 阻塞：hco 第4轮记 `EN_COND=0 编译期常量`（RTL cond 通路可能禁用）→ **需 owner 确认 EN_COND 可开 + RTL cond→LDB-done crd 接线 VCS 验证**。
+- **[已证伪] 非对称 1-write/N-read**：RTL 要求 1:1 配对。
+- **[排除] NOP-spacing 撑开 abs_t**：开环猜变延迟 HBM、非硅安全，违「时序要算不要调」。
+
+**RTL 债务（本仓不改，反馈 owner）**：DEBT-050-LDB-STREAM-REBASE（写侧 `r_array_head_post`/`r_array_tail_post`/`r_axism_s_residue_byte_sum` 未按描述符 re-baseline + :1212-1222 组合 latch）。K>128 完整支持 blocked on 此债务解 或 EN_COND done-握手。
+
+**决策（user 2026-07-02）**：**接受 K≤128 收尾**——ADR-050 阶段 2 = 单 chunk K≤128 已 VCS bit-match（K16/K32/K128），够当前 matmul 需求。**K>128 完整支持 deferred**（待 owner 确认 DEBT-050-LDB-STREAM-REBASE 修 或 EN_COND 可开 done-握手后再动）。本轮 explicit-N emit 机制 + chunk0-works + 根因/证伪链落库作 checkpoint；K256 算子保留作 K>128 里程碑标的（chunk0 通、chunk1 RTL-blocked、非 bit-match）。
+
 ### 其余阶段 2（deferred）
 2D stride/line 语义、pre/post fill、per-SMC 交织(gr_intlv 真跨-SMC 分散)、并发 LDB+compute(端口冲突 SMT axiom, ADR-008 延伸)、LDB done-握手变延迟建模。
 
