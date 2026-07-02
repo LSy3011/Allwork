@@ -91,7 +91,12 @@ class PhysicalAssembler:
                 s = int(op.metadata.get("stride", 0))
                 if s > iq_max_stride: iq_max_stride = s
 
-            is_memory_iq = ("ur-" in iq_name.lower()) or ("rtovr" in iq_name.lower())
+            # ADR-050 阶段2：LDB/LDB_AXI 循环时也走 memory-IQ level-1 embed-loop 地址步进（INC 步进
+            #   gr_base_addr/ur_addr，hco 取证复用 UR 同构，已 VCS 证）。body op_mask=0x1 when stride!=0
+            #   → LDB_AXI(stride=16) 开步进、LDB(stride=0) 驻留。"ldb" 子串覆盖 "ldb" 与 "ldb-axi"。
+            is_memory_iq = ("ur-" in iq_name.lower()) or ("rtovr" in iq_name.lower()) or ("ldb" in iq_name.lower())
+            # RTL 忽略 HDR 的 inc_embed（hco：只 body 的 w_inc_embed 门控 level offset）→ 此处值 don't-care，
+            #   保留 max(stride,1) 不动既有 UR 路径。真正生效的是 body op_mask（:247，stride!=0→0x1 选 level-1）。
             hdr_inc_embed = max(iq_max_stride, 1) if is_memory_iq else 0
 
             # ADR-041 DEBT-041-STREAM-DLY 修（2026-06-30，照 TB tb_aiacc_top_shift IQ14 结构）：dst-datapath

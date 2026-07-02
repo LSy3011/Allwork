@@ -1322,7 +1322,27 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
         #   （相位隔离：LDB done 后才读 bank1，DEBT-050-VARLAT 保守上界 latency）。两条 CRU 流：
         #   LDB_AXI（触发 AXI 读 HBM）+ LDB（写 UR bank1）。ur_addr=bank1 字节基址（bank<<12=4096）。
         b_read_deps = []
-        if getattr(self, "EMIT_LDB_WEIGHT", False):
+        b_read_stride = 1
+        if getattr(self, "EMIT_LDB_STREAM", False):
+            # ADR-050 阶段2 循环 LDB（方案 a）：每迭代 LDB 载 1 tile(1 line=16B) 进 bank1[0] **驻留 buffer**
+            #   （下迭代覆盖），matmul 读+累加。LDB_AXI 靠 INC=stride=16 每迭代步进 gr_base_addr +16B 读
+            #   HBM 下一 line（hco：micro_addr=min_base+INC×loop_cnt 字节直加，assembler is_memory_iq 含 ldb
+            #   → body op_mask 开 level-1）。LDB stride=0 → ur_addr 驻留 bank1[0]。两 CRU 同拍（均无依赖）。
+            #   ldb WAR loop-carried ←b_read：LDB_{i+1} 写须晚于 compute_i 读（单驻留 buffer 逐 tile 串行 →
+            #   II≥40(LDB lat)+8=48 覆盖 HBM 往返；DEBT-050-VARLAT 非硅安全、升 Accepted 转 done 握手）。
+            # 两 CRU 同拍：两者都挂同一 WAR loop-carried ←b_read（否则只 ldb 被压后、ldb_axi 停 slot0 →
+            #   错拍，违 stage-1 证的「同拍」契约）。同约束 → SMT 同排同 slot。
+            ldb_axi = b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
+                                gr_base_addr=0, gr_intlv_addr=0, brst=0,
+                                first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0, stride=16,
+                                loop_carried_depends_on={"b_read": 8})
+            ldb = b.make_op("LDB", "ldb", RT.LDB, [], iq_id=50,
+                            ur_addr=(1 << 12), ur_wr_line_cnt=1, line_byte_cnt=16,
+                            line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0, stride=0,
+                            loop_carried_depends_on={"b_read": 8})
+            b_read_deps = [ldb]
+            b_read_stride = 0   # 驻留读 bank1[0]（每迭代同址，靠 LDB 覆盖换 tile）
+        elif getattr(self, "EMIT_LDB_WEIGHT", False):
             lines = self.K // 8              # 每 tile 8 fp16 = 1 line(128b=16B)；K//8 lines
             # hco 契约：两条 CRU（AXI 读侧 + UR 写侧）**必须同拍发射**（ldb 写侧 FSM latch 描述符、
             #   等 ldbaxi 取回数据后写 UR）。故两者**均无依赖** → SMT 同排 t=0 同拍；不加 ldb→ldb_axi
@@ -1337,7 +1357,7 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
                             line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0)
             b_read_deps = [ldb]
         br = b.make_op("UR_READ", "b_read", RT.UR_READ, b_read_deps,
-                       meta_name="b", logical_addr=1 * 256 + 0, stride=1,
+                       meta_name="b", logical_addr=1 * 256 + 0, stride=b_read_stride,
                        role="input", iq_id=31, precision="fp16")
         rt_a = b.make_op("RTOVR", "rt_a_FP16MUL_S0", PS.FP16MUL_S0, [ar])
         rt_b = b.make_op("RTOVR", "rt_b_FP16MUL_S4567", PS.FP16MUL_S4567, [br])
@@ -1392,11 +1412,12 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
                                 "inner_inc": 1, "outer_inc": 0})
         out = next(o for o in ops if o.trace_id == "out_obj_0")
         out.metadata.update({"inner_inc": 0, "outer_inc": 0, "stride": 0})
-        # ADR-050：LDB 一次性搬运整 tile（K//8 lines 由 ur_wr_line_cnt 一条指令写完），非逐迭代循环
-        #   → inner_loops=0（否则会被当 compute 循环体逐拍重发）。
-        for op in ops:
-            if op.op_type.upper() in ("LDB", "LDB_AXI"):
-                op.metadata.update({"shape": [1], "inner_loops": 0, "inner_inc": 0})
+        # ADR-050：单-shot LDB（EMIT_LDB_WEIGHT）一次性搬整 tile（ur_wr_line_cnt 一条写完）→ inner_loops=0。
+        #   循环 LDB（EMIT_LDB_STREAM）则**保留** inner_loops（=num_tiles-1，每迭代载 1 tile，INC 步进）。
+        if not getattr(self, "EMIT_LDB_STREAM", False):
+            for op in ops:
+                if op.op_type.upper() in ("LDB", "LDB_AXI"):
+                    op.metadata.update({"shape": [1], "inner_loops": 0, "inner_inc": 0})
         return ops
 
 
@@ -1426,6 +1447,16 @@ class ManualFp16MatmulK16LdbOperator(ManualFp16MatmulK16Operator):
                 val |= int(w) << (l * 16)
             lines.append(f"{val:032x}")
         return lines
+
+
+class ManualFp16MatmulK32StreamLdbOperator(ManualFp16MatmulK16LdbOperator):
+    """ADR-050 阶段2 循环 LDB（方案 a）：K=32 = 4 tile，权重经**循环 LDB 流式**逐 tile 载入 bank1[0]
+    **驻留 buffer**（O(1) UR，真大 K 通路）。每迭代 LDB 载 1 line（INC=16 步进 HBM），matmul 读+累加，
+    下迭代覆盖。区别于 K128（单 LDB 载全部）：此为 K>248/权重≫UR 的流式模型（虽 K=32 小，验机制）。
+    b_read 驻留读 bank1[0]（stride=0）；ldb WAR loop-carried ←b_read 强制 II≥48（逐 tile 串行）。
+    DEBT-050-VARLAT：保守大 II 非硅安全，升 Accepted 转 done-握手。"""
+    K = 32
+    EMIT_LDB_STREAM = True
 
 
 class ManualFp16MatmulK128LdbOperator(ManualFp16MatmulK16LdbOperator):
