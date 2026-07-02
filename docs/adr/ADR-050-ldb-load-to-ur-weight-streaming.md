@@ -3,7 +3,7 @@ adr_id: ADR-050
 title: LDB Load-to-UR 权重流式编译器建模（外部 HBM → LDB(AXI) → UR）—— 阶段 1 单-SMC 连续 tile
 decided: 2026-07-02
 last_verified: 2026-07-02
-still_holds: proposed（阶段 1 待 VCS：SMC0 预载 HBM tile → LDB load → matmul bank5 bit-match；NEEDS-USER-FACT-050-* 逐条闭合）
+still_holds: yes（阶段 1 VCS 贯通 2026-07-02：HBM→LDB(AXI)→UR→K16 matmul，bank5 lane0=155.14395 bit-match golden + 负向断言 dummy HBM→-2689.73 铁证。commit bf11012）
 builds_on: ADR-022, ADR-023, ADR-031, ADR-008, ADR-025, ADR-049
 hco_review: hco 定 + 放行（2026-07-02，RTL 行级取证 ldb_ur_axi_conv.v/smi_iq.v/user_register.v/tb_aiacc_top_v04_f.v；2 阻断项 + 2 待 user 决断）
 user_decision: user 2026-07-02「数据的加载在架构中，就是通过 load store 来进行的」+「直接攻 load/store 权重流式」
@@ -86,10 +86,14 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 - 修 2 bug（commit 27034af）：① resolve_iq_type 前缀吞并（ldb-axi 误当 LDB 56b→修精确匹配优先，iq_ldb-axi.hex 现 154bit✓）；② 相位隔离（pipeline_delays LDB=40 保守上界，b_read@t43）。
 - `o_cru_ldb_axi_r` VALID=1@cyc1912 → `ldb_arvalid`@1915 → **`ldb_rvalid`@1920（HBM 数据返回）** ✓✓。
 
-🔴 **剩余断点：LDB 写侧 UR-write 未 firing**（bank5=0/bank1 空）：
-- 第一次跑（LDB lat=1）：`o_cru_ldb_r` VALID=1@1913 发射，但 `ldb_ur_we` 不 firing（写描述符@1913 早于数据@1920）。
-- 加 LDB=40 后：schedule 挪动（ldb@t3/b_read@t43），`o_cru_ldb_r` **全程不发射**（写侧 IQ VALID 槽随时序移动不再被 fetch）。
-- **下一步**：LDB 两 CRU「必须同时发射」（hco 契约）——ldb_axi 与 ldb 应同拍发射（去掉 ldb→ldb_axi dep），且写描述符须持续/对齐 rvalid 数据返回（@~1920）。读 `ldb_ur_axi_conv.v:1389-1464` UR-write FSM（o_cru_ldb 描述符 latch vs rvalid drain 时序）。相位隔离 latency 与写侧发射时序需协调（LDB=40 不能让写指令被挤出 fetch 窗）。可能需 hco 第 3 轮（LDB UR-write FSM 时序 + 两 CRU 对齐）。
+✅ **阶段 1 VCS 贯通（2026-07-02，commit bf11012）**：
+- 写侧收尾两处（DFG）：① **两 CRU 同拍发射**（去 ldb→ldb_axi dep，均无依赖 → SMT 同排 t=0；错开时写指令随 latency 被挤出 fetch）；② **line_byte_cnt 是总字节数**（非每行）——16 时 beat1 塌成 we=0x0001，设 16×lines → we=0xffff 全写（VCS 实证，闭合 NEEDS-USER-FACT-050-LINE2D 连续-tile 情形）。
+- 全链硅证：HBM 预载 → o_cru_ldb_axi_r/o_cru_ldb_r VALID@同拍 → ldb_arvalid → ldb_rvalid(HBM 数据) → ur_we=0xffff×2 写满 bank1 → K16 matmul → **bank5 lane0=155.14395 bit-match golden** ✓。
+- 负向断言：dummy HBM → bank5=-2689.73 + bank1=dummy → 铁证权重来自 LDB/HBM 非残留。
+- 已验 NEEDS-USER-FACT：URADDR(bank=[14:12] user 确认)、LINE2D(line_byte_cnt=总字节, VCS 证)、STRB(first/last_byte_strb=0 对连续对齐 tile 即全字节, VCS 证)、PORT(相位隔离绕开)。仍 deferred: FILL/多-tile 交织/并发(阶段 2)。
+
+## 阶段 2（deferred）
+2D stride/line 语义、pre/post fill、多-tile 大 K(inner_loops 循环 LDB)、per-SMC 交织(gr_intlv)、并发 LDB+compute(端口冲突 SMT axiom, ADR-008 延伸)、LDB 变延迟 done-握手事件建模(替 DEBT-050-VARLAT 保守上界)。
 
 ## 验收（阶段 1 升 Accepted）
 - [ ] VCS：SMC0 预载 K=16 tile 进 HBM → LDB load bank1 → matmul → bank5 bit-match golden + 负向断言（不预载→变）。
