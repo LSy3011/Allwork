@@ -104,7 +104,7 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 | LDB_AXI(51) 步 gr_base | 16 | 16 | 0x01 | num_tiles-1 |
 | LDB(50) 步 ur_addr(驻留) | 0 | 0 | 0 | num_tiles-1 |
 **实现三步**：① assembler.py:94 `is_memory_iq` 加 `"ldb"` 子串匹配即够（复用 UR level-1 embed-loop，已 VCS 证明；body op_mask=0x1 when stride!=0 → LDB_AXI 开、LDB 关；`hdr_inc_embed=max(stride,1)` 对 stride=16 语义错但 RTL 忽略 HDR inc_embed → 无害，建议显式写 0x1）。② DFG：LDB/LDB_AXI inner_loops=num_tiles-1、stride 如上、b_read 驻留读 bank1[0]。③ **SMT 加 WAR 边 `LDB_{i+1}←compute_i`**（单驻留 buffer 强制逐 tile 串行，outstanding=4 不能 pipeline）。
-🔴 **user 决断（hco NEEDS-USER-FACT）**：HBM/AXI 读延迟**非编译期固定**→ (a) 保守大固定 II 过 sim(快、**非硅安全**、标 DEBT) vs (b) done-握手事件建模(COND/crd,硅安全,升 Accepted 必须)。hco 判：HBM 往返是「时序要算不要调」的**合法例外**(该用握手非算拍)，首期可 (a) bring-up 但须转 (b)。
+🔴 **HBM 同步策略（决策 (a)，AI 自决 2026-07-02，user 暂离；同 stage-1 bring-up 套路 + hco 推荐序）**：HBM/AXI 读延迟**非编译期固定**。**首期 (a) 保守大固定 II bring-up**（覆盖 HBM 往返上界 + WAR 串行）过 VCS bit-match，标 **DEBT-050-VARLAT「非硅安全」**；**升 Accepted 前必转 (b) done-握手事件建模**（COND/crd，硅安全）。hco 判：HBM 往返是「时序要算不要调」的**合法例外**（该用握手非算拍），(a)→(b) 序成立。user 回来可 override 到直接 (b)。
 载体建议：K32-stream（4 tile 驻留 1-line buffer）VCS bit-match。
 
 ### 其余阶段 2（deferred）
