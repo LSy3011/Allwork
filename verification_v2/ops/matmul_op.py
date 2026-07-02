@@ -1324,11 +1324,16 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
         b_read_deps = []
         if getattr(self, "EMIT_LDB_WEIGHT", False):
             lines = self.K // 8              # 每 tile 8 fp16 = 1 line(128b=16B)；K//8 lines
+            # hco 契约：两条 CRU（AXI 读侧 + UR 写侧）**必须同拍发射**（ldb 写侧 FSM latch 描述符、
+            #   等 ldbaxi 取回数据后写 UR）。故两者**均无依赖** → SMT 同排 t=0 同拍；不加 ldb→ldb_axi
+            #   dep（否则错开 + 曾致 o_cru_ldb 写指令随 latency 挪动被挤出 fetch 窗，VCS 实证 bank1=0）。
             ldb_axi = b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
                                 gr_base_addr=0, gr_intlv_addr=0, brst=max(lines - 1, 0),
                                 first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0)
-            ldb = b.make_op("LDB", "ldb", RT.LDB, [ldb_axi], iq_id=50,
-                            ur_addr=(1 << 12), ur_wr_line_cnt=lines, line_byte_cnt=16,
+            # ⚠ VCS 实证：line_byte_cnt 是**总字节数**（非每行）——设 16 时 beat0 用满、beat1 余量塌成
+            #   1 字节 we=0x0001（line1 只落 1 字节）。设 16×lines（全 tile 总字节）→ beat1 we=0xffff。
+            ldb = b.make_op("LDB", "ldb", RT.LDB, [], iq_id=50,
+                            ur_addr=(1 << 12), ur_wr_line_cnt=lines, line_byte_cnt=16 * lines,
                             line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0)
             b_read_deps = [ldb]
         br = b.make_op("UR_READ", "b_read", RT.UR_READ, b_read_deps,
