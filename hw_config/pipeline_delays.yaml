@@ -5,9 +5,11 @@ pipeline_delays:
   FPADD:               4    # 浮点加法延迟
   FPMUL:               4    # 浮点乘法延迟
   INTADD:              1    # 整数加法延迟
-  FP16MUL:             4    # FP16乘法延迟（ADR-032：user 2026-06-04 裁定单元 latency=4，原 2 错）
-  FP32ADDTREE5TO1:     4    # FP32加法树5to1延迟
-  FP32ADDTREE8TO1:     3    # FP32加法树8to1延迟
+  FP16MUL:             5    # ADR-048：trigger→DR 可读=5（乘法器核 4 + dr_fp16mul_d 输出寄存器 1 级，fp16mul.v:288/405，
+                           #   VCS 双证）。refine ADR-032 D1「核 latency=4」——核 4 不变、这是 SMT 边权的「DR 可见」口径。
+  FP32ADDTREE5TO1:     4    # FP32加法树5to1延迟（与 8to1 物理同构 4 级，fp32_adder_tree_final_pipeline_5to1.v）
+  FP32ADDTREE8TO1:     4    # ADR-048：4 寄存器级（Stage1/2/3+输出 o_dr，8to1 pipeline .v:405/495/605/664），与 5to1 同构。
+                           #   订正 ADR-031 误把 4→3（VCS 双证=4）。
   FPtoFP:              1    # 浮点转换延迟
   INTtoINT:            1    # 整数转换延迟
   FPtoINT:             1    # 浮点转整数延迟
@@ -26,12 +28,19 @@ pipeline_delays:
                            #   SHIFTUP/UR_W0 16-beat 流广播持续拍 + RTOVR latch lifecycle + 资源占用窗口。
                            #   **不进 add_latency_axiom**（非 RAW latency）——**仅对 streaming-to-bank 边（unit_ds_transpose
                            #   逐 beat 写 bank5）成立**。ADR-041 D2。
-  SMI_DS_T_RESIDENT:   35   # ADR-043 D4：**resident-sampling 边**（compute 采 SMI_DS_T 广播的 held 末 beat）的 RAW latency
-                           #   = SMI_DS_T(19 首 beat) + SMI_DS_T_WINDOW(16) = 35。partial-supersede ADR-041 D2「WINDOW 不进
-                           #   RAW latency」——仅对**采驻留末 beat 的 compute-side 边**（q_dst 等，consumer 带 dst_compute_resident）。
-                           #   streaming-to-bank 边（unit）仍用 19。35 = (WINDOW−1)+shiftup reg(+1) 相消（shift_up.v:54 /
-                           #   smi_ds_t.v:58 LAST_BEAT=15），非「+整窗」；VCS 校 ±1~2（DEBT-043-RESIDENT-LAT-VCS）。
-                           #   compute 采的是唯一 held 到下次广播的末 beat（shift_up.v:52-58 每拍覆盖、只末拍保持）。
+  SMI_DS_T_DELIVER:    6    # ADR-046 D1（hco RTL 行级取证 2026-07-01）：IQ14 EXTRA_DATA **结构交付管线** =
+                           #   data_out beat15 → dr_shiftup_reg 的固定拍数（PARAM_SMC_NUM 无关）。分解：
+                           #   ①smi_top.v:384 wrd_vld/wrd_data→IQ14 DATAQ 写入 +1；②smi_iq_dly_queen.v:225/245/111
+                           #   FSM（r_mem_rd_data→inst→cru_o 组合）+2~3；③smi_top.v:665 o_cru_shiftup_r<=iq_inst[14] +1；
+                           #   ④shift_up.v:54 dr_shiftup_reg<=data_in +1。**RTL-derived 非 VCS 标定**（user 原则）。
+                           #   DEBT-046-DELIVER-FSM：dly_queen FSM 2 vs 3 级的 ±1 须 VCS cycle-trace 敲死。
+  SMI_DS_T_RESIDENT:   40   # ADR-046 D2（校正 ADR-043 的 35，hco 判 35 漏算整条 EXTRA_DATA 交付管线非"漏 1 寄存器"）：
+                           #   = SMI_DS_T(19 首 beat) + (SMI_DS_T_WINDOW−1=15 到末 beat) + SMI_DS_T_DELIVER(6) = 40。
+                           #   **职责降级（ADR-046）**：RESIDENT 只保 **SMT 逻辑排序 + verifier 一致**（dependency_axioms
+                           #   + ucode_solver 维度4/6 必同取，否则 ADR-006/021 类 desync），**不再承担 VCS 拍对齐**——
+                           #   VCS 拍由 assembler emit abs_t 锚定（compute 垫 derived lead-NOP）承担（ADR-046 D3）。
+                           #   仅对采驻留末 beat 的 compute-side 边（consumer 带 dst_compute_resident）；unit streaming-to-bank
+                           #   仍 19。compute 采的是唯一 held 末 beat（shift_up.v:52-58 每拍覆盖、只末拍保持、单 token held 无界）。
   INT8toFP16:          1    # INT8转FP16延迟
   VIN0:                0    # 向量输入流水线寄存器0
   VIN1:                0    # 向量输入流水线寄存器1

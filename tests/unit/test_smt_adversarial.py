@@ -88,7 +88,10 @@ class TestSMTRefutation(unittest.TestCase):
         self.synthesizer = UCodeSynthesizer(self.spec)
 
     def _assert_unsat(self, ops, II, msg):
-        status, _ = self.synthesizer._solve_for_ii_with_units(ops, II=II)
+        # ADR-048：latency 对齐（FP16MUL 4→5 / ADDTREE8TO1 3→4）→ 调度 horizon 变大 → z3 证 UNSAT 均时
+        #   ~20→24s、贴近默认 30s、z3 变异偶尔超时返 UNKNOWN（非 SAT、约束系统仍正确；90s 直跑实测 20.9s 出 UNSAT）。
+        #   给 prover 更大超时（断言仍 UNSAT、不削弱），消除边界 flake。
+        status, _ = self.synthesizer._solve_for_ii_with_units(ops, II=II, timeout_ms=90_000)
         self.assertEqual(status, SolverStatus.UNSAT, msg)
 
     def _assert_sat(self, ops, II, msg):
@@ -311,7 +314,10 @@ class TestMultiSMCAxioms(unittest.TestCase):
         self.synthesizer = UCodeSynthesizer(self.spec)
 
     def _assert_unsat(self, ops, II, msg):
-        status, _ = self.synthesizer._solve_for_ii_with_units(ops, II=II)
+        # ADR-048：latency 对齐（FP16MUL 4→5 / ADDTREE8TO1 3→4）→ 调度 horizon 变大 → z3 证 UNSAT 均时
+        #   ~20→24s、贴近默认 30s、z3 变异偶尔超时返 UNKNOWN（非 SAT、约束系统仍正确；90s 直跑实测 20.9s 出 UNSAT）。
+        #   给 prover 更大超时（断言仍 UNSAT、不削弱），消除边界 flake。
+        status, _ = self.synthesizer._solve_for_ii_with_units(ops, II=II, timeout_ms=90_000)
         self.assertEqual(status, SolverStatus.UNSAT, msg)
 
     def _assert_sat(self, ops, II, msg):

@@ -62,6 +62,13 @@ class PhysicalAssembler:
                 iq_name = self.hw_spec.get_iq_name(phys_id, m_type).upper()
                 iq_name = iq_name.replace("UR-R-", "UR-R").replace("UR-W-", "UR-W")
                 iq_name = iq_name.replace("_", "-").lower()
+                # ADR-047 D1：多微指令单元（FP16MUL）的 load 微指令走**独立 IQ 流**（RTL iq_inst[3]/[4]，
+                #   generate_data_list_coverage IQ_NAME_TO_ID fp16mul_s0123→3 / fp16mul_s4567→4）。按
+                #   micro_variant 后缀分桶 → emitter 产 iq_fp16mul-s0123.hex/-s4567.hex（RTL 归一化 '-'→'_'）。
+                #   compute/缺省不后缀（保 iq_fp16mul.hex=trigger iq_inst[2]，向后兼容其他单元）。
+                mv = op.metadata.get("micro_variant")
+                if mv and mv.startswith("load_"):
+                    iq_name = f"{iq_name}-{mv[len('load_'):]}"   # fp16mul-s0123 / fp16mul-s4567
             iq_buckets.setdefault(iq_name, []).append(op)
             
         physical_instructions = []

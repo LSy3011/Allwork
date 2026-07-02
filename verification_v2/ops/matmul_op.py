@@ -1438,8 +1438,36 @@ class ManualFp16MatmulQOperator(BaseOperator):
                 for c in range(self.COLS)]
         rt_act = b.make_op("RTOVR", "rt_act_FP16MUL_S4567", PS.FP16MUL_S4567, [ar])
 
-        # FP16MUL：dep 顺序 [w0, act, w1, w2(...)] 对齐 modules.yaml inputs [S0,S4567,S1,S2,S3]。
-        mul_deps = [rt_w[0], rt_act] + [rt_w[c] for c in range(1, self.COLS)]
+        # ADR-047 D1（hco 第 4 轮 RTL 行级取证）：fp16mul 乘法器读内部 `selected_s*_r ← s*_bank*_r`，
+        #   **不读 dvr 总线**。RTOVR 只路由到 dvr；须显式 **load 微指令**（IQ3/IQ4 写使能，`fp16mul.v:98/106`）
+        #   才把 dvr latch 进 s*_bank，否则 s_bank 恒 0 → 乘积恒 0（RTL 实证，被 sim auto-latch 假绿掩盖）。
+        # 门控到 q_dst（EMIT_FP16MUL_LOAD=True）：全 fp16mul 路系统性补 = DEBT-047-FP16MUL-LOAD-ALLPATHS。
+        if getattr(self, "EMIT_FP16MUL_LOAD", False):
+            # load_s0123：**1 条**——`fp16mul.v:108-161` 四块共用同一 write_enable，同拍 latch 全 S0-S3。
+            #   high_id=0（bank0，默认）须与 compute src_0_id=0 一致（hco BLOCK-3）；smc_id_en 自动 emit N-1=7。
+            # 🔴 路由必须正确（VCS 实证 scramble 修复）：ucode_solver 位置解析 deps[i]→FP16MUL inputs[i]
+            #   （port=[S0,**S4567**,S1,S2,S3]，`ucode_solver.py:462/485`）。故 load_s0123.deps 须用**完整位置
+            #   顺序 [rt_w0, rt_act, rt_w1, rt_w2, rt_w3]**（= 原 compute mul_deps 序）→ rt_w0→S0/rt_act→S4567/
+            #   rt_w1→S1/rt_w2→S2/rt_w3→S3 全对。若只挂 [rt_w0..3] → rt_w1→S4567/rt_w2→S1/rt_w3→S2/无人→S3
+            #   （s3 垃圾 + 激活拿成权重列，VCS 实证）。load_s0123 依赖 rt_act 仅多 1 条 ordering 边、无害
+            #   （它只 latch s0-s3；rt_act→S4567 路由供 load_s4567 latch s4-s7 用）。
+            load_s0123_deps = [rt_w[0], rt_act] + [rt_w[c] for c in range(1, self.COLS)]
+            load_s0123 = b.make_op("FP16MUL", "load_s0123", RT.FP16MUL, load_s0123_deps,
+                                   iq_id=18, micro_variant="load_s0123")
+            # load_s4567：**COLS 条**（low_id=0..COLS-1）——`fp16mul.v:172/186/200/214` 每块 gated by low_id，
+            #   一条只写 s4/s5/s6/s7 之一。广播激活须填满（D0/1←s4…D6/7←s7，每权重列配一激活寄存器）。
+            #   须显式 `src7654_low_id=lid`（缺省全 0 → 只写 s4、s5-s7=0 → D2..D7=0，hco BLOCK-1）。
+            # deps=**[load_s0123]**（FP16MUL 非 RTOVR）→ 不触发路由重解析（避免 rt_act 被 load_s4567 位置0 重定向到 S0）；
+            #   ordering 保证 load_s4567 晚于 load_s0123（后于所有 RTOVR 路由）→ dvr_s4567 已稳定驻留。
+            load_s4567 = [b.make_op("FP16MUL", f"load_s4567_{lid}", RT.FP16MUL, [load_s0123],
+                                    iq_id=18, micro_variant="load_s4567", src7654_low_id=lid)
+                          for lid in range(self.COLS)]
+            # compute trigger 依赖 loads（非 RTOVR，hco BLOCK-2）：solver 建 RAW 边知 compute 晚于 load →
+            #   读已 latch 的 s_bank（DLY-only、COND=0；s_bank 驻留寄存器，latch 后 hold）。
+            mul_deps = [load_s0123] + load_s4567
+        else:
+            # FP16MUL：dep 顺序 [w0, act, w1, w2(...)] 对齐 modules.yaml inputs [S0,S4567,S1,S2,S3]。
+            mul_deps = [rt_w[0], rt_act] + [rt_w[c] for c in range(1, self.COLS)]
         mul = b.make_op("FP16MUL", "inl_fp16mul", RT.FP16MUL, mul_deps, iq_id=18)
 
         # 8 个 D → COLS 条 ADDTREE8TO1（tree_c 读 D{2c}/D{2c+1} → dst_id=c）。
@@ -1570,16 +1598,22 @@ class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
 
     SRC_BANK = 6   # 列对齐 FP16 激活存放 bank（避让 a=0 / b0-3=1-4 / y=5；hco NOTE-3）
 
-    ROWS = 8   # ADR-042 D2：按 8×8 tile 呈现（RTL SMI_DS_T pair 引擎无 B=1、需 2 tile/16 拍）
+    ROWS = 16  # ADR-045：镜像 vec128（two_word 2 tile → 16 输出 beat 0..15）。真激活落 held beat15。
+
+    EMIT_FP16MUL_LOAD = True   # ADR-047 D1：发 load_s0123/s4567 微指令 latch s*_bank（缺则 RTL 乘积恒 0）
 
     def smi_ds_t_config(self, spec: Any = None) -> Dict[str, int]:
-        # ADR-042 D2：K=8 激活向量按 **8×8 tile（col-0 填 [a0..a7] + padding）** 呈现——RTL pair 引擎
-        #   （smi_ds_t.v）硬编码需 2 full tile / 16 拍 gather / 2 CRI，无 B=1（hco 2026-07-01）。lanes=1（旧）
-        #   只产 8 拍单 tile → hi slot 饿死 → data_out_vld 恒 0 → bank5=0（VCS 实证）。改 lanes=ROWS=8 mirror
-        #   unit_ds_transpose_fp16（VCS 8/8）的 8×8 机制：gather 8×8（col0=[a0..a7]、rest 0）→ 转置 →
-        #   **row0=[a0..a7]**（转置把 col0 变 row0）→ B=2 → row0 落 beat0 → compute 读 beat0。
+        # ADR-045（移植 vec128 交付范式，hco APPROVE-with-notes 2026-07-01）：q_dst 激活路吃 vec128 已 VCS
+        #   验证的 two_word 时间分离机制——消 doubling → 每 beat 8-distinct（ADR-043「B=2 half-split」是旧
+        #   col-0 single-word emit 产物、非 RTL）。真激活 [a0..a7] 落 **held 末 beat15**（`shift_up.v:52-58`
+        #   dr_shiftup 每拍覆盖、只末 beat held → compute RTOVR resident 窗稳采 beat15；单 token 无下轮 →
+        #   data_out held beat15 无界 → 采样极宽窗、robust，hco 项4）。config 与 vec128 一致：
+        #   two_word_gather（ds_gather 读 word0→T0/padding、ds_gather_1 读 word1→T1/real）+ intlv_in/out=0
+        #   （顺序 T0 8 beat 后 T1 8 beat，beat15=T1 末拍=hi/held）+ lanes=16（2 tile/16 beat）。
         return {"src_bank": self.SRC_BANK, "src_addr": 0, "dst_bank": 0, "dst_addr": 0,
-                "gather_smc_cnt": self.K, "lanes": self.ROWS, "element_bits": 16, "word_lanes": 8}
+                "gather_smc_cnt": self.K, "lanes": self.ROWS, "word_lanes": 8, "element_bits": 16,
+                "intlv_in": 0, "intlv_out": 0,
+                "two_word_gather": True, "hi_word_offset": 1}
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
                             vector_lanes: int, spec: Any = None):
@@ -1590,17 +1624,19 @@ class ManualFp16MatmulQDsTOperator(ManualFp16MatmulParallelNOperator):
             b_addr = self.get_bank_addr(f"b{c}", spec)
             for k, prog in enumerate(programs):
                 prog.inject_vector(b_addr, input_data[f"b{c}"][k], stride=1)   # 权重列 c per-SMC
-        # ADR-042 D2：激活按 8×8 col-0 tile 存全 8 SMC——SMC_s bank{SRC_BANK} 持 **1 词 = [a[s], 0×7]**
-        #   （a[s] 在 element 0、其余 7 padding 0）。gather 全 8×8 = col0 列向量 [a0..a7]（其余列全 0）→
-        #   SMI_DS_T 转置 8×8 → row0 = [a0..a7]。padding 满足 RTL「2 full tile/16 拍」完整性（ADR-042 D1）。
-        # ADR-042 DEBT-042-REGION-DLY（beat 对齐，未闭）：activation 放 element 0 → 转置降序发落 data_out
-        #   **beat 14**（VCS cyc 4116，unit `e=(ROWS-1)-k//2`）；element 7→beat 0 实测**引擎不出数**（regress，
-        #   待查，可能 B=2/intlv 边界）。故留 element 0（引擎出数已验，data_out_vld@4102）；compute 采样对齐
-        #   （现 rt_act ~4101 早于 activation 到 dr_shiftup_d ~4123）是最后一步，见 ADR-042 DEBT-042-REGION-DLY。
-        for s, prog in enumerate(programs):
-            if s < self.K:
-                row = np.zeros(self.ROWS, dtype=np.float16)
-                row[0] = a[s]                                     # col-0 对齐：SMC_s 持 a[s] 于 element 0
+        # ADR-045 E1（hco BLOCK，落点精确到 sub=8）：held beat15 的 lane 映射（vec128 VCS 证实
+        #   `_identity_layout_D`）= `beat15 lane i = D[7-i][sub]`，`sub=(23-15)=8` → **beat15 = 各 SMC 的
+        #   word1-元素0（sub=8）、SMC 降序**。q_dst 是 **compute-sink**（beat15 的 8 lane × FP16MUL 权重 lane，
+        #   dot8 commutative）：令 `beat15 lane i = a[i]`（对齐权重 lane i=w[i]）→ `D[7-i][8]=a[i]` →
+        #   **`D[smc][8] = a[7-smc]`**（word1 首元素；注 word1 末列 word1[7]=sub15 会落 beat8 被后 7 拍覆盖=垃圾）。
+        # ADR-045 E2（hco BLOCK，padding 显式注零）：gather 读 **UR 源**（非 storage）→ 必须写满每 SMC
+        #   **16 fp16**（word0[0:8]=0 padding-tile + word1[0]=a[7-smc] + word1[1:8]=0），镜像 vec128
+        #   cross_smc_unit_op.py:414-417；只注 word1[0] 不注 word0 → gather 读未初始化 UR = 硅 X。
+        # ADR-045 D4：时序从 SMT global_t 推导、不手调 lead_delay（[[derive-timing-not-vcs-calibrate]]）。
+        for smc, prog in enumerate(programs):
+            if smc < self.K:
+                row = np.zeros(self.ROWS, dtype=np.float16)       # 16 fp16 = word0[0:8]=0 + word1[8:16]
+                row[8] = a[7 - smc]                               # SMC_smc word1[0]=a[7-smc] → beat15 lane i=D[7-i][8]=a[i] → beat15=[a0..a7]
                 prog.inject_vector(src_logical, row, stride=1)
 
     def get_dfg(self, spec: Any = None) -> List[Any]:

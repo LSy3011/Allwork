@@ -45,7 +45,7 @@ modules:
   # 顶层 code_bits/code_fields 镜像 compute 组（向后兼容）；micro_groups 载全 3 组。
   FP16MUL:
     type: compute
-    latency: 4
+    latency: 5    # ADR-048：核 4 + dr 输出寄存器 1 = 5（fp16mul.v:288/405）。锁步 pipeline_delays + specs/units。
     # 端口名须与 rtovr_config producers_dvr 的 FP16MUL_S* 一致（ucode_solver 按 inputs
     # 位置序 positional 查 dvr_map 解 RTOVR 选通槽：deps[i] → inputs[i]）。
     # 顺序为 [S0, S4567, S1, S2, S3]：**加法式扩展**——S1(单对)用前 2 位 S0/S4567 不变；
@@ -242,7 +242,7 @@ modules:
 
   FP32ADDTREE8TO1:
     type: compute
-    latency: 3
+    latency: 4    # ADR-048：4 寄存器级、与 5to1 同构（订正 ADR-031 误 4→3）。锁步 pipeline_delays + specs/units。
     code_bits: 8
     code_fields:
       - {name: VALID, bits: 1}

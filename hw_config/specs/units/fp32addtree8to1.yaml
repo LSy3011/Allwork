@@ -1,5 +1,5 @@
 unit_name: FP32ADDTREE8TO1
-latency: 3   # 权威值（modules.yaml + pipeline_delays.yaml，ADR-031 4→3）；本第三链曾漏改
+latency: 4   # ADR-048：4 寄存器级（与 5to1 同构，8to1 pipeline .v:405/495/605/664）。订正 ADR-031 误 4→3。锁步 pipeline_delays + modules。
 attributes:
   throughput: 1
   desc: 8-to-1 Reduction FP32 Add Tree (S0/S1 各 4xFP32 -> 8 个 FP32 求和 -> 1 标量, v0.4.19 表520)

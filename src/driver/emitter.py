@@ -61,7 +61,8 @@ class LIRPacker:
         for iq_name, stream in iq_buckets.items():
             stream.sort(key=lambda x: x.abs_t)
             lookup_type = self._get_lookup_type(iq_name)
-            total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type)
+            micro_variant = self._get_micro_variant(iq_name)   # ADR-047 D1
+            total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type, micro_variant)
             hex_chars = (total_bits + 3) // 4
 
             hex_lines = []
@@ -72,6 +73,7 @@ class LIRPacker:
                     unit_type=lookup_type,
                     payload_dict=instr.payload,
                     is_body=is_body_stage,
+                    micro_variant=micro_variant,
                     **instr.header.to_dict()
                 )
                 hex_lines.append(f"{val:0{hex_chars}x}")
@@ -135,7 +137,8 @@ class LIRPacker:
         for iq_name, stream in iq_buckets.items():
             stream.sort(key=lambda x: x.abs_t)
             lookup_type = self._get_lookup_type(iq_name)
-            total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type)
+            micro_variant = self._get_micro_variant(iq_name)   # ADR-047 D1
+            total_bits = BitPacker.get_unit_bits(self.hw_spec, lookup_type, micro_variant)
             hex_chars = (total_bits + 3) // 4
 
             hex_lines = []
@@ -146,6 +149,7 @@ class LIRPacker:
                     unit_type=lookup_type,
                     payload_dict=instr.payload,
                     is_body=is_body_stage,
+                    micro_variant=micro_variant,
                     **instr.header.to_dict()
                 )
                 hex_lines.append(f"{val:0{hex_chars}x}")
@@ -203,6 +207,16 @@ class LIRPacker:
         """
         from src.driver.payload_factory import UnitPayloadFactory
         return UnitPayloadFactory.resolve_iq_type(iq_name, self.hw_spec)
+
+    @staticmethod
+    def _get_micro_variant(iq_name: str):
+        """ADR-047 D1：多微指令单元的 load IQ 流（assembler 按 micro_variant 后缀分桶为 fp16mul-s0123/-s4567）
+        须回传 micro_variant 给 packer，否则 get_unit_bits/pack_capsule 用默认(compute)布局 → body 宽度/字段错位
+        → RTL 解错（VALID 丢、s_bank 不 latch）。compute/其他 IQ（无 -s0123/-s4567 后缀）→ None（默认布局）。"""
+        suffix = iq_name.rsplit("-", 1)[-1] if "-" in iq_name else ""
+        if suffix in ("s0123", "s4567"):
+            return f"load_{suffix}"
+        return None
 
     def _handle_program_data(self, program, ur_dir, sim_conf):
         """处理 Bank 数据初始化与 Tensor 元数据映射。"""

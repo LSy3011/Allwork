@@ -1,5 +1,5 @@
 unit_name: FP16MUL
-latency: 4
+latency: 5   # ADR-048：trigger→DR 可读=5（核 4 + dr 输出寄存器 1，fp16mul.v:288/405）。锁步 pipeline_delays + modules。
 attributes:
   throughput: 1
   desc: 8-source FP16 Multiplier (S0-S7 -> D0-D7, 32 FP16 muls -> FP32, v0.4.19 表512-514)
