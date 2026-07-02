@@ -1318,7 +1318,20 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
         ar = b.make_op("UR_READ", "a_read", RT.UR_READ, [],
                        meta_name="a", logical_addr=0 * 256 + 0, stride=1,
                        role="input", iq_id=30, precision="fp16")
-        br = b.make_op("UR_READ", "b_read", RT.UR_READ, [],
+        # ADR-050 阶段 1：权重经 LDB 从外部 HBM 流式载入 bank1（非 UR 预注入）。b_read 依赖 LDB 完成
+        #   （相位隔离：LDB done 后才读 bank1，DEBT-050-VARLAT 保守上界 latency）。两条 CRU 流：
+        #   LDB_AXI（触发 AXI 读 HBM）+ LDB（写 UR bank1）。ur_addr=bank1 字节基址（bank<<12=4096）。
+        b_read_deps = []
+        if getattr(self, "EMIT_LDB_WEIGHT", False):
+            lines = self.K // 8              # 每 tile 8 fp16 = 1 line(128b=16B)；K//8 lines
+            ldb_axi = b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
+                                gr_base_addr=0, gr_intlv_addr=0, brst=max(lines - 1, 0),
+                                first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0)
+            ldb = b.make_op("LDB", "ldb", RT.LDB, [ldb_axi], iq_id=50,
+                            ur_addr=(1 << 12), ur_wr_line_cnt=lines, line_byte_cnt=16,
+                            line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0)
+            b_read_deps = [ldb]
+        br = b.make_op("UR_READ", "b_read", RT.UR_READ, b_read_deps,
                        meta_name="b", logical_addr=1 * 256 + 0, stride=1,
                        role="input", iq_id=31, precision="fp16")
         rt_a = b.make_op("RTOVR", "rt_a_FP16MUL_S0", PS.FP16MUL_S0, [ar])
@@ -1374,7 +1387,40 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
                                 "inner_inc": 1, "outer_inc": 0})
         out = next(o for o in ops if o.trace_id == "out_obj_0")
         out.metadata.update({"inner_inc": 0, "outer_inc": 0, "stride": 0})
+        # ADR-050：LDB 一次性搬运整 tile（K//8 lines 由 ur_wr_line_cnt 一条指令写完），非逐迭代循环
+        #   → inner_loops=0（否则会被当 compute 循环体逐拍重发）。
+        for op in ops:
+            if op.op_type.upper() in ("LDB", "LDB_AXI"):
+                op.metadata.update({"shape": [1], "inner_loops": 0, "inner_inc": 0})
         return ops
+
+
+class ManualFp16MatmulK16LdbOperator(ManualFp16MatmulK16Operator):
+    """ADR-050 阶段 1：K=16 matmul，权重经 **LDB 从外部 HBM 流式载入**（非 UR 预注入）。
+    验 LDB load-to-UR 全链：预载权重进 HBM memory_init0.hex → LDB_AXI(AXI 读)+LDB(写 bank1) →
+    b_read(依赖 LDB done) → 复用 K16 累加 matmul → VCS bank5 bit-match。单-SMC、连续 tile、无 fill/交织。
+    inject 侧：a 正常注入 bank0；b **不注入 UR**（改写 HBM hex，see prepare_hbm_hex）。"""
+    EMIT_LDB_WEIGHT = True
+
+    def inject_data(self, program, input_data, vector_lanes, spec=None):
+        # 单-SMC 注入入口（pipeline_runner:122）。仅注入激活 a 到 bank0；权重 b **不进 UR**
+        #   （经 LDB 从 HBM 载入 bank1）→ 这样 VCS 才真测 LDB：bank1 起始空，靠 LDB 填。
+        a_addr = self.get_bank_addr("a", spec)
+        program.inject_vector(a_addr, input_data["a"], stride=1)
+
+    def prepare_hbm_hex(self, input_data):
+        """把权重 b（K fp16）按 128b/line（8 fp16/line）打包成 HBM memory_init hex 行列表（line k↔byte k×16）。"""
+        import numpy as np
+        b = input_data["b"].astype(np.float16).view(np.uint16)
+        lines = []
+        for i in range(0, len(b), 8):
+            chunk = list(b[i:i + 8]) + [0] * (8 - len(b[i:i + 8]))
+            # 128b line：lane0 在低位（与 ur_data fp16 打包一致）；hex 高位在前
+            val = 0
+            for l, w in enumerate(chunk):
+                val |= int(w) << (l * 16)
+            lines.append(f"{val:032x}")
+        return lines
 
 
 class ManualFp16MatmulK24Operator(ManualFp16MatmulK16Operator):

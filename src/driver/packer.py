@@ -2,10 +2,28 @@ from typing import List, Dict, Any
 
 # 🛸 唯一保留的静态定义：IQ Header (由于其结构在 isa_v5 层面是全局锁死的)
 ISA_V5_HEADER = {
-    "INC_EMBED": (0, 6), "INC": (6, 4), "DLY": (10, 3), "COND": (13, 7), 
-    "LOOPS": (20, 10), "EMBED_END": (30, 6), "EMBED_LOOPS": (36, 3), 
+    "INC_EMBED": (0, 6), "INC": (6, 4), "DLY": (10, 3), "COND": (13, 7),
+    "LOOPS": (20, 10), "EMBED_END": (30, 6), "EMBED_LOOPS": (36, 3),
     "JUMP": (39, 1), "VLD": (40, 1)
 }
+ISA_V5_HEADER_WIDTH = 41
+
+# ADR-050：LSU 单元（LDB/LDB_AXI/STB/STB_AXI，RTL iq_inst[24-27]）header=50bit，与 compute 41bit
+#   唯一差异 = INC 字段 4→13bit（带符号循环地址步进，须步进 15bit UR micro-addr / 40bit AXI 地址；
+#   hco RTL 取证 smi_iq.v:58「BITS_INC = (IQ 24|25|26|27)?13:4」）。其上字段 offset 整体 +9、无新增字段。
+ISA_V5_HEADER_LSU = {
+    "INC_EMBED": (0, 6), "INC": (6, 13), "DLY": (19, 3), "COND": (22, 7),
+    "LOOPS": (29, 10), "EMBED_END": (39, 6), "EMBED_LOOPS": (45, 3),
+    "JUMP": (48, 1), "VLD": (49, 1)
+}
+ISA_V5_HEADER_LSU_WIDTH = 50
+_LSU_UNITS = {"LDB", "LDB_AXI", "STB", "STB_AXI"}
+
+def _iq_header_for(u_type: str):
+    """ADR-050：按 unit_type 选 IQ header 变体（LSU 50bit / compute 41bit）。"""
+    if u_type in _LSU_UNITS:
+        return ISA_V5_HEADER_LSU, ISA_V5_HEADER_LSU_WIDTH
+    return ISA_V5_HEADER, ISA_V5_HEADER_WIDTH
 
 class BitPacker:
     """
@@ -31,10 +49,11 @@ class BitPacker:
             body_bits = grp.code_bits if grp else module.code_bits
             b_fields = grp.code_fields if grp else module.code_fields
 
-        # 1. 打包 Header (41 bits)
+        # 1. 打包 Header（ADR-050：LSU=50bit / compute=41bit，按 unit_type 选变体）
+        header_map, _hw = _iq_header_for(u_type)
         h_val = 0
         norm_header = {k.upper(): v for k, v in header_kwargs.items()}
-        for f_name, (start, width) in ISA_V5_HEADER.items():
+        for f_name, (start, width) in header_map.items():
             val = norm_header.get(f_name, 0)
             h_val |= (int(val) & ((1 << width) - 1)) << start
         
@@ -59,9 +78,10 @@ class BitPacker:
         if "UR_R" in u_type: u_type = "UR_READ"
         if "UR_W" in u_type: u_type = "UR_WRITE"
 
+        _, hdr_w = _iq_header_for(u_type)
         if u_type not in spec.modules:
-            return 41 + 16
+            return hdr_w + 16
         module = spec.modules[u_type]
         # ADR-032 D2：多微指令单元按 variant 取 body 宽度（emitter 算 IQ 流偏移须传对 variant）。
         grp = (getattr(module, "micro_groups", None) or {}).get(micro_variant) if micro_variant else None
-        return 41 + (grp.code_bits if grp else module.code_bits)
+        return hdr_w + (grp.code_bits if grp else module.code_bits)
