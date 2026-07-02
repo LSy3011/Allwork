@@ -117,7 +117,10 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 ### ✅ hco 第 4 轮根因（2026-07-02，RTL 行级）+ 方案 z
 **根因非 emit、在 RTL**：LSU IQ(24-27) 走 `smi_iq_dly_queen.v:148` 的 **outstanding/done 信用门控发射变体**（4 深 `r_executing_inst_cnt`：每发射++（含 NOP replay）、只有真 LDB 回 `crd_i[4]=done` 才--）。循环 kernel 的 NOP replay 吃信用不还 → 信用耗尽 → `dly_queen_afull=1` → `smi_iq_iic` 所有 loop-replay 分支被 `~afull` 冻结 → body 永不 fetch。UR/compute IQ 走 free-run 无门控变体（crd_i=0）故循环正常。单-shot 能发=发射条数≤4。iic 循环状态机 LSU/compute **无差异**（分叉全来自 dly_queen 变体）。COND 否决（EN_COND=0 编译期常量）、INIT stagger 无关。
 **方案 z（hco 推荐）**：unrolled 多条单-shot LDB（每 tile LOOPS=0，绕 replay 通路、每条真 LDB 回 done 自 drain 信用）。已落码（EMIT_LDB_STREAM 改 unrolled，commit 见 git）。
-🟠 **VCS 部分通（待续）**：K32-stream bank5=80.14（部分，golden 268），**bank1[0..2]=0 只 bank1[3] 写** —— 4 条 unrolled LDB 只**末条** fire。待续查：疑 credit 只 1 in-flight 完成 / inst_id 配对（各 i%4 distinct）/ kernel slot 交互；末条写而非首条 → 非简单信用耗尽（否则首条应写）。可能 4 条 ldb 在同 II=4 kernel 4 slot 的发射-完成时序问题，或多条同 iq 的 done 回流/inst_id 匹配。
+🟠 **VCS 未通（诊断完整，DEBT-050-UNROLL）**：波形追 4 条 ldb done 时序定位——**LDB_AXI FSM 单描述符寄存器**：背靠背发射（o_cru_ldb_axi 连续拍 1912/13/14）被覆盖 → 只**末条**发 AXI 读（arvalid 1 次 @1915→rvalid@1920→写 bank1[末]@1927）→ 只 1 tile 写、bank5 部分。
+**根本约束冲突（新发现）**：unrolled 多-LDB 需**同时**满足：(a) tile 内 ldb_axi_i/ldb_i **同拍**（stage-1 证：错拍→写 FSM 不 latch→bank1=0）；(b) tile 间**间隔**（LDB_AXI 单描述符 reg，背靠背覆盖）。当前 dep 机制**难兼得**：无 dep → 满足(a)违(b)（4 条同排背靠背→只末条写）；串行 dep → 满足(b)违(a)（ldb_axi/ldb 被拉不同拍→bank1 全空）。
+**修向（DEBT-050-UNROLL）**：需能表达「tile 内同拍 + tile 间隔 N 拍」的调度约束（ldb_axi_i/ldb_i 同挂 loop-carried 或显式 abs_t 锚定 + DLY 间隔），或硬件 done-COND 串行（EN_COND 需 RTL 开）。
+**对齐理解**：`outstanding=4` = 4 条在途上限（信用），非总数封顶（done 回流可发>4、节流非封顶）；LDB 单描述符 reg 才是背靠背覆盖的真因。
 **DEBT-050-LSU-LOOP**：真 O(1) UR 循环 LDB 流式需 RTL 债务解（信用不计 NOP / iq_II=1 消 NOP）。当前 unrolled 多-LDB 是 UR-bounded（N line，K≤~1 bank）非 O(1)。
 
 ### 其余阶段 2（deferred）
