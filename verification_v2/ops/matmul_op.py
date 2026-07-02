@@ -1331,6 +1331,13 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
             #   复用已 VCS 证的单-shot 路径；每条真 LDB 回 done 自 drain 信用、不死锁）。tile i：gr_base_addr=i×16
             #   读 HBM line i、写 bank1 byte offset i×16。b_read stride=1 读 bank1[0..N-1]（UR 用 N line，K≤~1 bank）。
             #   真 O(1) UR 循环 LDB 流式待 RTL 债务解（DEBT-050-LSU-LOOP：信用不计 NOP / iq_II=1）。
+            # 🔴 未通（VCS 诊断，待续 DEBT-050-UNROLL）：unrolled 多-LDB 需**同时**满足两约束，当前 dep
+            #   机制难兼得：(a) tile 内 ldb_axi_i/ldb_i **同拍**（stage-1 证：错拍→写 FSM 不 latch，bank1=0）；
+            #   (b) tile 间**间隔**（VCS 证：LDB_AXI FSM 单描述符寄存器，背靠背发射被覆盖→只末条发 AXI 读→
+            #   只 1 tile 写）。无 dep（下方）→ 满足(a) 违(b)：4 条同排背靠背→只 bank1[末] 写。加 tile 间 dep
+            #   串行→满足(b) 违(a)：ldb_axi/ldb 被拉到不同拍→bank1 全空。**修向**：需能表达「tile 内同拍 +
+            #   tile 间隔 N 拍」的调度约束（如 ldb_axi_i/ldb_i 同挂 loop-carried 或显式 abs_t 锚定 + DLY 间隔），
+            #   或换硬件 done-COND 串行（EN_COND 需 RTL 开）。
             nt = self.K // 8
             all_ldb = []
             for i in range(nt):
@@ -1341,7 +1348,7 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
                                   ur_addr=(1 << 12) + i * 16, ur_wr_line_cnt=1, line_byte_cnt=16,
                                   line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=i % 4)
                 all_ldb.append(ldb_i)
-            b_read_deps = all_ldb    # b_read 依赖所有 LDB 完成（相位隔离，DEBT-050-VARLAT 保守）
+            b_read_deps = all_ldb
         elif getattr(self, "EMIT_LDB_WEIGHT", False):
             lines = self.K // 8              # 每 tile 8 fp16 = 1 line(128b=16B)；K//8 lines
             # hco 契约：两条 CRU（AXI 读侧 + UR 写侧）**必须同拍发射**（ldb 写侧 FSM latch 描述符、
