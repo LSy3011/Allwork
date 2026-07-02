@@ -1363,8 +1363,12 @@ class ManualFp16MatmulK16Operator(ManualFp16MatmulOperator):
             ldb_axi = b.make_op("LDB_AXI", "ldb_axi", RT.LDB_AXI, [], iq_id=51,
                                 gr_base_addr=0, gr_intlv_addr=0, brst=max(lines - 1, 0),
                                 first_byte_strb=0, last_byte_strb=0, tid=0, inst_id=0)
-            # ⚠ VCS 实证：line_byte_cnt 是**总字节数**（非每行）——设 16 时 beat0 用满、beat1 余量塌成
-            #   1 字节 we=0x0001（line1 只落 1 字节）。设 16×lines（全 tile 总字节）→ beat1 we=0xffff。
+            # 配法（stage-1 VCS 证 K16/K32/K128 bit-match）：ur_wr_line_cnt=lines / line_byte_cnt=16×lines /
+            #   line_stride=0。⚠ 文档表57 语义是 line_byte_cnt=每行字节(≤511)/line_stride=行距(16×)，本配法
+            #   是「单逻辑行含全 tile 连续字节」的等价特例；文档-per-line 配法(line_byte_cnt=16/stride=1)在 K128
+            #   通但 K32 nan(小行数回归,待查) → 暂用已证特例。🔴 **单条 LDB 真上限=16 行=K128**（brst 4-bit
+            #   ≤15=16 beats，非 line_byte_cnt/ur_wr_line_cnt 限）。K>128 须多条 16-行-chunk LDB（每条 brst=15，
+            #   4 深队列串行；避 1-line brst=0 死锁）——待续 DEBT-050-KGT128。
             ldb = b.make_op("LDB", "ldb", RT.LDB, [], iq_id=50,
                             ur_addr=(1 << 12), ur_wr_line_cnt=lines, line_byte_cnt=16 * lines,
                             line_stride=0, const=0, pre_fill=0, post_fill=0, inst_id=0)
