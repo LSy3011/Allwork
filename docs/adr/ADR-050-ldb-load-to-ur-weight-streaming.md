@@ -110,7 +110,9 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 ### 🟠 循环 LDB 实现进度（2026-07-02，commit 800b482，emit 正确/VCS 执行 bug 待续）
 **三步已落**：①assembler is_memory_iq 加 "ldb"（pytest 186 安全，单-shot 不受影响）②K16 get_dfg 加 EMIT_LDB_STREAM 分支（LDB_AXI stride=16/LDB stride=0 驻留/b_read stride=0 驻留/两 CRU 同拍均挂 WAR loop-carried←b_read:8/LDB inner_loops 保留）③ManualFp16MatmulK32StreamLdbOperator（fp16_matmul_k32_stream_ldb）。
 **emit 验证正确**：iq_ldb-axi HDR LOOPS=3+INC=16、body INC_EMBED=0x01；iq_ldb HDR LOOPS=3+ur_addr=4096 驻留；两 CRU 同拍 t=10；II=48（WAR 强制）。
-🔴 **VCS 执行 bug（待续）**：循环模式 `o_cru_ldb`/`o_cru_ldb_axi` **全程不发射**（events=0）→ bank1=0/bank5=0。单-shot（K16/K128 LDB）能发射、循环不发。**下一步查**：loop kernel replay（HDR LOOPS=3）与 SMI fetch/dispatch 交互 / II=48 slot 位置 / 驻留 b_read(stride=0) 对 schedule/INIT 的影响。带波形追 SMI 的 LDB IQ fetch（为何 VALID slot 在 loop kernel 里没被 issue）。疑与单-shot 的差异=INIT/HDR LOOPS 结构 or 大-II kernel 的 LDB body slot 未被 replay 命中。
+🔴 **VCS 执行 bug 根因定位（波形，2026-07-02）**：`iq_inst_vld` **bit26(LDB)/bit27(LDBAXI) 只在起始 2 拍(cyc15065-67=INIT+HDR)置高、之后不 replay**；bit2(fp16mul)10 次、bit17(ur-r1/b_read)9 次贯穿循环。→ **LDB IQ 处理完 INIT+HDR 就停、不 replay kernel body**（body slot10 从不 fetch → o_cru_ldb 恒 0 → bank1=0）。
+**关键对照**：ldb 与 ur-r1 hex **结构完全相同**（INIT/HDR LOOPS=3/EMBED_LOOPS=1/EMBED_END@line49，仅 body slot 12 vs 4），但 ur-r1 循环正常、ldb 不循环（ldb INIT LOOPS=0 skip=0 vs ur-r1 INIT LOOPS=48）。→ **SMI 对 LSU IQ(slot 24-27) 的 loop-replay 机制 ≠ UR/compute IQ**（同结构不同行为）。这解释单-shot(LOOPS=0 无需 replay)能发、循环(LOOPS=3 需 replay)不发。
+**下一步 = hco 第 4 轮**：取证 smi_iq LSU IQ(24-27) 的 loop/EMBED replay 机制——是否被 **outstanding/done 握手门控循环推进**（LSU IQ 须等 LDB inst 完成才 replay，异于自由 replay 的 compute/UR IQ）、或 LSU 循环另有 RTL 要求（smi_iq.v LOOP_CYCLE/EMBED_LOOP + LSU 分支 vs compute/UR 分支）。据此定 emit 侧循环 LDB 的正确 replay 编码。
 
 ### 其余阶段 2（deferred）
 2D stride/line 语义、pre/post fill、per-SMC 交织(gr_intlv 真跨-SMC 分散)、并发 LDB+compute(端口冲突 SMT axiom, ADR-008 延伸)、LDB done-握手变延迟建模。
