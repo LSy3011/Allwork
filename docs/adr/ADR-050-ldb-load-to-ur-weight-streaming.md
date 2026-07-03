@@ -148,10 +148,11 @@ LDB 无固定 latency（DMA+done）。阶段 1 **不建模握手事件**，改�
 
 **当前状态**：K256 多-chunk = 对称 explicit-N，**chunk0 正确、chunk1 塌缩、非 bit-match**。explicit-N + level=0 顺序 fire 机制已落 assembler（`explicit_descriptor` metadata gate，单-chunk K≤128 零回归走已证循环路径）。删了无效的 `same_cycle_as`（ucode_solver §2.6）。
 
-**契约级正解（待定，需 user/owner 决断）**：
-- **[主推,silicon-safe] done-握手串行**：chunk_{i+1} IQ 发射 gate 在 chunk_i 的 LDB done（`smi_iq_iic.v:277,430-444` COND/crd 机制）→ chunk0 流排空后 chunk1 才入 → residue 干净。**= memory「升 Accepted 转 done-握手」roadmap**。⚠ 阻塞：hco 第4轮记 `EN_COND=0 编译期常量`（RTL cond 通路可能禁用）→ **需 owner 确认 EN_COND 可开 + RTL cond→LDB-done crd 接线 VCS 验证**。
-- **[已证伪] 非对称 1-write/N-read**：RTL 要求 1:1 配对。
+**契约级正解（两候选均 RTL-blocked，确认，2026-07-03）**：
+- **[主推,silicon-safe 但 RTL-blocked] done-握手串行**：chunk_{i+1} IQ 发射 gate 在 chunk_i 的 LDB done（`smi_iq_iic.v:277,430-444` COND/crd 机制）→ chunk0 流排空后 chunk1 才入 → residue 干净。**= memory「升 Accepted 转 done-握手」roadmap**。🔴 **阻塞确认**：`EN_COND` 在 `smi_iq.v:63` 模块默认 = **0**，`smi_top.v:366/390/461` 的**所有 smi_iq 实例化均不 override** EN_COND（LSU IQ 的 `SMI_IQ_LSU_INST` 宏也不设）→ 0 向下传给 `smi_iq_iic`/`dly_queen`（覆盖其局部 `=1` 默认）→ **COND/crd 通路 hard-disabled**（`if(EN_COND)` 分支恒不走，`{EN_COND==1}` 恒 pack 0）。全仓无任何 `EN_COND(1)` override。→ done-握手**须 RTL 改 param（LSU IQ 实例 EN_COND=1）+ cond→LDB-done crd 接线**，纯编译器侧不可解、= owner。
+- **[已证伪] 非对称 1-write/N-read**：RTL 要求 LDB:LDBAXI 1:1 配对（VCS bank1=0）。
 - **[排除] NOP-spacing 撑开 abs_t**：开环猜变延迟 HBM、非硅安全，违「时序要算不要调」。
+- **结论**：K>128 的两条契约级路径（多写 residue re-baseline / done-握手 EN_COND）**均须 RTL owner 改**，纯编译器侧无解 → defer 决策确认正确。owner 反馈需**两项**：DEBT-050-LDB-STREAM-REBASE（写侧缓冲 re-baseline）+ EN_COND=1 enable（LSU IQ 实例，供 done-握手）。
 
 **RTL 债务（本仓不改，反馈 owner）**：DEBT-050-LDB-STREAM-REBASE（写侧 `r_array_head_post`/`r_array_tail_post`/`r_axism_s_residue_byte_sum` 未按描述符 re-baseline + :1212-1222 组合 latch）。K>128 完整支持 blocked on 此债务解 或 EN_COND done-握手。
 
