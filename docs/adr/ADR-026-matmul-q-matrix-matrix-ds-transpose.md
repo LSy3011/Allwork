@@ -136,6 +136,14 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 - **修 Q2 探针 3-bug（post-override 保 Q2 M=1 不动）**：① a_read stride 4→1（逐行进一词）；② temp_write/read `stride=1/inner_inc=1`（逐行 distinct cell 避跨行覆盖 —— **注**：hco 初判 stride=0 transient，实测跨行覆盖污染 channel，改逐行 distinct 后 y bit-match）；③ w{c}_read `stride=0/inner_inc=0`（权重 4 列固定跨行复用）+ **b{c} auditor key 平铺 M 份**（matmul_q 手法，消 rigid-audit ITER≥1 期望 0 假阳性）。
 - 否决去 temp-bank（撞回结构性 UNSAT，ADR-026 v1 已证死路）。
 
+### Stage-2c 落地（2026-07-03）：核 ✅ + 合体路径分析
+**核 ✅**：`matmul_q_multitile`（M=1 × 4 列 × 多-tile K，K=8/12/16 全 8/8）—— cumulative addtree 跨 tile 累加（4 通道各累加自己列的 T 个 tile-partial + loop_carried 自环 II≥4，同 fp16 line 5to1）；tile 循环 inner_inc=1、列 c tile t 在 word c*T+t、输出单词原地累加。
+
+**M>1 × 多-tile 合体（待做）路径裁定**：
+- 🔴 **(row,col)→8 通道被排除**：M×COLS≤8（M=2 时 8 通道）需**一拍 8 读** temp（8 通道喂单 addtree）→ **撞 4 读端口上限**（hco：物理不可能）+ 8 temp bank 但只 5 空 bank。**弃**。
+- 🔴 **cumulative addtree 直接 M 行**：M 行串行复用同 4 通道 → row i+1 累加 row i 残值（VCS/e2e 实证：M=2 multitile sim=155 vs ref=66，跨行累加无 reset）。**弃**。
+- ✅ **唯一正解 = spill 2-phase**（hco Q2 主线）：Phase1 每 (row,tile) 4-col 非累加 partial → spill bank7 word；Phase2 每行 FPADD 归约 T 个 spill 词 → 输出。绕开 addtree 内部累加器 → 无 reset、任意 M。**代价**：2 相 loop 结构（Phase1 M×T 迭代 / Phase2 M 迭代 + T-way FPADD 归约）+ phase barrier，是全新 DFG，须多轮 e2e 迭代（同 Stage-2b/2c-核 的收敛过程）。
+
 ### 后续 Stage backlog
 | Stage | 内容 | 依赖 | 是否需 DS |
 |---|---|---|---|
