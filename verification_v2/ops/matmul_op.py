@@ -1030,6 +1030,42 @@ class ManualMatmulQMultiRowOperator(ManualMatmulQ2Operator):
         return ops
 
 
+class ManualMatmulQMultiTileOperator(ManualMatmulQ2Operator):
+    """ADR-026 Stage-2c 核：M=1 × cols_per_smc=4 × **多-tile K**（大 K）。
+    单左行 → 无跨行 accumulator reset 问题 → 直接用 **cumulative addtree 跨 tile 累加**（4 通道各累加自己列
+    的 T 个 tile-partial，loop_carried 自环 II≥4，同 fp16 line 的 5to1 机制）。tile 循环：a_read/w{c}_read/
+    temp 逐 tile 前进（inner_inc=1），列 c 的 tile t 在 bank1 word c*T+t。输出单词原地累加（inner_inc=0）。
+    M>1 多行 × 多-tile 需 spill（Stage-2c-full，跨行 reset），此核先打通「4-col × 多-tile」。"""
+    M = 1
+    K = 8       # T = K//4 = 2 tiles
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        ops = super().get_dfg(spec)
+        T = self.K // 4
+        for op in ops:
+            tid = op.trace_id
+            # 全 compute op 循环维改为 tile（T 迭代）
+            if tid.startswith(("init_", "hdr_", "nop_")):
+                continue
+            op.metadata["inner_loops"] = T - 1
+            op.metadata["outer_loops"] = 0
+            if tid == "a_read":
+                op.metadata.update({"stride": 1, "inner_inc": 1})           # 逐 tile 读 X[tile]
+            elif tid.startswith("w") and tid.endswith("_read"):
+                c = int(tid[1:tid.index("_")])
+                op.metadata.update({"stride": 1, "inner_inc": 1,
+                                    "logical_addr": 1 * 256 + c * T})        # 列 c tile t = word c*T+t
+            elif tid.startswith("temp_write") or tid.startswith("temp_read"):
+                op.metadata.update({"stride": 1, "inner_inc": 1})            # 逐 tile distinct temp cell
+            elif tid == "y_0":
+                op.metadata.update({"cumulative": True,                      # 跨 tile 累加（4 通道各自）
+                                    "loop_carried_depends_on": {"y_0": 4},   # 5to1 自环 II≥4
+                                    "inner_inc": 0})
+            elif tid.startswith("out"):
+                op.metadata.update({"stride": 0, "inner_inc": 0})            # 单输出原地（累加终值）
+        return ops
+
+
 class ManualMatmulOperator(BaseOperator):
     """
     手动编排的 Matmul DFG。

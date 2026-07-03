@@ -12,7 +12,7 @@ from verification_v2.infra.auditor import Auditor
 from verification_v2.ops.horner import HornerOperator
 from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
-from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualMatmulQMultiRowOperator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK16LdbOperator, ManualFp16MatmulK128LdbOperator, ManualFp16MatmulK256LdbOperator, ManualFp16MatmulK32StreamLdbOperator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulK2048Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
+from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualMatmulQMultiRowOperator, ManualMatmulQMultiTileOperator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK16LdbOperator, ManualFp16MatmulK128LdbOperator, ManualFp16MatmulK256LdbOperator, ManualFp16MatmulK32StreamLdbOperator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulK2048Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
 from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator, UnitDstVec128Operator
 
@@ -45,6 +45,7 @@ OPERATOR_MAP = {
     # ADR-026 Stage-2a：Matmul_Q cols_per_smc=4 密集打包（local-buffer 修法）
     "matmul_q2": ManualMatmulQ2Operator,
     "matmul_q_multirow": ManualMatmulQMultiRowOperator,  # ADR-026 Stage-2b: M>1 × 4列 × 单tile
+    "matmul_q_multitile": ManualMatmulQMultiTileOperator,  # ADR-026 Stage-2c核: M=1 × 4列 × 多tile K
     # ADR-032 S1：FP16 推理 matmul 最小通路（FP16MUL + FP32ADDTREE8TO1，单 SMC K=8）
     "fp16_matmul_min": ManualFp16MatmulOperator,
     # DEBT-025-MULTITILE 首步（hco APPROVE 候选①）：fp16 K=16 = 2 tile，8to1 片内 + 5to1 accumulate 片间

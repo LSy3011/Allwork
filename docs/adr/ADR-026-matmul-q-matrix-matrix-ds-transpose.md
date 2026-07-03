@@ -141,7 +141,7 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 |---|---|---|---|
 | ~~**Stage-2a**~~ ✅ | cols_per_smc=4 → 单 addtree 4 通道密集 4/词打包（**DEBT-026-PACK 已落地，8/8 exit=0**，model-A 预分发激活）。广播-到-4列 忠实通路 → ADR-027（DEBT-026-BCAST-MULTI，gated on RTL 表 78/79） | 复用现有 | 否（预排激活） |
 | ~~**Stage-2b**~~ ✅ | M>1 多行 × 4 列 × 单 tile（`matmul_q_multirow`，**M=2/3/4 全 8/8 exit=0**，2026-07-03，hco Structure-B 裁定 agentId a9ee156f78d8c081d） | hco ✓ | 否 |
-| **Stage-2c** | 大 K 多-tile（K=4096）→ 部分和写回 UR + 跨 tile 累加（解 DEBT-025-MULTITILE） | — | 否 |
+| 🟡 **Stage-2c** | 大 K 多-tile → 跨 tile 累加。**核 ✅**（`matmul_q_multitile` M=1×4列×多tile，K=8/12/16 全 8/8，cumulative addtree 跨 tile+loop_carried，2026-07-03）；**M>1×多tile 合体**（spill）待做 | — | 否 |
 | **Stage-3 (DS)** | `ShuffleUnit` + modules.yaml DS 条目 + 非转置间插 在线转置 + 上下行握手 | **DEBT-026-DS-FIELDS（user RTL 表 587/588 逐字段位宽）+ hco** | 是（本体） |
 | **Accepted** | 8-SMC 固件 vs VCS 实测背书 | user RTL/VCS | — |
 
