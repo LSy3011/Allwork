@@ -1066,6 +1066,141 @@ class ManualMatmulQMultiTileOperator(ManualMatmulQ2Operator):
         return ops
 
 
+class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
+    """ADR-026 Stage-2c 合体：M>1 × cols_per_smc=4 × 多-tile K —— **unroll-M + loop-T + 每行独立累加器**。
+
+    **映射 A（忠实 Matmul_Q，SMC=列，user 2026-07-03「追求性能」裁定）**：每 SMC 持自己 COLS 列权重
+    （partitioned）、激活 model-A 预分发、产 M 行 × COLS 列输出。8 SMC 并行 = N-列维度（表 710/711
+    钦定：广播激活+列分区权重——权重大且跨行复用→常驻分区、UR 容量友好；行/K 拆到 SMC 需全量权重广播
+    撞 UR 256KB 上限，性能劣，见 memory ur-bank-capacity-and-llm-fit）。
+
+    **结构（第三条路，绕开 spill）**：K tile 走**时间循环**（num_iter=T，贴合硬件+性能友好），M 行**空间
+    展开**成 M 个独立子块，**每行一个自己的 cumulative addtree**（distinct op → distinct 输出寄存器/累加器
+    → 跨 tile 用 loop_carried 自环 II≥4 累加自己那行的 T 个 tile-partial）。等价于 matmul_q_multitile(M=1)
+    复制 M 份、共享物理单元（SMT 串行化）。
+    - **不是**被排除的「(row,col)→8 通道」（那是**单** addtree 8 读撞 4 端口）；
+    - **不是**被排除的「M 行共用一个 addtree」（那是时间串行复用同一累加器 → 跨行残值）；
+    - 是 **M 个 distinct 累加器**，各用一次、无 reset 需求 → 无跨行污染。hco spill 裁定是在**广播**前提下
+      （多广播源 sim gap 挡住 M-unroll）；**model-A 下每行读自己 bank0 激活、无广播 → 这条路打开**。
+
+    **为何弃 full-unroll spill（2026-07-03 实测）**：先按 handoff 全展开 M×T×COLS=16 FPMUL + Phase2 FPADD
+    归约 → SMT ~170 op / II≥16，z3 II 17-24 全 UNKNOWN(超时)、300s 预算耗尽（既 SMT-hostile 又固件膨胀、
+    性能差）。本结构 ~M×(Q2 块) op、II≥COLS·... 小得多，且 K 循环=真实规模可扩（full-unroll 不可扩）。
+    **DEBT-026-FULL-BCAST**：model-A 预分发激活（非广播 SHIFTUP），广播通路忠实留循环版 multirow/multitile。
+
+    **distinct meta_name key**：a 塑 (M,K)→num_iter=T；auditor 每 iter 读 input_data[meta][t*lanes:]，
+      每行 a key `a_row{r}`=X[row r]（K 值，tile t=[t*4:(t+1)*4]）、每列 w key `b{c}`=W[col c]（避
+      rigid-audit 假阳性，Stage-2b/2c 手法）。cumulative addtree 的 acc_state 按 trace_id 分离 → 各行独立累加。
+
+    ⚠⚠ **当前状态：BLOCKED（2026-07-03，e2e 未过，非算子 bug，是管线基建墙）** ⚠⚠
+    SMT 秒解（II=11）但 8/8 全错。**根因**：`assembler.py` 的 loop 计数是**每-IQ 从该 IQ 的 global_t
+    t-span 推**（`loops_val = max_t_global//iq_II + num_iter - skip - 1`，为紧凑单-recurrence 调度设计）。
+    M 行空间展开后**同一物理 IQ 挂多行 op**（如 ur-r0 同时有 row0+row1 的 a/temp 读、addtree IQ 同时有
+    y_r0/y_r1），跨 II 窗 → **各 IQ loop 计数不一致（实测 1 vs 2）** → cumulative addtree 迭代数错乱、
+    over-accumulate（row0 sim=208 vs golden=66）+ 调度铺开致 sim 超时截断（row1 ITER1 missing）。
+    matmul_q_multitile(M=1) 能通正因每 IQ op 落单 II 窗；**M>1 一进来即撞此墙**。solver 无 makespan 最小化
+    （纯 satisfiability）故独立子块被 slack 铺开加剧（试 env makespan cap 收紧但没法让各 IQ span 一致）。
+    **真正的忠实+高性能解需基建**（hco+ADR）：① assembler 2-level 嵌套循环（M 外/T 内，sim iq_unit 已支持
+    8-level，缺 assembler 生成；但 cumulative 跨外循环 reset 仍需配 spill）；或 ② assembler 用已知
+    num_iterations 推 compute loop 计数（非 t-span）。备选里程碑：full-unroll(num_iter=1，无 loop 病，但
+    COLS=4→16 FPMUL→II≥16 z3 UNKNOWN 超时；COLS=2 可解但不忠实)。**下步方向待 user 裁定（AskUserQuestion
+    已问、user 暂离）**。DEBT-026-MROW-MULTITILE-LOOPCNT。
+    """
+    parallel_dim = "N"
+    M = 2               # 多左行（M>1）
+    COLS = 4            # cols_per_smc（真 Matmul_Q）
+    K = 8               # T = K//4 = 2 tiles
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        rng = np.random.default_rng(0)
+        M, K, COLS = self.M, self.K, self.COLS
+        a = rng.uniform(1.0, 5.0, M * K).astype(np.float32)               # X[M,K] flat
+        b = rng.uniform(1.0, 5.0, (smc_num, COLS * K)).astype(np.float32)  # 每 SMC COLS 列 × K
+        # a 塑 (M,K)：shape[-1]=K → num_loop_iters=T（tile 循环）。get_golden 仍 reshape(M,K)。
+        out = {"a": a.reshape(M, K), "b": b}
+        # per-row a key：a_row{r}=X[row r]（K 值），auditor iter t 读 [t*4:(t+1)*4]=tile t
+        for r in range(M):
+            out[f"a_row{r}"] = a[r * K:(r + 1) * K].copy()                 # (K,)
+        # per-col weight key：b{c}=W[col c]（smc, K），auditor iter t 读 tile t（跨行复用同列）
+        for c in range(COLS):
+            out[f"b{c}"] = b[:, c * K:(c + 1) * K].copy()                  # (smc, K)
+        return out
+
+    def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
+                            vector_lanes: int, spec: Any = None):
+        a = np.asarray(input_data["a"]).flatten().astype(np.float32)      # M*K
+        b = input_data["b"]
+        a_addr = self.get_bank_addr("a", spec)
+        b_addr = self.get_bank_addr("b", spec)
+        for k, prog in enumerate(programs):
+            prog.inject_vector(a_addr, a, stride=1)      # model-A：每 SMC bank0 全量激活（row r tile t = word r*T+t）
+            prog.inject_vector(b_addr, b[k], stride=1)   # bank1：COLS*K 权重（col c tile t = word c*T+t）
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        b = MIROpBuilder()
+        M, COLS = self.M, self.COLS
+        T = self.K // 4
+        temp_banks = [2, 3, 4, 6]
+
+        # M 行空间展开：每行一个独立子块（Q2 4-col 单 addtree 机制 + 每行自己的 cumulative 累加器）。
+        for r in range(M):
+            rt_sums = []
+            for c in range(COLS):
+                # a-read：行 r 起始 word r*T，stride=1 → 循环第 t 拍读 word r*T+t（=X[row r, tile t]）。
+                #   4 列共读行 r 同一 tile 词（同址 R-R 豁免；strict RTOVR latch 下不能共享单读 → 4 份 distinct）。
+                a_loc = b.make_op("UR_READ", f"a_r{r}c{c}", RT.UR_READ, [],
+                                  meta_name=f"a_row{r}", logical_addr=0 * 256 + r * T, stride=1,
+                                  role="input", iq_id=30 + (c % 2) * 2)
+                # w-read：列 c 起始 word c*T，stride=1 → 第 t 拍读 word c*T+t（=W[col c, tile t]）。跨行复用同列。
+                w_c = b.make_op("UR_READ", f"w_r{r}c{c}", RT.UR_READ, [],
+                                meta_name=f"b{c}", logical_addr=1 * 256 + c * T, stride=1,
+                                role="input", iq_id=31 + (c % 2) * 2)
+                rt_a = b.make_op("RTOVR", f"rt_a_r{r}c{c}_FPMUL_S0", PS.FPMUL_S0, [a_loc])
+                rt_w = b.make_op("RTOVR", f"rt_w_r{r}c{c}_FPMUL_S1", PS.FPMUL_S1, [w_c])
+                mul = b.make_op("FPMUL", f"mul_r{r}c{c}", RT.FPMUL, [rt_a, rt_w], iq_id=3)
+                write_ps = getattr(PS, f"UR_W{c}_S")
+                rt_write = b.make_op("RTOVR", f"rt_mul_r{r}c{c}_{write_ps.name}", write_ps, [mul], sel=3)
+                # temp 重定时：行 r 列 c 每 tile distinct cell（bank[c] 起始 r*T，stride=1 → 第 t 拍 word r*T+t）。
+                tw_addr = temp_banks[c] * 256 + r * T
+                twrite = f"tw_r{r}c{c}"
+                b.make_op("UR_WRITE", twrite, RT.UR_WRITE, [rt_write],
+                          logical_addr=tw_addr, stride=1, role="intermediate", iq_id=36 + (c % 3))
+                tr = b.make_op("UR_READ", f"trd_r{r}c{c}", RT.UR_READ, [twrite],
+                               logical_addr=tw_addr, stride=1, role="intermediate", iq_id=30 + c)
+                rt_sum = b.make_op("RTOVR", f"rt_trd_r{r}c{c}_FP32ADDTREE5TO1_S{c}",
+                                   getattr(PS, f"FP32ADDTREE5TO1_S{c}"), [tr])
+                rt_sums.append(rt_sum)
+            # 行 r 自己的 cumulative addtree（4 通道 S0..S3）：跨 tile 累加（loop_carried 自环 II≥4，同 multitile）。
+            y_sum = b.make_op("FP32ADDTREE5TO1", f"y_r{r}", RT.FP32ADDTREE5TO1, rt_sums,
+                              cumulative=True, reduction_per_channel=4,
+                              loop_carried_depends_on={f"y_r{r}": 4}, iq_id=26)
+            rt_out = b.make_op("RTOVR", f"rt_y_r{r}_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+            # 输出词 r（bank5）：cumulative 终值原地写（stride=0，末 tile 迭代=全 K 累加）。
+            b.make_op("UR_WRITE", f"out_r{r}", RT.UR_WRITE, [rt_out],
+                      logical_addr=5 * 256 + r, stride=0, role="output", is_output=True, iq_id=35)
+
+        ops = b.get_dfg()
+        for op in ops:
+            if op.op_type.upper() == "RTOVR":
+                prod_ids = op.metadata.get("depends_on", [])
+                if prod_ids:
+                    prod_id = prod_ids[0]
+                    for consumer in ops:
+                        if op.trace_id in consumer.metadata.get("depends_on", []):
+                            consumer.metadata.setdefault("rtovr_deps", {})[prod_id] = {
+                                "dvr": op.metadata.get("dvr", -1),
+                                "sel": op.metadata.get("sel", -1),
+                            }
+        # 循环维 = tile（T 迭代）。a/w/temp 逐 tile 前进（inner_inc=1）；输出原地累加（stride=0/inner_inc=0）。
+        for op in ops:
+            tid = op.trace_id
+            op.metadata.update({"shape": [self.K], "inner_loops": T - 1, "outer_loops": 0,
+                                "inner_inc": 1, "outer_inc": 0})
+            if tid.startswith("out"):
+                op.metadata.update({"stride": 0, "inner_inc": 0})
+        return ops   # model-A（非广播）→ 不注入 shiftup
+
+
 class ManualMatmulOperator(BaseOperator):
     """
     手动编排的 Matmul DFG。
