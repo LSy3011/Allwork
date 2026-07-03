@@ -174,10 +174,10 @@
       <h1>Matmul 数据流动图</h1>
       <p class="lede">当前测试通过的 fp16 matmul 示例，如何把激活与权重从 UR/HBM 一路搬过乘法器、两级加法树、累加环，落到输出 bank。</p>
       <div class="stats">
-        <div class="stat"><b>9</b><span>通过示例（e2e）</span></div>
-        <div class="stat"><b>8</b><span>VCS bit-match 硅证</span></div>
+        <div class="stat"><b>2</b><span>设计文档示例<br>向量×矩阵 + 矩阵×矩阵</span></div>
+        <div class="stat"><b>9</b><span>VCS bit-match 硅证</span></div>
         <div class="stat"><b>2</b><span>归约层级（片内 + 片间）</span></div>
-        <div class="stat"><b>1</b><span>单-SMC 单列累加核</span></div>
+        <div class="stat"><b>16</b><span>SMI_DS_T 转置延迟（拍）</span></div>
       </div>
     </div>
   </header>
@@ -187,7 +187,7 @@
     <!-- ========== 0. 示例表 ========== -->
     <section>
       <div class="sec-h"><span class="sec-n">00</span><h2>通过的示例</h2></div>
-      <p class="sec-sub">同一累加核的参数化（K）与并行化（列 / SMC）扩展。<span class="m">*_ldb</span> 权重经 HBM 载入，Python sim 不建模，只能 VCS 验。</p>
+      <p class="sec-sub">设计文档（v0.4.19 表 79/711）两个 matmul 示例：<b>① 向量×矩阵</b>（§01–05）+ <b>② 矩阵×矩阵</b>（§06）。<span class="m">*_ldb</span> / <span class="m">q_dst</span> 的 Python sim 不忠实建模（HBM 载入 / DST 16 拍流），<b>VCS 才是判据</b>。</p>
       <div class="tbl-scroll">
         <table>
           <thead><tr><th>算子</th><th>K（收缩维）</th><th>列</th><th>SMC</th><th>权重来源</th><th>e2e</th><th>VCS bit-match</th></tr></thead>
@@ -203,6 +203,7 @@
             <tr><td class="op">fp16_matmul_q</td><td class="num">8</td><td class="num">4</td><td class="num">1</td><td>UR 预注入</td><td><span class="pill ok">PASS</span></td><td><span class="pill na">ADR-032</span></td></tr>
             <tr><td class="op">matmul_parallel_n</td><td class="num">—</td><td class="num">—</td><td class="num">8</td><td>UR 预注入</td><td><span class="pill ok">PASS</span></td><td><span class="pill vcs">8/8</span></td></tr>
             <tr><td class="op">fp16_matmul_n</td><td class="num">8</td><td class="num">4</td><td class="num">8</td><td>UR 预注入</td><td><span class="pill ok">PASS</span></td><td><span class="pill vcs">8/8</span></td></tr>
+            <tr class="ldb"><td class="op">fp16_matmul_q_dst</td><td class="num">8</td><td class="num">4</td><td class="num">8</td><td>UR 预注入 · <b>矩阵×矩阵</b></td><td><span class="pill warn">仅 VCS</span></td><td><span class="pill vcs">8/8 · DS transpose</span></td></tr>
           </tbody>
         </table>
       </div>
@@ -426,6 +427,44 @@
 
       <div class="note">
         <b>为什么无跨-SMC reduce。</b>硬件 matmul = <b>N 维广播 + 每 SMC 本地列点积</b>（reduce 全在 SMC 内 8to1/5to1）。跨-SMC 只有 SHIFTUP 广播搬数据，无加法树（ADR-025）。SHIFTDN 仅用于串联 matmul 的结果收集/拼接（纯搬运）。<span class="m">matmul_parallel_n</span> / <span class="m">fp16_matmul_n</span> 均 8/8 bit-perfect。
+      </div>
+    </section>
+
+    <!-- ========== 6. 矩阵×矩阵 q_dst ========== -->
+    <section>
+      <div class="sec-h"><span class="sec-n">06</span><h2>矩阵×矩阵 · <span class="m" style="font-size:.8em">fp16_matmul_q_dst</span>（DS transpose）</h2></div>
+      <p class="sec-sub">设计文档<b>第二个</b> matmul 示例（表 711 Matmul_Q · LLAMA2 Q 投影）。与 §01–05 向量×矩阵的<b>唯一区别 = 激活前端</b>：激活是多行矩阵、按<b>列间插</b>存储，必须先经 <span class="m">SMI_DS_T</span> 跨-SMC 转置（列对齐→行对齐）才能广播。转置后接的<b>计算核 = §04 Q</b>。</p>
+
+      <div class="flow">
+        <div class="flow-inner">
+
+          <div class="node node--bank spine"><span class="role">bank6 · 激活行（M 行 · 列间插）</span><span class="name">ds_src_read ×2</span><span class="desc">lo / hi word · B=2 配对 · <span class="m">smc_id_en=7</span></span></div>
+          <div class="conn"><div class="conn-lbl">RTOVR · →SHIFTDN</div><div class="conn-line"></div><div class="conn-tip"></div></div>
+
+          <div class="node node--hbm spine" style="max-width:360px"><span class="role">SHIFTDN · iq34 · gather ×2</span><span class="name">ds_gather / ds_gather_1</span><span class="desc">跨-SMC 收集 · B=2 配对（前后两拍启动）</span></div>
+          <div class="conn"><div class="conn-line"></div><div class="conn-tip"></div></div>
+
+          <div class="node node--hbm spine" style="max-width:360px"><span class="lat">lat 16</span><span class="role">SMI_DS_T · iq40 · 转置引擎</span><span class="name">ds_transpose</span><span class="desc">列对齐 → 行对齐（真搬，非 relabel）· collect16 + drain</span><span class="band bcast">DST datapath · 跨-SMC 转置</span></div>
+          <div class="conn"><div class="conn-lbl">SHIFTUP · stream_beats=16 · smc_id_en=all</div><div class="conn-line"></div><div class="conn-tip"></div></div>
+
+          <div class="node node--hbm spine"><span class="role">SHIFTUP · broadcast=1</span><span class="name">转置后激活行 → 广播到 8 SMC</span><span class="desc">16-beat 流 · <span class="m">→ FP16MUL.S4–S7</span>（sel=29）</span></div>
+
+          <div class="conn"><div class="conn-lbl">＋ 4 权重列 bank1–4 → S0–S3</div><div class="conn-line"></div><div class="conn-tip"></div></div>
+
+          <div class="node node--unit spine"><span class="role">§04 Q 计算核</span><span class="name">FP16MUL 32 乘 → 4× ADDTREE8TO1</span><span class="desc">8 D lane fan out → dst 0/1/2/3</span></div>
+          <div class="conn"><div class="conn-line"></div><div class="conn-tip"></div></div>
+          <div class="node node--bank spine"><span class="role">bank5 · 一词</span><span class="name">[Q0, Q1, Q2, Q3]</span><span class="desc">每 SMC partitioned · <span class="m">VCS 8/8 bit-match</span></span></div>
+
+        </div>
+      </div>
+
+      <div class="note" style="border-left-color:var(--hbm)">
+        <b>权威建模 · 状态。</b>
+        <ul>
+          <li>matmul 激活广播<b>统一是 DST datapath</b>——非裸 SHIFTUP，而是 <span class="m">SHIFTDN gather(B=2) → SMI_DS_T 排序/透传 → SHIFTUP</span> 整条读流水线（doc §1169/§1211）。向量×矩阵与矩阵×矩阵差在 intlv 配置 + 存储格式，<b>硬件路径同一条</b>。</li>
+          <li>✅ <b>VCS bank5 8/8 bit-match</b>（含真 TinyLlama gate_proj 真权重 · commit <span class="m">f2a3ad5</span>）。⚠️ <b>e2e 报 FAIL 是假红</b>——model-A 不忠实建模 SMI_DS_T 16 拍流。</li>
+          <li>🚧 <b>完整多行 GEMM</b>（多左行 M + 每 SMC 多列 + 多-tile K，ADR-026）<span class="m">still_holds: proposed</span>，代码未实施（B1–B4 阻断项收口前不进入）。</li>
+        </ul>
       </div>
     </section>
 

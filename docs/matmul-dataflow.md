@@ -20,10 +20,11 @@
 | `fp16_matmul_q` | 8 | 4（稠密 32 乘） | 1 | UR 预注入 | ✅ | —（ADR-032 S2） |
 | `matmul_parallel_n` | — | — | 8（N 维广播） | UR 预注入 | ✅ | ✅ 8/8（ADR-025） |
 | `fp16_matmul_n` | 8 | 4 | 8（N 维广播） | UR 预注入 | ✅ | ✅ 8/8（ADR-023） |
+| **`fp16_matmul_q_dst`** | 8 | 4 | 8（**矩阵×矩阵**） | UR 预注入 | ⚠️ 仅 VCS | ✅ 8/8（DS transpose，真权重） |
 
-> ⚠️ **`*_ldb` 系列在 Python sim（e2e）里报 `FAILED y`** —— sim **不建模** HBM→LDB 载入（bank1 起始空），
-> 故只能靠 **VCS**（真 RTL）验证；e2e 的 max-diff 恰等于 golden 值（如 K16=155.144），即 sim 输出 0。
-> 本文以 **`fp16_matmul_k16`**（核心累加）与 **`fp16_matmul_k16_ldb`**（+权重流式）为主线画图，其余是其参数化/并行化扩展。
+> **设计文档（v0.4.19 表 79/711）的两个 matmul 示例**：**① 向量×矩阵**（§1–5，加法树 vector×matrix）+ **② 矩阵×矩阵**（§6，Matmul_Q，DS transpose）。
+>
+> ⚠️ **`*_ldb` / `q_dst` 在 Python sim（e2e）里报 `FAILED`** —— model-A sim **不忠实建模** HBM→LDB 载入 / SMI_DS_T 16 拍流时序，**VCS 才是判据**（`q_dst` e2e 假红、VCS 8/8 真绿）。其余算子 e2e/VCS 一致。
 
 ---
 
@@ -289,7 +290,66 @@ flowchart TD
 
 ---
 
-## 6. 数值验证链（端到端）
+## 6. 矩阵×矩阵：`fp16_matmul_q_dst`（广播左行 + DS transpose + 每 SMC 多列）
+
+设计文档第二个 matmul 示例（**表 711 Matmul_Q**，LLAMA2 Q 投影）。与 §1–5 向量×矩阵的**唯一区别 = 激活前端**：激活是**多行矩阵**、存储为**列间插**格式，必须先经 **SMI_DS_T 跨-SMC 转置**（列对齐 → 行对齐）才能广播；转置后接的**计算核与 §4 Q 完全一致**。
+
+**权威建模（doc §1169/§1211，user 2026-06-29）**：matmul 激活广播**统一是 DST datapath**——不是裸 SHIFTUP，而是 `SHIFTDN gather（B=2 配对）→ SMI_DS_T 排序/透传 → SHIFTUP` 整条读流水线。向量×矩阵（§1–5）与矩阵×矩阵差在 intlv 配置 + 存储格式，硬件路径同一条。
+
+```mermaid
+flowchart TD
+    subgraph FRONT["激活转置前端 (DST datapath)"]
+        SRC["bank6: 激活行 (M 行, 列间插)<br/>ds_src_read ×2 (lo/hi, smc_id_en=7)"]
+        SRC -->|"RTOVR →SHIFTDN"| GA["SHIFTDN gather ×2<br/>(ds_gather / ds_gather_1)<br/>跨-SMC 收集 · B=2 配对"]
+        GA --> DST["SMI_DS_T 转置 (iq40, lat 16)<br/>列对齐 → 行对齐<br/>collect16 + drain"]
+        DST --> SU["SHIFTUP 广播 (stream_beats=16)<br/>broadcast=1 · smc_id_en=all"]
+    end
+
+    subgraph CORE["Q 计算核 (= §4)"]
+        SU -->|"→ S4–S7 (sel=29)"| MUL["FP16MUL iq18 · 32 乘"]
+        WB["bank1–4: 权重 w0–w3<br/>→ S0–S3"] --> MUL
+        MUL -->|"8 D lane fan out"| TREES["4× ADDTREE8TO1<br/>dst 0/1/2/3 → Q0–Q3"]
+        TREES --> OUT["bank5 一词 [Q0,Q1,Q2,Q3]"]
+    end
+
+    classDef bank fill:#e8f0fe,stroke:#4285f4,color:#000
+    classDef unit fill:#fef7e0,stroke:#f9ab00,color:#000
+    classDef bc fill:#f3e8fd,stroke:#a142f4,color:#000
+    class SRC,WB,OUT bank
+    class GA,MUL,TREES unit
+    class DST,SU bc
+```
+
+```
+  bank6 激活行(列间插, M 行)
+      │ UR_READ ×2 (lo/hi word, B=2 配对, smc_id_en=7)
+      ▼
+  RTOVR → SHIFTDN
+      ▼
+  SHIFTDN gather ×2  (ds_gather / ds_gather_1)  跨-SMC 收集
+      ▼
+  ┌─────────────────────────────────────────┐
+  │ SMI_DS_T 转置 (iq40, lat 16 = collect16+drain) │   列对齐 → 行对齐（真搬，非 relabel）
+  └─────────────────────────────────────────┘
+      ▼
+  SHIFTUP 广播 (stream_beats=16, smc_id_en=all) ──▶ 转置后激活行广播到所有 SMC
+      ▼ (→ S4–S7)
+  ┌─────────── §4 Q 计算核 ───────────┐
+  │ 4 权重列 S0–S3 × 广播激活 S4–S7    │
+  │ → FP16MUL 32 乘 → 8 D lane         │
+  │ → 4× ADDTREE8TO1 (dst 0/1/2/3)     │
+  └───────────────────────────────────┘
+      ▼
+  bank5 一词 [Q0,Q1,Q2,Q3]
+```
+
+**状态**：`fp16_matmul_q_dst`（M=1 左行 + 4 列 + DS transpose）**VCS bank5 8/8 bit-match**（含真 TinyLlama gate_proj 真权重，commit `f2a3ad5`）。
+- ⚠️ **e2e Python sim 报 FAIL 是假红** —— model-A 不忠实建模 SMI_DS_T 16 拍连续 data_out 流，VCS 才是判据。
+- 🚧 **完整多行 GEMM**（多左行 M + 每 SMC 多列 + 多-tile K 累加，[ADR-026](adr/ADR-026-matmul-q-matrix-matrix-ds-transpose.md)）`still_holds: proposed`，代码未实施（B1–B4 阻断项收口前不进入实施）。`fp16_matmul_full_dst`（多行）e2e 过但 model-A 假绿、VCS 未验。
+
+---
+
+## 7. 数值验证链（端到端）
 
 ```
 SymPy/numpy golden ──┐
