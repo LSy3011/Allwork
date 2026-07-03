@@ -204,22 +204,92 @@ UR = 8 bank × 256 行 × 16 byte = **32KB/SMC**（2048 fp16/bank），全片 8 
 
 ---
 
-## 4. 其他变体（并行化扩展，简述）
+## 4. 横向扩展：`fp16_matmul_q`（4 列稠密，K=8）
 
-- **`fp16_matmul_q`（4 列稠密，K=8）**：1 条 FP16MUL 算满 32 乘（4 权重列 S0-S3 × 广播激活 S4-S7）→ 8 个 D → **4 条 FP32ADDTREE8TO1**（dst_id 0/1/2/3）→ bank5 一词 4 lane `[Q0,Q1,Q2,Q3]`。即 §1 的 FP16MUL→8to1 段横向复制 4 份。
-- **`fp16_matmul_n` / `matmul_parallel_n`（8-SMC N 维广播）**：激活经 **SHIFTUP 广播**到 8 个 SMC，每 SMC 与**本地权重列**点积（reduce 在 SMC 内 §1 计算核），每 SMC partitioned 输出。跨-SMC **只有广播、无 sum-reduce**（ADR-025）。即 §1 计算核 × 8 份并行 + 广播前端。
+单-SMC 满 32 乘：**4 权重列 S0–S3 × 广播激活 S4–S7**。1 条 FP16MUL 的 8 个 D lane **fan out** 到 4 条独立加法树（各出 1 列 Q），一词 4 lane 输出。与 §1 不同：每列 K=8 单 tile，**不做片间累加**（直接 8→1 出标量）。
+
+```mermaid
+flowchart TD
+    subgraph IN["输入"]
+        BW["bank1–4: 权重 w0–w3<br/>(4 列 → S0–S3)"]
+        BA["bank0: 激活 a"]
+    end
+    BA -->|"SHIFTUP 广播 →S4–S7"| MUL
+    BW -->|"RTOVR →S0–S3"| MUL
+
+    MUL["FP16MUL iq18 (lat 5) · 32 乘<br/>D0/1=S0×S4  D2/3=S1×S5<br/>D4/5=S2×S6  D6/7=S3×S7"]
+
+    MUL -->|"D0,D1"| Q0["ADDTREE8TO1 dst0 → Q0"]
+    MUL -->|"D2,D3"| Q1["ADDTREE8TO1 dst1 → Q1"]
+    MUL -->|"D4,D5"| Q2["ADDTREE8TO1 dst2 → Q2"]
+    MUL -->|"D6,D7"| Q3["ADDTREE8TO1 dst3 → Q3"]
+    Q0 --> OUT
+    Q1 --> OUT
+    Q2 --> OUT
+    Q3 --> OUT
+    OUT["bank5 一词: [Q0,Q1,Q2,Q3]<br/>Q[c] = dot(a, w_c)"]
+
+    classDef bank fill:#e8f0fe,stroke:#4285f4,color:#000
+    classDef unit fill:#fef7e0,stroke:#f9ab00,color:#000
+    class BW,BA,OUT bank
+    class MUL,Q0,Q1,Q2,Q3 unit
+```
 
 ```
-          激活 a ──SHIFTUP 广播──┬──▶ SMC0: a·w₀ → y₀
-                                 ├──▶ SMC1: a·w₁ → y₁
-                                 │        ⋮  (每 SMC = §1 计算核)
-                                 └──▶ SMC7: a·w₇ → y₇
-                          (跨-SMC 无求和，各自 partitioned 输出)
+  bank0 激活 a ──SHIFTUP 广播──▶ S4–S7 ┐
+  bank1–4 权重 w0–w3 ──RTOVR──▶ S0–S3 ┘─▶ [FP16MUL 32 乘] ─▶ 8 D lane
+                                                              │ fan out (4 列)
+                        ┌───────────────┬────────┴────────┬───────────────┐
+                   D0,D1│          D2,D3│           D4,D5 │          D6,D7 │
+                        ▼               ▼                 ▼                ▼
+                 ADDTREE8TO1     ADDTREE8TO1       ADDTREE8TO1      ADDTREE8TO1   (dst_id 0/1/2/3
+                    → Q0            → Q1              → Q2             → Q3         共用 iq28 串行)
+                        └───────────────┴────────┬────────┴───────────────┘
+                                                 ▼
+                                    bank5 一词 [Q0,Q1,Q2,Q3]
 ```
 
 ---
 
-## 5. 数值验证链（端到端）
+## 5. N 维广播：`fp16_matmul_n` / `matmul_parallel_n`（8-SMC）
+
+同一 §4 Q 核 × 8 SMC 并行。**单套全局指令流**（ADR-022/023：所有 SMC 共享同一份 `iq_*.hex`，靠 SMC_ID/smc_id_en 寻址）+ **per-SMC 数据**。激活经 SHIFTUP 广播到 8 SMC，每 SMC 用**本地权重列**算，各自 partitioned 输出。跨-SMC **只广播、无 sum-reduce**（ADR-025）：SHIFTUP 传激活、SHIFTDN 仅用于串联 matmul 的结果拼接（纯搬运非求和）。
+
+```mermaid
+flowchart TD
+    A["bank0 激活 a (每 SMC)<br/>共享同一套 iq_*.hex"]
+    A -->|"SHIFTUP broadcast=1<br/>smc_id_en=all"| SU["激活广播 (DST datapath, 无求和)"]
+    SU --> S0["SMC0: Q 核<br/>本地 w → y₀[0:3]"]
+    SU --> S1["SMC1: Q 核<br/>本地 w → y₁[4:7]"]
+    SU --> S2["SMC2: Q 核<br/>本地 w → y₂[8:11]"]
+    SU --> SD["··· (SMC3–6)"]
+    SU --> S7["SMC7: Q 核<br/>本地 w → y₇[28:31]"]
+    S0 --> O["bank5 (每 SMC 独立)<br/>partitioned: [y₀‖y₁‖…‖y₇] = 32 列<br/>无跨-SMC 求和"]
+    S1 --> O
+    S2 --> O
+    S7 --> O
+
+    classDef bank fill:#e8f0fe,stroke:#4285f4,color:#000
+    classDef unit fill:#fef7e0,stroke:#f9ab00,color:#000
+    classDef bc fill:#f3e8fd,stroke:#a142f4,color:#000
+    class A,O bank
+    class S0,S1,S2,SD,S7 unit
+    class SU bc
+```
+
+```
+   激活 a ──SHIFTUP 广播──┬──▶ SMC0: Q核(本地 w) → y₀[0:3]
+   (单套全局指令流)        ├──▶ SMC1: Q核(本地 w) → y₁[4:7]
+                          │        ⋮   (每 SMC = §4 Q 核, 4 列)
+                          └──▶ SMC7: Q核(本地 w) → y₇[28:31]
+              8 SMC × 4 列 = 32 输出列, 各自 partitioned 落本地 bank5 (跨-SMC 无求和)
+```
+
+均 8/8 bit-perfect（`matmul_parallel_n` ADR-025 / `fp16_matmul_n` ADR-023）。
+
+---
+
+## 6. 数值验证链（端到端）
 
 ```
 SymPy/numpy golden ──┐

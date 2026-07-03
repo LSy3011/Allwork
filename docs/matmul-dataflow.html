@@ -113,6 +113,20 @@
     display:inline-block; padding:1px 8px; border-radius:5px; margin-top:6px}
   .band.inner{background:var(--bank-bg); color:var(--bank)}
   .band.cross{background:var(--unit-bg); color:var(--unit)}
+  .band.bcast{background:var(--hbm-bg); color:var(--hbm)}
+
+  /* fan-out / fan-in (Q 4 列 · N 8-SMC) */
+  .rail{height:2px; background:var(--spine); width:88%; max-width:660px; border-radius:2px; margin:2px auto 0}
+  .fan-row{display:flex; gap:12px; justify-content:center; align-items:flex-start; padding:0 2px}
+  .fan-col{display:flex; flex-direction:column; align-items:center; min-width:118px; max-width:172px; flex:1}
+  .tick{width:2px; height:11px; background:var(--spine)}
+  .node--sm{padding:9px 12px; max-width:none}
+  .node--sm .role{font-size:10px}
+  .node--sm .name{font-size:13px}
+  .node--sm .desc{font-size:11.5px; margin-top:2px}
+  .fan-lbl{font-family:var(--mono); font-size:10.5px; color:var(--muted); margin:6px 0 2px}
+  .smc-core .name{color:var(--unit)}
+  .ellip{align-self:center; font-family:var(--mono); color:var(--muted); font-size:18px; padding:0 2px}
 
   /* ---------- callout / notes ---------- */
   .note{background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--bank);
@@ -341,19 +355,77 @@
       </div>
     </section>
 
-    <!-- ========== 4. 并行变体 ========== -->
+    <!-- ========== 4. Q 变体 ========== -->
     <section>
-      <div class="sec-h"><span class="sec-n">04</span><h2>并行化扩展</h2></div>
-      <p class="sec-sub">同一累加核横向（列）或跨-SMC（N 维）复制。</p>
-      <div class="grid2">
-        <div class="card">
-          <h3><span class="m" style="font-size:.82em; color:var(--unit)">fp16_matmul_q</span> · 4 列稠密</h3>
-          <p>1 条 FP16MUL 算满 32 乘（4 权重列 S0–S3 × 广播激活 S4–S7）→ 8 个 D → <b>4 条 FP32ADDTREE8TO1</b>（dst_id 0/1/2/3）→ bank5 一词 4 lane <span class="m">[Q0,Q1,Q2,Q3]</span>。即把 §01 的 MUL→8to1 段横向复制 4 份。</p>
+      <div class="sec-h"><span class="sec-n">04</span><h2>横向扩展 · <span class="m" style="font-size:.8em">fp16_matmul_q</span>（4 列稠密）</h2></div>
+      <p class="sec-sub">单-SMC 满 32 乘：4 权重列 <span class="m">S0–S3</span> × 广播激活 <span class="m">S4–S7</span>。1 条 FP16MUL 的 8 个 D lane <b>fan out</b> 到 4 条独立加法树 → 一词 4 lane。</p>
+
+      <div class="flow">
+        <div class="flow-inner">
+
+          <!-- 输入：4 权重列 + 广播激活 -->
+          <div class="fan-row">
+            <div class="fan-col"><div class="node node--bank node--sm"><span class="role">bank1–4</span><span class="name">权重 w0–w3</span><span class="desc">4 列 · <span class="m">→ S0–S3</span></span></div></div>
+            <div class="fan-col"><div class="node node--bank node--sm"><span class="role">bank0</span><span class="name">激活 a</span><span class="desc"><span class="m">SHIFTUP</span> 广播 <span class="m">→ S4–S7</span></span></div></div>
+          </div>
+          <div class="conn"><div class="conn-lbl">RTOVR · 4 权重列 + 广播激活汇入</div><div class="conn-line"></div><div class="conn-tip"></div></div>
+
+          <div class="node node--unit spine">
+            <span class="lat">lat 5</span><span class="role">FP16MUL · iq18</span>
+            <span class="name">inl_fp16mul · 32 乘</span>
+            <span class="desc"><span class="m">D0/1=S0×S4 · D2/3=S1×S5 · D4/5=S2×S6 · D6/7=S3×S7</span><br>8 D lane = 4 列各一对</span>
+          </div>
+
+          <!-- fan-out 到 4 加法树 -->
+          <div class="conn"><div class="conn-lbl">8 D lane fan out → 4 列</div><div class="conn-line"></div></div>
+          <div class="rail"></div>
+          <div class="fan-row">
+            <div class="fan-col"><div class="tick"></div><div class="node node--unit node--sm"><span class="role">ADDTREE8TO1 · dst 0</span><span class="name">Q0</span><span class="desc"><span class="m">Σ D0,D1</span></span></div></div>
+            <div class="fan-col"><div class="tick"></div><div class="node node--unit node--sm"><span class="role">ADDTREE8TO1 · dst 1</span><span class="name">Q1</span><span class="desc"><span class="m">Σ D2,D3</span></span></div></div>
+            <div class="fan-col"><div class="tick"></div><div class="node node--unit node--sm"><span class="role">ADDTREE8TO1 · dst 2</span><span class="name">Q2</span><span class="desc"><span class="m">Σ D4,D5</span></span></div></div>
+            <div class="fan-col"><div class="tick"></div><div class="node node--unit node--sm"><span class="role">ADDTREE8TO1 · dst 3</span><span class="name">Q3</span><span class="desc"><span class="m">Σ D6,D7</span></span></div></div>
+          </div>
+          <p class="fan-lbl">4 条加法树共用 iq28，SMT 串行化（dst_id 0→1→2→3 各写一 lane）</p>
+          <div class="rail"></div>
+          <div class="conn"><div class="conn-tip"></div></div>
+
+          <div class="node node--bank spine"><span class="role">bank5 · 一词</span><span class="name">[Q0, Q1, Q2, Q3]</span><span class="desc"><span class="m">Q[c] = dot(a, w_c)</span> · 4 lane 稠密</span></div>
         </div>
-        <div class="card">
-          <h3><span class="m" style="font-size:.82em; color:var(--unit)">fp16_matmul_n</span> · 8-SMC 广播</h3>
-          <p>激活经 <b>SHIFTUP 广播</b>到 8 个 SMC，每 SMC 与<b>本地权重列</b>点积（reduce 在 SMC 内 §01 核），各自 partitioned 输出。跨-SMC <b>只广播、无 sum-reduce</b>（ADR-025）。即 §01 核 × 8 并行 + 广播前端。</p>
+      </div>
+
+      <div class="note">
+        <b>与 §01 的关系。</b>Q 把 §01 的 <span class="m">MUL → 8to1</span> 段<b>横向复制 4 份</b>（4 列并行），但 <b>不做片间累加</b>——每列 K=8 单 tile，直接 8→1 出一个标量。点积可交换 → 广播激活到 S4–S7、权重列占 S0–S3，与硬件钦定布局数学等价。
+      </div>
+    </section>
+
+    <!-- ========== 5. N 变体 ========== -->
+    <section>
+      <div class="sec-h"><span class="sec-n">05</span><h2>N 维广播 · <span class="m" style="font-size:.8em">fp16_matmul_n</span>（8-SMC）</h2></div>
+      <p class="sec-sub">同一 Q 核 × 8 SMC 并行。<b>单套全局指令流</b>（ADR-022/023）+ per-SMC 数据：激活经 SHIFTUP 广播到 8 SMC，每 SMC 用<b>本地权重列</b>算，partitioned 输出。跨-SMC <b>只广播、无 sum-reduce</b>（ADR-025）。</p>
+
+      <div class="flow">
+        <div class="flow-inner">
+          <div class="node node--bank spine"><span class="role">bank0（每 SMC）</span><span class="name">激活 a</span><span class="desc">共享同一套 iq_*.hex 指令流</span></div>
+          <div class="conn"><div class="conn-lbl">SHIFTUP 广播 · smc_id_en=all</div><div class="conn-line"></div></div>
+          <div class="node node--hbm spine" style="max-width:420px"><span class="role">SHIFTUP · broadcast=1</span><span class="name">激活广播到 8 SMC</span><span class="desc">跨-SMC 数据搬运（DST datapath）· 无求和</span><span class="band bcast">广播 · 非 reduce</span></div>
+
+          <div class="conn"><div class="conn-lbl">fan out → 8 SMC（各持本地权重列）</div><div class="conn-line"></div></div>
+          <div class="rail"></div>
+          <div class="fan-row" style="overflow-x:auto">
+            <div class="fan-col" style="min-width:104px"><div class="tick"></div><div class="node node--unit node--sm smc-core"><span class="role">SMC 0</span><span class="name">Q 核</span><span class="desc">本地 w · → y₀[0:3]</span></div></div>
+            <div class="fan-col" style="min-width:104px"><div class="tick"></div><div class="node node--unit node--sm smc-core"><span class="role">SMC 1</span><span class="name">Q 核</span><span class="desc">本地 w · → y₁[4:7]</span></div></div>
+            <div class="fan-col" style="min-width:104px"><div class="tick"></div><div class="node node--unit node--sm smc-core"><span class="role">SMC 2</span><span class="name">Q 核</span><span class="desc">本地 w · → y₂[8:11]</span></div></div>
+            <div class="ellip">···</div>
+            <div class="fan-col" style="min-width:104px"><div class="tick"></div><div class="node node--unit node--sm smc-core"><span class="role">SMC 7</span><span class="name">Q 核</span><span class="desc">本地 w · → y₇[28:31]</span></div></div>
+          </div>
+          <p class="fan-lbl">每 SMC = 一个 §04 Q 核（4 列）· 8 SMC × 4 = 32 输出列 · 各自 partitioned 落本地 bank5</p>
+
+          <div class="node node--bank spine" style="margin-top:8px"><span class="role">bank5 · 每 SMC 独立</span><span class="name">partitioned 输出</span><span class="desc">y = [y₀ ‖ y₁ ‖ … ‖ y₇] · <b>无跨-SMC 求和</b></span></div>
         </div>
+      </div>
+
+      <div class="note">
+        <b>为什么无跨-SMC reduce。</b>硬件 matmul = <b>N 维广播 + 每 SMC 本地列点积</b>（reduce 全在 SMC 内 8to1/5to1）。跨-SMC 只有 SHIFTUP 广播搬数据，无加法树（ADR-025）。SHIFTDN 仅用于串联 matmul 的结果收集/拼接（纯搬运）。<span class="m">matmul_parallel_n</span> / <span class="m">fp16_matmul_n</span> 均 8/8 bit-perfect。
       </div>
     </section>
 
