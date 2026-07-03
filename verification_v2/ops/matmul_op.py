@@ -990,6 +990,46 @@ class ManualMatmulQ2Operator(BaseOperator):
         return ops
 
 
+class ManualMatmulQMultiRowOperator(ManualMatmulQ2Operator):
+    """ADR-026 Stage-2b：完整多行 GEMM 第一步 —— M>1 左行 × cols_per_smc=4 × 单 tile K。
+    复用 Q2 的 4-col 单 addtree 4 通道机制（channel=列 S0..S3）+ matmul_q 的 M-row 串行循环
+    （B2：单广播源、M 行时间串行）。每行产 [Q_i0..Q_i3] 一词，M 行 → (smc, 4*M)。单 tile K=4 →
+    cumulative=False（accumulate=0，old_i 恒 0 → 无跨行累加、无 reset 问题、M 不限）。多-tile K = Stage-2c。
+
+    **hco Stage-2b 裁定（Structure-B，修 Q2 探针 3 个 latent bug，post-override 保 Q2 M=1 路径不动）**：
+      ① a_read stride 4→1（word-granular 逐行进一词，对齐 matmul_q）；
+      ② temp_write/read override stride=0/inner_inc=0（往返 buffer 是 transient、每行原地重写不随行走；
+         跨行 W↔R 由 ADR-009 bank 互斥 axiom 自动串行化，不覆盖）；
+      ③ w{c}_read override stride=0/inner_inc=0（4 权重列固定、跨行复用）。
+    否决去 temp-bank（撞回「4 路串行 FPMUL 对不齐单 addtree」结构性 UNSAT，ADR-026 v1 已证死路）。"""
+    M = 2       # 多左行（B2 串行广播）
+
+    def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
+        # 复用 Q2 输入，但把 per-列 auditor key b{c} **平铺 M 份**（matmul_q 手法）：sim 权重 inner_inc=0
+        #   逐行复用同一列，auditor 每 iter 前进 iter×lanes 读 → 平铺后每 iter 读到同一列 → 消 rigid-audit
+        #   ITER≥1 假阳性（否则 auditor 期望 0）。注入侧仍用未平铺 "b"（sim 读地址不变）。
+        out = super().prepare_input(n_rows, smc_num=smc_num)
+        for c in range(self.COLS):
+            col = out[f"b{c}"]                                  # (smc, K)
+            out[f"b{c}"] = np.tile(col, self.M).astype(np.float32)   # (smc, M*K)
+        return out
+
+    def get_dfg(self, spec: Any = None) -> List[Any]:
+        ops = super().get_dfg(spec)
+        # hco Stage-2b：修 3 bug（在 Q2 全局 inner_inc=1 update 之后 override）。
+        for op in ops:
+            tid = op.trace_id
+            if tid == "a_read":
+                op.metadata["stride"] = 1                       # bug#2：逐行进一词（非 4）
+            elif tid.startswith("temp_write") or tid.startswith("temp_read"):
+                op.metadata["stride"] = 1                       # 逐行 distinct temp cell（避跨行覆盖）
+                op.metadata["inner_inc"] = 1
+            elif tid.startswith("w") and tid.endswith("_read"):
+                op.metadata["stride"] = 0                       # bug#3：权重 4 列固定、跨行复用
+                op.metadata["inner_inc"] = 0
+        return ops
+
+
 class ManualMatmulOperator(BaseOperator):
     """
     手动编排的 Matmul DFG。

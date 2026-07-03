@@ -129,11 +129,18 @@ LLAMA2 原始是 32-SMC/K=4096，无法直接在 8-SMC sim 跑。取**结构保�
 > **遗留约束**：①M=1（Stage-2a 聚焦 4-col 打包）；M>4 多行映射 8 通道仍是 Stage-2b（addtree pipeline 深度=4，见 Stage-1 发现 #1）。②cumulative 按 tile 数定（单 tile K=4 → False；多 tile → True，Stage-2c）。
 > **忠实度 caveat**：8 通道独立性仅 sim+spec 背书（DEBT-026-ADDTREE-8CH-RTL），升 Accepted 需 VCS/RTL。
 
+### Stage-2b 落地（2026-07-03，hco Structure-B，agentId a9ee156f78d8c081d）
+`ManualMatmulQMultiRowOperator`（`matmul_q_multirow`）= Q2 子类，**M>1 左行 × cols_per_smc=4 × 单 tile K=4**，8-SMC `--mode e2e` **M=2/3/4 全 ALL PHYSICAL CHECKS PASSED（exit=0，Truth Audit SUCCESS）**；matmul_q/q2 无回归、pytest 186 pass。
+- **channel = 列**（S0..S3），**行 = 时间维**（B2 单广播源、M 行串行，复用 matmul_q 的 inner_loops=M-1）。
+- **单 tile → cumulative=False**（accumulate=0，old_i 恒 0）→ 无 accumulator reset → **M 不受 pipeline 深度限**（M>4 污染是 cumulative=True 才有；hco 订正 matmul_q 注释的过期认知）。
+- **修 Q2 探针 3-bug（post-override 保 Q2 M=1 不动）**：① a_read stride 4→1（逐行进一词）；② temp_write/read `stride=1/inner_inc=1`（逐行 distinct cell 避跨行覆盖 —— **注**：hco 初判 stride=0 transient，实测跨行覆盖污染 channel，改逐行 distinct 后 y bit-match）；③ w{c}_read `stride=0/inner_inc=0`（权重 4 列固定跨行复用）+ **b{c} auditor key 平铺 M 份**（matmul_q 手法，消 rigid-audit ITER≥1 期望 0 假阳性）。
+- 否决去 temp-bank（撞回结构性 UNSAT，ADR-026 v1 已证死路）。
+
 ### 后续 Stage backlog
 | Stage | 内容 | 依赖 | 是否需 DS |
 |---|---|---|---|
 | ~~**Stage-2a**~~ ✅ | cols_per_smc=4 → 单 addtree 4 通道密集 4/词打包（**DEBT-026-PACK 已落地，8/8 exit=0**，model-A 预分发激活）。广播-到-4列 忠实通路 → ADR-027（DEBT-026-BCAST-MULTI，gated on RTL 表 78/79） | 复用现有 | 否（预排激活） |
-| **Stage-2b** | M>4 多行 → 8 行映射 8 addtree 通道(S0..S7) 或 UR 部分和（解 M≤4 pipeline 限制） | hco（通道映射建模） | 否 |
+| ~~**Stage-2b**~~ ✅ | M>1 多行 × 4 列 × 单 tile（`matmul_q_multirow`，**M=2/3/4 全 8/8 exit=0**，2026-07-03，hco Structure-B 裁定 agentId a9ee156f78d8c081d） | hco ✓ | 否 |
 | **Stage-2c** | 大 K 多-tile（K=4096）→ 部分和写回 UR + 跨 tile 累加（解 DEBT-025-MULTITILE） | — | 否 |
 | **Stage-3 (DS)** | `ShuffleUnit` + modules.yaml DS 条目 + 非转置间插 在线转置 + 上下行握手 | **DEBT-026-DS-FIELDS（user RTL 表 587/588 逐字段位宽）+ hco** | 是（本体） |
 | **Accepted** | 8-SMC 固件 vs VCS 实测背书 | user RTL/VCS | — |
