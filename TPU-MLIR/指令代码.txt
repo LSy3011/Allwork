@@ -1,0 +1,178 @@
+1. 主命令：model_transform（模型转换核心命令）
+这是你手动触发的核心命令，用于将 YOLOv5s 的 ONNX 模型转换为 MLIR 格式，并完成预处理配置、测试推理与结果验证：
+model_transform \
+    --model_name yolov5s \
+    --model_def ../yolov5s.onnx \
+    --input_shapes [[1,3,640,640]] \
+    --mean 0.0,0.0,0.0 \
+    --scale 0.0039216,0.0039216,0.0039216 \
+    --keep_aspect_ratio \
+    --pixel_format rgb \
+    --output_names 350,498,646 \
+    --test_input ../image/dog.jpg \
+    --test_result yolov5s_top_outputs.npz \
+    --mlir yolov5s.mlir
+2. 工具内部自动调用的子命令（模型优化、推理与结果对比）
+model_transform 会自动触发以下子命令完成中间流程，日志中已标注 [Running]: 或 [CMD]: 标识：
+（1）MLIR 模型优化命令（tpuc-opt）
+将原始生成的 yolov5s_origin.mlir 进行形状推断、规范化、额外优化，生成最终优化后的 MLIR 模型：tpuc-opt yolov5s_origin.mlir --shape-infer --canonicalize --extra-optimize -o yolov5s.mlir
+（2）参考模型推理命令（model_runner.py）
+基于原始 ONNX 模型推理，生成参考输出结果 yolov5s_ref_outputs.npz（用于后续与 MLIR 模型推理结果对比）：
+model_runner.py --input yolov5s_in_f32.npz --model ../yolov5s.onnx --output yolov5s_ref_outputs.npz
+（3）MLIR 模型推理命令（model_runner.py）
+基于优化后的 MLIR 模型推理，生成实际输出结果 yolov5s_top_outputs.npz：
+model_runner.py --input yolov5s_in_f32.npz --model yolov5s.mlir --output yolov5s_top_outputs.npz
+（4）推理结果对比命令（npz_tool.py）
+对比 MLIR 模型输出（yolov5s_top_outputs.npz）与 ONNX 参考输出（yolov5s_ref_outputs.npz），验证结果一致性（容忍度 0.99）：
+npz_tool.py compare yolov5s_top_outputs.npz yolov5s_ref_outputs.npz --tolerance 0.99,0.99 --except - -vv
+
+3.model_deploy
+是整个流程的 “主调度命令”，用于驱动模型从 MLIR 到 TPU 可部署模型（.bmodel）的全流程，关键参数：
+
+--mlir yolov5s.mlir：指定输入的 MLIR 模型文件，这是模型的中间表示格式。
+--quantize F16：设置量化模式为半精度（FP16），平衡模型精度与推理速度。
+--processor bm1684x：指定目标 TPU 芯片型号（bm1684x），让优化流程适配硬件。
+--test_input yolov5s_in_f32.npz：指定推理测试的输入数据（.npz 格式，含模型输入张量）。
+--test_reference yolov5s_top_outputs.npz：指定参考输出，用于对比验证转换后的模型精度。
+--model yolov5s_1684x_f16.bmodel：指定最终生成的 TPU 部署模型文件。
+
+4.tpuc-opt yolov5s.mlir \
+  --processor-assign="chip=bm1684x mode=F16 num_device=1 num_core=1 addr_mode=auto high_precision=False" \
+  --processor-top-optimize \
+  --convert-top-to-tpu=" asymmetric=False doWinograd=False q_group_size=0 q_symmetric=False matmul_perchannel=False gelu_mode=normal" \
+  --canonicalize \
+  --weight-fold \
+  -o yolov5s_bm1684x_f16_tpu.mlir
+
+
+5.tpuc-opt yolov5s_bm1684x_f16_tpu.mlir \
+  --mlir-disable-threading \
+  --strip-io-quant="quant_input=False quant_output=False quant_input_list= quant_output_list= quant_output_bf16=False" \
+  --processor-tpu-optimize \
+  --dev-parallel \
+  --weight-reorder \
+  --subnet-divide="dynamic=False" \
+  --op-reorder \
+  --future-update="rank=0 weight_list=" \
+  --layer-group="opt=2 group_by_cores=auto compress_mode=none debugger=0" \
+  --core-parallel \
+  --address-assign \
+  -o yolov5s_bm1684x_f16_final.mlir \
+  --debug_cmd=
+
+
+6.tpuc-opt yolov5s_bm1684x_f16_final.mlir \
+  --codegen="model_file=yolov5s_1684x_f16.bmodel embed_debug_info=False model_version=latest bmodel_only=False gdma_check=True" \
+  -o /dev/null
+
+
+7.model_runner.py --input yolov5s_in_f32.npz --model <模型文件> --output <输出文件>
+
+8.npz_tool.py compare <目标文件>.npz <参考文件>.npz --tolerance 0.8,0.5 --except - -vv
+
+9.mv net_0.profile yolov5s_1684x_f16.bmodel.net_0.profile
+
+10.run_calibration yolov5s.mlir --dataset ../COCO2017 --input_num 100 -o yolov5s_cali_table
+
+
+11.model_deploy \
+    --mlir yolov5s.mlir \
+    --quantize INT8 \
+    --calibration_table yolov5s_cali_table \
+    --processor bm1684x \
+    --test_input yolov5s_in_f32.npz \
+    --test_reference yolov5s_top_outputs.npz \
+    --tolerance 0.85,0.45 \
+    --model yolov5s_1684x_int8_sym.bmodel
+
+12.tpuc-opt yolov5s.mlir \
+    --processor-assign="chip=bm1684x mode=INT8 num_device=1 num_core=1 addr_mode=auto high_precision=False" \
+    --import-calibration-table="file=yolov5s_cali_table asymmetric=False" \
+    --processor-top-optimize \
+    --convert-top-to-tpu=" asymmetric=False doWinograd=False q_group_size=0 q_symmetric=False matmul_perchannel=False gelu_mode=normal" \
+    --canonicalize \
+    --weight-fold \
+    -o yolov5s_bm1684x_int8_sym_tpu.mlir
+
+13.model_runner.py --input yolov5s_in_f32.npz --model yolov5s_bm1684x_int8_sym_tpu.mlir --output yolov5s_bm1684x_int8_sym_tpu_outputs.npz
+
+14.npz_tool.py compare yolov5s_bm1684x_int8_sym_tpu_outputs.npz yolov5s_top_outputs.npz --tolerance 0.85,0.45 --except - -vv
+
+
+15.tpuc-opt yolov5s_bm1684x_int8_sym_tpu.mlir \
+    --mlir-disable-threading \
+    --strip-io-quant="quant_input=False quant_output=False quant_input_list= quant_output_list= quant_output_bf16=False" \
+    --processor-tpu-optimize \
+    --dev-parallel \
+    --weight-reorder \
+    --subnet-divide="dynamic=False" \
+    --op-reorder \
+    --future-update="rank=0 weight_list=" \
+    --layer-group="opt=2 group_by_cores=auto compress_mode=none debugger=0" \
+    --core-parallel \
+    --address-assign \
+    -o yolov5s_bm1684x_int8_sym_final.mlir --debug_cmd=
+
+
+15.tpuc-opt yolov5s_bm1684x_int8_sym_final.mlir --codegen="model_file=yolov5s_1684x_int8_sym.bmodel embed_debug_info=False model_version=latest bmodel_only=False gdma_check=True" -o /dev/null
+
+
+16.mv net_0.profile yolov5s_1684x_int8_sym.bmodel.net_0.profile
+
+17.# 1. 运行bmodel模型生成输出
+model_runner.py --input yolov5s_in_f32.npz --model yolov5s_1684x_int8_sym.bmodel --output yolov5s_bm1684x_int8_sym_model_outputs.npz
+
+# 2. 对比bmodel输出与MLIR输出（确认编译无精度损失）
+npz_tool.py compare yolov5s_bm1684x_int8_sym_model_outputs.npz yolov5s_bm1684x_int8_sym_tpu_outputs.npz --tolerance 0.99,0.90 --except - -vv
+
+
+
+
+
+
+参数	功能解释	
+--allow-unregistered-dialect	允许存在没有注册方言的操作	
+--color	在输出中使用颜色（默认自动检测）	
+--crash-diagnostics-dir=<directory>	指定崩溃诊断文件的目录	
+--debug	启用调试输出	
+--debug-buffer-size=<uint>	缓冲最后 N 个字符的调试输出，直到程序终止（默认 0，即立即打印）	
+-debug-counter	以逗号分隔的调试计数器跳过和计数列表	
+--debug-only=<debug string>	启用特定类型的调试输出（逗号分隔的类型列表）	
+--disable-symbolication	禁用崩溃回溯的符号化	
+--dump-pass-pipeline	打印将要运行的优化通道流水线	
+--emit-bytecode	在生成输出时发出字节码	
+--emit-bytecode-version=<value>	在生成输出时使用指定的字节码版本	
+-h	--help的别名	
+--help	显示可用选项（--help-hidden可查看更多）	
+--help-hidden	显示所有可用选项	
+--help-list	显示可用选项列表（--help-list-hidden可查看更多）	
+--help-list-hidden	显示所有可用选项列表	
+--info-output-file=<filename>	指定附加-stats和-timer输出的文件	
+--irdl-file=<filename>	在处理输入之前注册的 IRDL 文件	
+--load-dialect-plugin=<string>	从插件库加载方言	
+--load-pass-plugin=<string>	从插件库加载优化通道	
+--log-actions-to=<string>	将操作执行日志记录到文件，若传入-则记录到标准错误输出	
+--log-mlir-actions-filter=<string>	以逗号分隔的位置列表，用于过滤要记录日志的操作	
+--mlir-debug-counter=<string>	以逗号分隔的调试计数器跳过和计数参数列表	
+--mlir-disable-threading	禁用 MLIR 内的多线程，覆盖对MLIRContext::enableMultiThreading()的任何进一步调用	
+--mlir-elide-elementsattrs-if-larger=<uint>	如果ElementsAttrs元素数量超过给定上限，则省略显示	
+--mlir-enable-debugger-hook	启用用于调试 MLIR 操作的调试器钩子	
+--mlir-pass-pipeline-crash-reproducer=<string>	如果通道管理器崩溃或失败，在给定的输出路径生成.mlir 重现文件	
+--mlir-pass-pipeline-local-reproducer	生成崩溃重现文件时，尝试生成具有最小流水线的重现文件	
+--mlir-pass-statistics	显示每个优化通道的统计信息	
+--mlir-pass-statistics-display=<value>	设置通道统计信息的显示方式，list为按通道名称排序的合并列表，pipeline为嵌套流水线视图	
+--mlir-pretty-debuginfo	在 MLIR 输出中打印美观的调试信息	
+--mlir-print-assume-verified	使用自定义打印机时跳过操作验证	
+--mlir-print-debug-counter	在累积所有计数器后打印调试计数器信息	
+--mlir-print-debuginfo	在 MLIR 输出中打印调试信息	
+--mlir-print-elementsattrs-with-hex-if-larger=<long>	如果DenseElementsAttrs元素数量超过给定上限（使用 - 1 禁用），则以十六进制字符串打印	
+--mlir-print-ir-after=<pass-arg>	在指定的优化通道后打印 IR	
+--mlir-print-ir-after-all	在每个优化通道后打印 IR	
+--mlir-print-ir-after-change	仅在 IR 发生更改时，在优化通道后打印 IR	
+--mlir-print-ir-after-failure	仅在优化通道失败时，在优化通道后打印 IR	
+--mlir-print-ir-before=<pass-arg>	在指定的优化通道前打印 IR	
+--mlir-print-ir-before-all	在每个优化通道前打印 IR	
+--mlir-print-ir-module-scope	在打印 `print-ir-[before	after]{-all}` 的 IR 时，始终打印顶级操作
+--mlir-print-local-scope	打印局部作用域和内联信息（省略属性、类型和位置的别名）	
+--mlir-print-op-generic	打印通用操作形式	
+--mlir-print-op-on-diagnostic	在对操作发出诊断时，也将操作作为附加注释	
