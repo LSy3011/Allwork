@@ -1092,19 +1092,22 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
       每行 a key `a_row{r}`=X[row r]（K 值，tile t=[t*4:(t+1)*4]）、每列 w key `b{c}`=W[col c]（避
       rigid-audit 假阳性，Stage-2b/2c 手法）。cumulative addtree 的 acc_state 按 trace_id 分离 → 各行独立累加。
 
-    ⚠⚠ **当前状态：BLOCKED（2026-07-03，e2e 未过，非算子 bug，是管线基建墙）** ⚠⚠
-    SMT 秒解（II=11）但 8/8 全错。**根因**：`assembler.py` 的 loop 计数是**每-IQ 从该 IQ 的 global_t
-    t-span 推**（`loops_val = max_t_global//iq_II + num_iter - skip - 1`，为紧凑单-recurrence 调度设计）。
-    M 行空间展开后**同一物理 IQ 挂多行 op**（如 ur-r0 同时有 row0+row1 的 a/temp 读、addtree IQ 同时有
-    y_r0/y_r1），跨 II 窗 → **各 IQ loop 计数不一致（实测 1 vs 2）** → cumulative addtree 迭代数错乱、
-    over-accumulate（row0 sim=208 vs golden=66）+ 调度铺开致 sim 超时截断（row1 ITER1 missing）。
-    matmul_q_multitile(M=1) 能通正因每 IQ op 落单 II 窗；**M>1 一进来即撞此墙**。solver 无 makespan 最小化
-    （纯 satisfiability）故独立子块被 slack 铺开加剧（试 env makespan cap 收紧但没法让各 IQ span 一致）。
-    **真正的忠实+高性能解需基建**（hco+ADR）：① assembler 2-level 嵌套循环（M 外/T 内，sim iq_unit 已支持
-    8-level，缺 assembler 生成；但 cumulative 跨外循环 reset 仍需配 spill）；或 ② assembler 用已知
-    num_iterations 推 compute loop 计数（非 t-span）。备选里程碑：full-unroll(num_iter=1，无 loop 病，但
-    COLS=4→16 FPMUL→II≥16 z3 UNKNOWN 超时；COLS=2 可解但不忠实)。**下步方向待 user 裁定（AskUserQuestion
-    已问、user 暂离）**。DEBT-026-MROW-MULTITILE-LOOPCNT。
+    ⚠⚠ **当前状态：BLOCKED（2026-07-03，e2e 未过；两道墙，第一道已修、第二道需 spill）** ⚠⚠
+    **墙①（loop-count，✅ 已修 via ADR-051 compact）**：assembler loop 计数从每-IQ t-span 推（含软件流水
+      深度项 D_iq），M 行空间展开使各 IQ D_iq 不一致 → loop 数崩 + relative_skip 地址错位。修 = `compact_iq`
+      标记 → solver 加 `t<II` 单窗约束（`ucode_solver.py` ADR-051 P-i）→ makespan<II → D_iq=0 全一致 →
+      emit 数学自动对。**实证**：II=24 SAT、LOOP:0 一致、ADDR 正确、某行 e2e bit-match golden。
+    **墙②（addtree 累加器共享，🔴 未修，需 spill）**：M 行的 cumulative addtree 都用 S0-3 → 共享单物理
+      `dr_d0` 累加寄存器（sim `fp32_add_tree_unit.py` 单 dr_d0/dr_d1）→ 后发 addtree 在先发者两次 tile 迭代
+      间覆盖 dr → 跨-tile 累加串扰（**schedule-dependent**：哪行最后发射哪行对；本类当前 e2e 随 SMT 调度
+      时对时错、非稳定）。三变体全败：①同通道共享 dr_d0；②分通道 S0-3/S4-7 但 regs_s 跨拍 latch 重叠双计；
+      ③单 op 8 通道 UNSAT。**→ 坐实 hco 的 spill 裁定**（M 累加器不能共享一 addtree）。
+    **忠实解 = spill**（非累加 partial 写独立 memory + 分离 FPADD 归约，绕开累加器）：需 full-unroll
+      （num_iter=1，无 loop 病 + compact 不需要，但已证**结构 UNSAT**：COLS=2 全 II UNSAT、COLS=4 z3 超时——
+      spill DFG 有待查的硬约束）或 assembler **2-level 嵌套循环**（M 外/T 内，sim iq_unit 已支持 8-level、缺
+      assembler 生成，独立 ADR）。DEBT-026-MROW-ACCUM-SHARE / DEBT-026-MROW-MULTITILE-LOOPCNT。
+    **下步（待 user 裁定，hco 评审被停）**：(a) 调试 full-unroll spill 结构 UNSAT；(b) assembler 2-level 循环
+      基建；(c) 接受 multitile(M=1) 上限、M>1 defer。见 ADR-051 + memory m-unroll-vs-per-iq-loopcount。
     """
     parallel_dim = "N"
     M = 2               # 多左行（M>1）
@@ -1142,12 +1145,16 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
         T = self.K // 4
         temp_banks = [2, 3, 4, 6]
 
-        # M 行空间展开：每行一个独立子块（Q2 4-col 单 addtree 机制 + 每行自己的 cumulative 累加器）。
+        # M 行空间展开：每行一个 cumulative addtree（4 通道 S0-3）。
+        # ⚠ 已知未通（2026-07-03，见类 docstring "累加器墙"）：M 行的 addtree 都用 S0-3 → **共享单物理
+        #   dr_d0 累加寄存器**（sim fp32_add_tree_unit.py:159-167 单 dr_d0）→ 后发的 y_r0 在 y_r1 两次 tile
+        #   迭代之间覆盖 dr_d0 → row1 跨-tile 累加读到 row0 partial（e2e：row0 对、row1 ITER1 错）。
+        #   验证了 hco 的 spill 裁定（M 累加器不能共享一 addtree）。分通道(S4-7)/单op-8通道 变体亦失败
+        #   （regs_s 跨拍 latch 重叠双计 / 8 输入 UNSAT）。忠实解 = spill（非累加 partial + 分离归约）。
         for r in range(M):
             rt_sums = []
             for c in range(COLS):
                 # a-read：行 r 起始 word r*T，stride=1 → 循环第 t 拍读 word r*T+t（=X[row r, tile t]）。
-                #   4 列共读行 r 同一 tile 词（同址 R-R 豁免；strict RTOVR latch 下不能共享单读 → 4 份 distinct）。
                 a_loc = b.make_op("UR_READ", f"a_r{r}c{c}", RT.UR_READ, [],
                                   meta_name=f"a_row{r}", logical_addr=0 * 256 + r * T, stride=1,
                                   role="input", iq_id=30 + (c % 2) * 2)
@@ -1170,12 +1177,10 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
                 rt_sum = b.make_op("RTOVR", f"rt_trd_r{r}c{c}_FP32ADDTREE5TO1_S{c}",
                                    getattr(PS, f"FP32ADDTREE5TO1_S{c}"), [tr])
                 rt_sums.append(rt_sum)
-            # 行 r 自己的 cumulative addtree（4 通道 S0..S3）：跨 tile 累加（loop_carried 自环 II≥4，同 multitile）。
             y_sum = b.make_op("FP32ADDTREE5TO1", f"y_r{r}", RT.FP32ADDTREE5TO1, rt_sums,
                               cumulative=True, reduction_per_channel=4,
                               loop_carried_depends_on={f"y_r{r}": 4}, iq_id=26)
             rt_out = b.make_op("RTOVR", f"rt_y_r{r}_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
-            # 输出词 r（bank5）：cumulative 终值原地写（stride=0，末 tile 迭代=全 K 累加）。
             b.make_op("UR_WRITE", f"out_r{r}", RT.UR_WRITE, [rt_out],
                       logical_addr=5 * 256 + r, stride=0, role="output", is_output=True, iq_id=35)
 
@@ -1192,10 +1197,12 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
                                 "sel": op.metadata.get("sel", -1),
                             }
         # 循环维 = tile（T 迭代）。a/w/temp 逐 tile 前进（inner_inc=1）；输出原地累加（stride=0/inner_inc=0）。
+        # compact_iq（ADR-051 P-i）：M 行空间展开 → 逼 SMT 产每-IQ 同窗紧凑调度 → assembler per-IQ loop
+        #   计数 D_iq=0 一致 + relative_skip 地址对（否则各 IQ loop 数不一致 → cumulative 迭代错乱）。
         for op in ops:
             tid = op.trace_id
             op.metadata.update({"shape": [self.K], "inner_loops": T - 1, "outer_loops": 0,
-                                "inner_inc": 1, "outer_inc": 0})
+                                "inner_inc": 1, "outer_inc": 0, "compact_iq": True})
             if tid.startswith("out"):
                 op.metadata.update({"stride": 0, "inner_inc": 0})
         return ops   # model-A（非广播）→ 不注入 shiftup

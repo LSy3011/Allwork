@@ -420,6 +420,21 @@ class UCodeSynthesizer:
             if manual_iq is not None:
                 solver.add(u_vars[op.trace_id] == manual_iq, desc=f"manual_iq_{op.trace_id}")
 
+        # ── ADR-051 P-i：compact（每-IQ 同窗）调度约束 ────────────────────────
+        # 问题：assembler 的 loops_val = (max_t//iq_II − t_min//iq_II) + num_iter − 1，含"软件流水深度项"
+        #   D_iq。emit 正确的充要条件是 D_iq=0（每 IQ 的 op 落**同一 II 窗**）；单-recurrence 紧凑调度天然
+        #   D=0（multitile/fma VCS 已通），但 M 行空间展开的多独立子链被 SMT（纯 satisfiability 无 makespan）
+        #   放到不同深度 → 各 IQ D_iq 不一致 → loops 崩 + relative_skip 地址错位（见 ADR-051 / matmul_q_full）。
+        # 修：对 opt-in（metadata compact_iq=True）的 op，强制**全落 window 0**（`t < II`）→ 整体 makespan < II
+        #   → 每 IQ 的 op 恒同窗（D_iq=0）、relative_skip=0 → assembler 的 VCS-proven emit 数学（loops_val
+        #   = num_iter−1、无地址补偿）自动对。**opt-in 门控 → 对现有算子零约束、零回归**。
+        # 取舍：单窗 = 非流水调度 → II 须 ≥ 关键路径（吞吐非最优），但**正确 + emit-clean**；里程碑够用，
+        #   II-最优流水（每-IQ 同窗但跨窗流水）留 follow-up。比 per-IQ 窗口变量（w·II 让 z3 更难解、实测
+        #   II 11-16 UNKNOWN）简单得多、z3 友好。DEBT-051-COMPACT-SINGLEWINDOW（升 Accepted / II-最优需 VCS）。
+        compact_ops = [op for op in compute_ops if op.metadata.get("compact_iq")]
+        for op in compact_ops:
+            solver.add(t_vars[op.trace_id] < II, desc=f"compact_win0_{op.trace_id}")
+
         # ADR-011: tristate 分流
         res = solver.check()
         if res == z3.unsat:

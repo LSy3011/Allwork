@@ -85,8 +85,29 @@ loops_val = total_iterations_needed - skip_iterations - 1
 3. **P-i flatness 粒度**：per-IQ `max_t-min_t` 该 bound 到几倍 iq_II 才既防虚假深度、又不挤掉合法深链？
 4. 是否需同步动 `relative_skip` 地址补偿。
 
+## 实施进展（2026-07-03，hco 评审被 user 停、AI 自决实施 P-i 变体）
+
+> **P-i 落地 = compact「单窗」约束（opt-in），loop-count 修**：`ucode_solver.py` 对 metadata `compact_iq=True`
+> 的 op 加 `t < II`（全落 window 0 → makespan<II → 每 IQ D_iq=0、relative_skip=0）→ assembler 的 VCS-proven
+> emit 数学（loops_val=num_iter−1、无地址补偿）自动对。**opt-in 门控 → 现有算子零约束/零回归**。
+> - 先试「每-IQ 窗口变量 w·II」形式 → z3 更难解（II 11-16 UNKNOWN），弃；改「单窗 t<II」→ z3 友好。
+> - **实证 loop-count 修对**：`matmul_q_full`（M=2）II=24 SAT，HDR `LOOP:0` 全 IQ 一致（原 M-unroll 各 IQ
+>   LOOP 1 vs 2 不一致已消）、地址 `ADDR:0/2` 正确（原虚假 relative_skip 补偿致 ADDR 254 已消）、且**某行
+>   e2e 数值 bit-match golden**（`sim[0..2]=ref[0..2]`）→ 证 compact 单窗使 emit 正确。
+> - **取舍 DEBT-051-COMPACT-SINGLEWINDOW**：单窗=非流水（II≥关键路径，吞吐非最优，实测 II=24）；II-最优的
+>   「每-IQ 同窗但跨窗流水」留 follow-up。Open Q1/Q2（深度项 RTL 语义/历史正例）**未经 hco 确认**（hco 评审
+>   被停）——单窗规避了该问题（D_iq 恒 0，不碰深度项语义），但升 Accepted / 做 II-最优仍须补 hco + VCS。
+>
+> **⚠ matmul_q_full 仍未 8/8 —— 卡在 loop-count 之外的第二道墙：addtree 累加器共享**（与本 ADR 正交，属
+> ADR-026 范畴）：M 行的 cumulative addtree 都用 S0-3 → 共享单物理 `dr_d0` 累加寄存器（`fp32_add_tree_unit.py`
+> 单 dr_d0/dr_d1）→ 后发 addtree 在先发者两次 tile 迭代间覆盖 dr → 跨-tile 累加串扰（schedule-dependent，
+> 哪行最后发射哪行对）。**三变体全败**：①同通道 S0-3 共享 dr_d0；②分通道 S0-3/S4-7（独立 dr_d0/dr_d1）但
+> regs_s 跨拍 latch 重叠双计；③单 op 8 通道 UNSAT（8 输入结构不可行）。**→ 坐实 hco 的 spill 裁定**（M 累加器
+> 不能共享一 addtree）；忠实解 = spill（非累加 partial 写独立 memory + 分离归约），需 full-unroll（已证结构
+> UNSAT）或 assembler 2-level 循环（更大基建，独立 ADR）。DEBT-026-MROW-ACCUM-SHARE。
+
 ## References
-- [ADR-026](ADR-026-matmul-q-matrix-matrix-ds-transpose.md)（matmul_q_full 触发本 ADR；Stage-2c 合体）
+- [ADR-026](ADR-026-matmul-q-matrix-matrix-ds-transpose.md)（matmul_q_full 触发本 ADR；Stage-2c 合体；累加器墙属此）
 - [ADR-050](ADR-050-ldb-load-to-ur-weight-streaming.md)（memory-IQ level-1 embed 地址步进，本改不动此路径）/ [ADR-043](#)（SMI_DS_T eff_num_iter=2）/ [ADR-041](#)（stream IQ N 条显式）——三条特例路径边界
 - [ADR-023](ADR-023-single-smi-emitter-sim-impl-model-a.md)（单 SMI emitter 模型）
 - memory `m-unroll-vs-per-iq-loopcount`（根因 + 全景）
