@@ -15,9 +15,10 @@ class SolverStatus(Enum):
     UNKNOWN = "unknown"
 
 
-# ADR-011 constants
-_TIMEOUT_PRIMARY_MS = 30_000   # 单次 z3 timeout（30s）
-_TIMEOUT_RETRY_MS = 15_000     # 换 seed 重试 timeout（15s）
+# ADR-011 constants（per-II timeout env-gated：大 DFG 如 matmul_q_full full-unroll spill II=16 需 >30s
+# 攻破单个 II，否则默认 30s 即 UNKNOWN 跳过。默认不变、低风险；跑该算子须 AIACC_SOLVER_TIMEOUT_MS≈90000）
+_TIMEOUT_PRIMARY_MS = int(os.environ.get("AIACC_SOLVER_TIMEOUT_MS", "30000"))   # 单次 z3 timeout（默认 30s）
+_TIMEOUT_RETRY_MS = int(os.environ.get("AIACC_SOLVER_RETRY_MS", "15000"))       # 换 seed 重试（默认 15s）
 _SEED_PRIMARY = 0              # 主 seed（确定性）
 _SEED_RETRY = 42               # 重试 seed（换搜索路径）
 _TOTAL_BUDGET_S = int(os.environ.get("AIACC_SOLVER_BUDGET_S", "300"))
@@ -332,7 +333,7 @@ class UCodeSynthesizer:
         # 实测 horner e2e：default(arith.solver=6)=53s vs arith.solver=2=11s。
         # 模调度大量约束形如 t[i] - t[j] >= c，是差分逻辑 special shape，
         # diff-logic solver 多项式时间；通用 simplex 在此结构上走慢路径。
-        solver.set("smt.arith.solver", 2)
+        solver.set("smt.arith.solver", int(os.environ.get("AIACC_ARITH_SOLVER", "2")))  # 默认 2；诊断可 =6（完备）
         # Phase 3：生产路径用 z3 原生 solver.add；assert_and_track 仅 DEBUG 模式
         # tracked_add 给每条约束创 Bool label 用于 unsat_core，纯调试 overhead。
         if _DEBUG_SOLVER:
@@ -434,6 +435,28 @@ class UCodeSynthesizer:
         compact_ops = [op for op in compute_ops if op.metadata.get("compact_iq")]
         for op in compact_ops:
             solver.add(t_vars[op.trace_id] < II, desc=f"compact_win0_{op.trace_id}")
+
+        # ── 对称性破缺（symmetry-breaking，opt-in metadata break_symmetry=True）─────────────
+        # 问题：全展开算子（如 matmul_q_full 16 个 FPMUL 全 iq_id=3、互相独立可互换）→ z3 面对 ~16! 等价
+        #   排列的对称搜索空间，大量时间耗在等价解上 → II=16 卡在 ~90s 墙钟可解性边界（同一 DFG 时而 SAT
+        #   时而 UNKNOWN，纯搜索运气；SAT 解确实存在，见 diag）。加**固定顺序约束**（同 (op_type, iq_id) 组
+        #   按 trace_id 排序、强制 t 严格递增）→ 每组消除排列对称 → 秒解、稳定。
+        # 安全性：只对**同资源、独立**的 op 加序（互换任一顺序都可行 → 钉一个规范序不损可行性）；opt-in
+        #   门控 → 现有算子零影响。DEBT-SYMBREAK-CANONICAL（若某算子同组 op 有内在必需异序，勿标此 flag）。
+        sym_ops = [op for op in compute_ops if op.metadata.get("break_symmetry")]
+        if sym_ops:
+            from collections import defaultdict as _dd
+            _grp: Dict[Any, list] = _dd(list)
+            for op in sym_ops:
+                key = (op.op_type.upper(), op.metadata.get("iq_id"))
+                _grp[key].append(op)
+            for key, g in _grp.items():
+                if len(g) < 2:
+                    continue
+                g_sorted = sorted(g, key=lambda o: o.trace_id)
+                for i in range(len(g_sorted) - 1):
+                    solver.add(t_vars[g_sorted[i].trace_id] < t_vars[g_sorted[i + 1].trace_id],
+                               desc=f"symbreak_{g_sorted[i].trace_id}")
 
         # ADR-011: tristate 分流
         res = solver.check()

@@ -1067,66 +1067,58 @@ class ManualMatmulQMultiTileOperator(ManualMatmulQ2Operator):
 
 
 class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
-    """ADR-026 Stage-2c 合体：M>1 × cols_per_smc=4 × 多-tile K —— **unroll-M + loop-T + 每行独立累加器**。
+    """ADR-026 Stage-2c 合体：M>1 × cols_per_smc=4 × 多-tile K —— **spill 2-phase 全展开（num_iter=1）**。
 
     **映射 A（忠实 Matmul_Q，SMC=列，user 2026-07-03「追求性能」裁定）**：每 SMC 持自己 COLS 列权重
-    （partitioned）、激活 model-A 预分发、产 M 行 × COLS 列输出。8 SMC 并行 = N-列维度（表 710/711
-    钦定：广播激活+列分区权重——权重大且跨行复用→常驻分区、UR 容量友好；行/K 拆到 SMC 需全量权重广播
-    撞 UR 256KB 上限，性能劣，见 memory ur-bank-capacity-and-llm-fit）。
+    （partitioned）、激活 model-A 预分发、产 M 行 × COLS 列输出。8 SMC 并行 = N-列维度（表 710/711 钦定：
+    广播激活+列分区权重——权重大且跨行复用→常驻分区、UR 容量友好，见 memory ur-bank-capacity-and-llm-fit）。
 
-    **结构（第三条路，绕开 spill）**：K tile 走**时间循环**（num_iter=T，贴合硬件+性能友好），M 行**空间
-    展开**成 M 个独立子块，**每行一个自己的 cumulative addtree**（distinct op → distinct 输出寄存器/累加器
-    → 跨 tile 用 loop_carried 自环 II≥4 累加自己那行的 T 个 tile-partial）。等价于 matmul_q_multitile(M=1)
-    复制 M 份、共享物理单元（SMT 串行化）。
-    - **不是**被排除的「(row,col)→8 通道」（那是**单** addtree 8 读撞 4 端口）；
-    - **不是**被排除的「M 行共用一个 addtree」（那是时间串行复用同一累加器 → 跨行残值）；
-    - 是 **M 个 distinct 累加器**，各用一次、无 reset 需求 → 无跨行污染。hco spill 裁定是在**广播**前提下
-      （多广播源 sim gap 挡住 M-unroll）；**model-A 下每行读自己 bank0 激活、无广播 → 这条路打开**。
+    **为何 spill（绕开累加器墙）**：M 行各要一个跨-tile 累加器，但物理 addtree 只有单 dr_d0/dr_d1 输出寄存器
+    （sim `fp32_add_tree_unit.py`）→ 多行 cumulative addtree 共享 dr → 跨-tile 累加串扰（unroll-M+loop-T
+    的 cumulative 变体三种全败：同通道共享 dr_d0 / 分通道 regs_s 重叠双计 / 单 op 8 通道 UNSAT，坐实 hco 的
+    spill 裁定）。spill 用 **cumulative=False 非累加**：每 (row,tile) 的 4-col partial 写**独立 spill 地址**
+    （bank7 word l=r*T+t），**无跨-tile 共享累加器** → 无墙②。Phase2 用 FPADD 逐行归约 T 个 partial 得终值。
 
-    **为何弃 full-unroll spill（2026-07-03 实测）**：先按 handoff 全展开 M×T×COLS=16 FPMUL + Phase2 FPADD
-    归约 → SMT ~170 op / II≥16，z3 II 17-24 全 UNKNOWN(超时)、300s 预算耗尽（既 SMT-hostile 又固件膨胀、
-    性能差）。本结构 ~M×(Q2 块) op、II≥COLS·... 小得多，且 K 循环=真实规模可扩（full-unroll 不可扩）。
-    **DEBT-026-FULL-BCAST**：model-A 预分发激活（非广播 SHIFTUP），广播通路忠实留循环版 multirow/multitile。
+    **为何 num_iter=1 全展开**：M 行 × T tile 全空间展开（a 塑 (M*T,4)→num_loop_iters=1），**无循环** →
+    无 loop-count/relative_skip 病（墙①只在有循环时出现，全展开天然规避、不需 compact_iq）。**SMT 实测 SAT**
+    （COLS=2 II≥10、COLS=4 II=16，2026-07-07 诊断脚本；早前"结构 UNSAT"是误判——当时算子处 channel-split
+    中间态、且默认 per-II 30s 超时太短致 COLS=4 UNKNOWN，给 90s 即 SAT）。**跑 COLS=4 e2e 须调
+    `AIACC_SOLVER_TIMEOUT_MS≈90000`**（默认 30s 会在 II=16 UNKNOWN 跳过）。取舍：全展开固件膨胀、真实规模
+    大 K 不可展 → 真实规模需 assembler 2-level 循环（DEBT-026-MROW-MULTITILE-LOOPCNT，独立 ADR）。
 
-    **distinct meta_name key**：a 塑 (M,K)→num_iter=T；auditor 每 iter 读 input_data[meta][t*lanes:]，
-      每行 a key `a_row{r}`=X[row r]（K 值，tile t=[t*4:(t+1)*4]）、每列 w key `b{c}`=W[col c]（避
-      rigid-audit 假阳性，Stage-2b/2c 手法）。cumulative addtree 的 acc_state 按 trace_id 分离 → 各行独立累加。
+    Phase1：每 (row r, tile t) 独立 4-col **非累加** addtree（cumulative=False，单 addtree 4 通道 S0-3，复用
+      Q2 temp-bank 重定时）→ partial 词 → spill bank7 word l=r*T+t。
+    Phase2：每行 **T-way FPADD lane-wise 归约** spill[r*T..r*T+T-1] → 输出词 r（=[Q[r,0..3]] dense）。
+      FPADD 逐 lane 相加 → 各列跨 tile 累加终值一次到位（无累加器 carry → 无墙②）。
 
-    ⚠⚠ **当前状态：BLOCKED（2026-07-03，e2e 未过；两道墙，第一道已修、第二道需 spill）** ⚠⚠
-    **墙①（loop-count，✅ 已修 via ADR-051 compact）**：assembler loop 计数从每-IQ t-span 推（含软件流水
-      深度项 D_iq），M 行空间展开使各 IQ D_iq 不一致 → loop 数崩 + relative_skip 地址错位。修 = `compact_iq`
-      标记 → solver 加 `t<II` 单窗约束（`ucode_solver.py` ADR-051 P-i）→ makespan<II → D_iq=0 全一致 →
-      emit 数学自动对。**实证**：II=24 SAT、LOOP:0 一致、ADDR 正确、某行 e2e bit-match golden。
-    **墙②（addtree 累加器共享，🔴 未修，需 spill）**：M 行的 cumulative addtree 都用 S0-3 → 共享单物理
-      `dr_d0` 累加寄存器（sim `fp32_add_tree_unit.py` 单 dr_d0/dr_d1）→ 后发 addtree 在先发者两次 tile 迭代
-      间覆盖 dr → 跨-tile 累加串扰（**schedule-dependent**：哪行最后发射哪行对；本类当前 e2e 随 SMT 调度
-      时对时错、非稳定）。三变体全败：①同通道共享 dr_d0；②分通道 S0-3/S4-7 但 regs_s 跨拍 latch 重叠双计；
-      ③单 op 8 通道 UNSAT。**→ 坐实 hco 的 spill 裁定**（M 累加器不能共享一 addtree）。
-    **忠实解 = spill**（非累加 partial 写独立 memory + 分离 FPADD 归约，绕开累加器）：需 full-unroll
-      （num_iter=1，无 loop 病 + compact 不需要，但已证**结构 UNSAT**：COLS=2 全 II UNSAT、COLS=4 z3 超时——
-      spill DFG 有待查的硬约束）或 assembler **2-level 嵌套循环**（M 外/T 内，sim iq_unit 已支持 8-level、缺
-      assembler 生成，独立 ADR）。DEBT-026-MROW-ACCUM-SHARE / DEBT-026-MROW-MULTITILE-LOOPCNT。
-    **下步（待 user 裁定，hco 评审被停）**：(a) 调试 full-unroll spill 结构 UNSAT；(b) assembler 2-level 循环
-      基建；(c) 接受 multitile(M=1) 上限、M>1 defer。见 ADR-051 + memory m-unroll-vs-per-iq-loopcount。
+    **distinct meta_name key**（`a{l}` / `b{c}t{t}`）：num_iter=1 下 auditor 读 input_data[meta][0]，每
+      distinct-addr 读须独立 key（[0]=该址值）避 rigid-audit 假阳性（Stage-2b `b{c}` 手法的 num_iter=1 版）。
+    model-A a 预分发（BROADCAST=False）：全展开每 (row,tile) 读独立 a-word，广播单源喂不了 M*T 独立词
+      → model-A（DEBT-026-FULL-BCAST：广播通路忠实留循环版 multirow/multitile）。
     """
     parallel_dim = "N"
     M = 2               # 多左行（M>1）
     COLS = 4            # cols_per_smc（真 Matmul_Q）
     K = 8               # T = K//4 = 2 tiles
+    BROADCAST = False   # 全展开 model-A 预分发（非广播）
+    SPILL_BANK = 7
 
     def prepare_input(self, n_rows: int, smc_num: int = 1) -> Dict[str, np.ndarray]:
         rng = np.random.default_rng(0)
         M, K, COLS = self.M, self.K, self.COLS
+        T = K // 4
         a = rng.uniform(1.0, 5.0, M * K).astype(np.float32)               # X[M,K] flat
         b = rng.uniform(1.0, 5.0, (smc_num, COLS * K)).astype(np.float32)  # 每 SMC COLS 列 × K
-        # a 塑 (M,K)：shape[-1]=K → num_loop_iters=T（tile 循环）。get_golden 仍 reshape(M,K)。
-        out = {"a": a.reshape(M, K), "b": b}
-        # per-row a key：a_row{r}=X[row r]（K 值），auditor iter t 读 [t*4:(t+1)*4]=tile t
-        for r in range(M):
-            out[f"a_row{r}"] = a[r * K:(r + 1) * K].copy()                 # (K,)
-        # per-col weight key：b{c}=W[col c]（smc, K），auditor iter t 读 tile t（跨行复用同列）
+        # a 塑 (M*T,4)：shape[-1]=4 → num_loop_iters=1（全展开、无循环）。get_golden 仍 reshape(M,K)。
+        out = {"a": a.reshape(M * T, 4), "b": b}
+        # per-(row,tile) a key：a{l}[0:4]=word l=X[row l//T, tile l%T]（auditor num_iter=1 读 [0]）
+        for l in range(M * T):
+            out[f"a{l}"] = a[l * 4:(l + 1) * 4].copy()
+        # per-(col,tile) weight key：b{c}t{t}=W[col c, tile t]（bank1 word c*T+t = flat c*K+t*4）
         for c in range(COLS):
-            out[f"b{c}"] = b[:, c * K:(c + 1) * K].copy()                  # (smc, K)
+            col = b[:, c * K:(c + 1) * K]                                  # (smc, K)
+            for t in range(T):
+                out[f"b{c}t{t}"] = col[:, t * 4:(t + 1) * 4].copy()        # (smc, 4)
         return out
 
     def inject_data_per_smc(self, programs: List[Any], input_data: Dict[str, np.ndarray],
@@ -1136,7 +1128,7 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
         a_addr = self.get_bank_addr("a", spec)
         b_addr = self.get_bank_addr("b", spec)
         for k, prog in enumerate(programs):
-            prog.inject_vector(a_addr, a, stride=1)      # model-A：每 SMC bank0 全量激活（row r tile t = word r*T+t）
+            prog.inject_vector(a_addr, a, stride=1)      # model-A：每 SMC bank0 全量激活（words 0..M*T-1）
             prog.inject_vector(b_addr, b[k], stride=1)   # bank1：COLS*K 权重（col c tile t = word c*T+t）
 
     def get_dfg(self, spec: Any = None) -> List[Any]:
@@ -1144,45 +1136,64 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
         M, COLS = self.M, self.COLS
         T = self.K // 4
         temp_banks = [2, 3, 4, 6]
+        spill_base = self.SPILL_BANK * 256
+        spill_addr_of: Dict[Any, Any] = {}   # (r,t) -> (spill_write trace_id, addr)
 
-        # M 行空间展开：每行一个 cumulative addtree（4 通道 S0-3）。
-        # ⚠ 已知未通（2026-07-03，见类 docstring "累加器墙"）：M 行的 addtree 都用 S0-3 → **共享单物理
-        #   dr_d0 累加寄存器**（sim fp32_add_tree_unit.py:159-167 单 dr_d0）→ 后发的 y_r0 在 y_r1 两次 tile
-        #   迭代之间覆盖 dr_d0 → row1 跨-tile 累加读到 row0 partial（e2e：row0 对、row1 ITER1 错）。
-        #   验证了 hco 的 spill 裁定（M 累加器不能共享一 addtree）。分通道(S4-7)/单op-8通道 变体亦失败
-        #   （regs_s 跨拍 latch 重叠双计 / 8 输入 UNSAT）。忠实解 = spill（非累加 partial + 分离归约）。
+        # ── Phase 1：每 (row, tile) 4-col 非累加 addtree → spill bank7 word l ──
         for r in range(M):
-            rt_sums = []
-            for c in range(COLS):
-                # a-read：行 r 起始 word r*T，stride=1 → 循环第 t 拍读 word r*T+t（=X[row r, tile t]）。
-                a_loc = b.make_op("UR_READ", f"a_r{r}c{c}", RT.UR_READ, [],
-                                  meta_name=f"a_row{r}", logical_addr=0 * 256 + r * T, stride=1,
-                                  role="input", iq_id=30 + (c % 2) * 2)
-                # w-read：列 c 起始 word c*T，stride=1 → 第 t 拍读 word c*T+t（=W[col c, tile t]）。跨行复用同列。
-                w_c = b.make_op("UR_READ", f"w_r{r}c{c}", RT.UR_READ, [],
-                                meta_name=f"b{c}", logical_addr=1 * 256 + c * T, stride=1,
-                                role="input", iq_id=31 + (c % 2) * 2)
-                rt_a = b.make_op("RTOVR", f"rt_a_r{r}c{c}_FPMUL_S0", PS.FPMUL_S0, [a_loc])
-                rt_w = b.make_op("RTOVR", f"rt_w_r{r}c{c}_FPMUL_S1", PS.FPMUL_S1, [w_c])
-                mul = b.make_op("FPMUL", f"mul_r{r}c{c}", RT.FPMUL, [rt_a, rt_w], iq_id=3)
-                write_ps = getattr(PS, f"UR_W{c}_S")
-                rt_write = b.make_op("RTOVR", f"rt_mul_r{r}c{c}_{write_ps.name}", write_ps, [mul], sel=3)
-                # temp 重定时：行 r 列 c 每 tile distinct cell（bank[c] 起始 r*T，stride=1 → 第 t 拍 word r*T+t）。
-                tw_addr = temp_banks[c] * 256 + r * T
-                twrite = f"tw_r{r}c{c}"
-                b.make_op("UR_WRITE", twrite, RT.UR_WRITE, [rt_write],
-                          logical_addr=tw_addr, stride=1, role="intermediate", iq_id=36 + (c % 3))
-                tr = b.make_op("UR_READ", f"trd_r{r}c{c}", RT.UR_READ, [twrite],
-                               logical_addr=tw_addr, stride=1, role="intermediate", iq_id=30 + c)
-                rt_sum = b.make_op("RTOVR", f"rt_trd_r{r}c{c}_FP32ADDTREE5TO1_S{c}",
-                                   getattr(PS, f"FP32ADDTREE5TO1_S{c}"), [tr])
-                rt_sums.append(rt_sum)
-            y_sum = b.make_op("FP32ADDTREE5TO1", f"y_r{r}", RT.FP32ADDTREE5TO1, rt_sums,
-                              cumulative=True, reduction_per_channel=4,
-                              loop_carried_depends_on={f"y_r{r}": 4}, iq_id=26)
-            rt_out = b.make_op("RTOVR", f"rt_y_r{r}_UR_W0_S", PS.UR_W0_S, [y_sum], sel=26)
+            for t in range(T):
+                l = r * T + t
+                rt_sums = []
+                for c in range(COLS):
+                    # 独立 a-read（同 (row,tile) 4 列同址 → R-R 豁免；strict RTOVR latch 下不能共享单读）
+                    a_loc = b.make_op("UR_READ", f"a_r{r}t{t}c{c}", RT.UR_READ, [],
+                                      meta_name=f"a{l}", logical_addr=0 * 256 + l, stride=1,
+                                      role="input", iq_id=30 + (c % 2) * 2)
+                    # 权重 col c tile t：bank1 word c*T+t
+                    w_c = b.make_op("UR_READ", f"w_r{r}t{t}c{c}", RT.UR_READ, [],
+                                    meta_name=f"b{c}t{t}", logical_addr=1 * 256 + (c * T + t), stride=1,
+                                    role="input", iq_id=31 + (c % 2) * 2)
+                    rt_a = b.make_op("RTOVR", f"rt_a_r{r}t{t}c{c}_FPMUL_S0", PS.FPMUL_S0, [a_loc])
+                    rt_w = b.make_op("RTOVR", f"rt_w_r{r}t{t}c{c}_FPMUL_S1", PS.FPMUL_S1, [w_c])
+                    mul = b.make_op("FPMUL", f"mul_r{r}t{t}c{c}", RT.FPMUL, [rt_a, rt_w], iq_id=3)
+                    write_ps = getattr(PS, f"UR_W{c}_S")
+                    rt_write = b.make_op("RTOVR", f"rt_mul_r{r}t{t}c{c}_{write_ps.name}", write_ps, [mul], sel=3)
+                    tw_addr = temp_banks[c] * 256 + l
+                    twrite = f"tw_r{r}t{t}c{c}"
+                    b.make_op("UR_WRITE", twrite, RT.UR_WRITE, [rt_write],
+                              logical_addr=tw_addr, stride=1, role="intermediate", iq_id=36 + (c % 3))
+                    tr = b.make_op("UR_READ", f"trd_r{r}t{t}c{c}", RT.UR_READ, [twrite],
+                                   logical_addr=tw_addr, stride=1, role="intermediate", iq_id=30 + c)
+                    rt_sum = b.make_op("RTOVR", f"rt_trd_r{r}t{t}c{c}_FP32ADDTREE5TO1_S{c}",
+                                       getattr(PS, f"FP32ADDTREE5TO1_S{c}"), [tr])
+                    rt_sums.append(rt_sum)
+                # 单 addtree 4 通道，非累加 partial（cumulative=False，无跨-tile 累加器）→ spill word l
+                addt = f"addt_r{r}t{t}"
+                y_partial = b.make_op("FP32ADDTREE5TO1", addt, RT.FP32ADDTREE5TO1, rt_sums,
+                                      cumulative=False, reduction_per_channel=4, iq_id=26)
+                sp_addr = spill_base + l
+                rt_sp = b.make_op("RTOVR", f"rt_{addt}_UR_W0_S", PS.UR_W0_S, [y_partial], sel=26)
+                sp_w = f"spill_r{r}t{t}"
+                b.make_op("UR_WRITE", sp_w, RT.UR_WRITE, [rt_sp],
+                          logical_addr=sp_addr, stride=1, role="intermediate", iq_id=35)
+                spill_addr_of[(r, t)] = (sp_w, sp_addr)
+
+        # ── Phase 2：每行 T-way FPADD lane-wise 归约 spill → 输出词 r ──
+        for r in range(M):
+            sp_reads = []
+            for t in range(T):
+                sp_w, sp_addr = spill_addr_of[(r, t)]
+                spr = b.make_op("UR_READ", f"spr_r{r}t{t}", RT.UR_READ, [sp_w],
+                                logical_addr=sp_addr, stride=1, role="intermediate", iq_id=30 + (t % 4))
+                sp_reads.append(spr)
+            acc = sp_reads[0]
+            for t in range(1, T):
+                rt_p = b.make_op("RTOVR", f"rt_add_r{r}_p{t}_FPADD_S0", PS.FPADD_S0, [acc])
+                rt_q = b.make_op("RTOVR", f"rt_add_r{r}_q{t}_FPADD_S1", PS.FPADD_S1, [sp_reads[t]])
+                acc = b.make_op("FPADD", f"fadd_r{r}_{t}", RT.FPADD, [rt_p, rt_q], iq_id=4)
+            rt_out = b.make_op("RTOVR", f"rt_out_r{r}_UR_W0_S", PS.UR_W0_S, [acc], sel=4)
             b.make_op("UR_WRITE", f"out_r{r}", RT.UR_WRITE, [rt_out],
-                      logical_addr=5 * 256 + r, stride=0, role="output", is_output=True, iq_id=35)
+                      logical_addr=5 * 256 + r, stride=1, role="output", is_output=True, iq_id=35)
 
         ops = b.get_dfg()
         for op in ops:
@@ -1196,16 +1207,14 @@ class ManualMatmulQFullOperator(ManualMatmulQ2Operator):
                                 "dvr": op.metadata.get("dvr", -1),
                                 "sel": op.metadata.get("sel", -1),
                             }
-        # 循环维 = tile（T 迭代）。a/w/temp 逐 tile 前进（inner_inc=1）；输出原地累加（stride=0/inner_inc=0）。
-        # compact_iq（ADR-051 P-i）：M 行空间展开 → 逼 SMT 产每-IQ 同窗紧凑调度 → assembler per-IQ loop
-        #   计数 D_iq=0 一致 + relative_skip 地址对（否则各 IQ loop 数不一致 → cumulative 迭代错乱）。
+        # num_iterations=1：全展开，无循环（每 op 恰一次）。SAT 解存在于 II=16（诊断实证），但 16 FPMUL
+        #   无界搜索让 z3 卡在 ~90s 墙钟可解性边界（同 DFG 时通时不通）→ 跑此算子须给足 per-II 超时
+        #   （AIACC_SOLVER_TIMEOUT_MS≈300000）。可靠化（symmetry-break 过约束 / compact 非单调 均不净）
+        #   留 follow-up = DEBT-026-FULLUNROLL-SMT-RELIABILITY。
         for op in ops:
-            tid = op.trace_id
-            op.metadata.update({"shape": [self.K], "inner_loops": T - 1, "outer_loops": 0,
-                                "inner_inc": 1, "outer_inc": 0, "compact_iq": True})
-            if tid.startswith("out"):
-                op.metadata.update({"stride": 0, "inner_inc": 0})
-        return ops   # model-A（非广播）→ 不注入 shiftup
+            op.metadata.update({"shape": [1], "inner_loops": 0, "outer_loops": 0,
+                                "inner_inc": 0, "outer_inc": 0})
+        return ops   # BROADCAST=False → 不注入 shiftup 广播
 
 
 class ManualMatmulOperator(BaseOperator):
