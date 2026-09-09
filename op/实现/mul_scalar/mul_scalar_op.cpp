@@ -500,9 +500,14 @@ static void gen_ur_insts_impl(const MulScalarOpParams& params, MulScalarOpInstru
 }
 
 static void gen_compute_impl(const MulScalarOpParams& params, MulScalarOpInstructions& result) {
-    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_FPMUL_S0, RTOVR_IN_UR_RDATA_0});
-    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_FPMUL_S1, RTOVR_IN_UR_RDATA_1});
-    result.para_rtovr_routes.push_back({RTOVR_OUT_UVR_WDATA_0, RTOVR_IN_DR_FPMUL_D});
+    // The FPGA sparse RtoVR cannot route UR/FPMUL directly to ports 3/4/35.
+    // VIN0/VIN1/VOUT0 are the registered bridge points implemented by v4.22.
+    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_VIN0_S, RTOVR_IN_UR_RDATA_0});
+    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_VIN1_S, RTOVR_IN_UR_RDATA_1});
+    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_FPMUL_S0, RTOVR_IN_DR_VIN0_D});
+    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_FPMUL_S1, RTOVR_IN_DR_VIN1_D});
+    result.para_rtovr_routes.push_back({RTOVR_OUT_DVR_VOUT0_S, RTOVR_IN_DR_FPMUL_D});
+    result.para_rtovr_routes.push_back({RTOVR_OUT_UVR_WDATA_0, RTOVR_IN_DR_VOUT0_D});
 
     iq::FpMulCru fpmul_cru;
     gen_fpmul_inst(params, fpmul_cru);
@@ -813,6 +818,19 @@ std::vector<IqInstructionFile> MulScalarOpInstructions::get_iq_files() const {
         }
     };
 
+    auto append_end = [&](IqInstructionFile& file, uint16_t code_bits, uint8_t dly = 0) {
+        const auto zero_code = serialize_code(0, code_bits);
+        std::vector<uint8_t> end;
+        if (code_bits > 23) {
+            end = serialize_ur_wdata_inst(1, 1, 0, 0, 0, dly, 0, 0, 0,
+                                          0, code_bits);
+        } else {
+            end = make_instruction(1, 1, 0, 0, 0, dly, 0, 0, 0,
+                                   zero_code, code_bits);
+        }
+        file.para_data.insert(file.para_data.end(), end.begin(), end.end());
+    };
+
     // Compensation for the CRU cascade delay: downstream SMCs receive
     // read/route/compute controls later, so the compute-side controls must
     // stay valid long enough for the last active SMC to consume all inputs.
@@ -824,8 +842,12 @@ std::vector<IqInstructionFile> MulScalarOpInstructions::get_iq_files() const {
     const uint16_t loops_write = (para_total_steps >= 1)
         ? static_cast<uint16_t>(para_total_steps - 1)
         : 0u;
-    const uint16_t loops_compute = (para_total_steps >= 1)
-        ? static_cast<uint16_t>(para_total_steps - 1) + cru_delay_comp
+    const uint16_t loops_source = loops_write;
+    // Keep downstream controls alive while the two VIN registers, FPMUL,
+    // VOUT register and the SMC CRU cascade drain their pipelines.
+    constexpr uint16_t kFpgaPipelineDrain = 8;
+    const uint16_t loops_pipeline = (para_total_steps >= 1)
+        ? static_cast<uint16_t>(para_total_steps - 1) + cru_delay_comp + kFpgaPipelineDrain
         : 0u;
     const uint8_t inc_r0 = 1u;
     const uint8_t inc_r1 = 0u;
@@ -873,14 +895,12 @@ std::vector<IqInstructionFile> MulScalarOpInstructions::get_iq_files() const {
 
         const uint32_t code = encode_ur_read_code_v418(para_ur_read_crus[0], 0, para_smc_id_en);
         const auto code_bytes = serialize_code(code, ur_read_code_bits);
-        const auto zero_code = serialize_code(0, ur_read_code_bits);
-
-        // DDR load latency is a long wait; use NOP loops, then keep the
-        // normal short DLY alignment between compute-side IQs.
         append_nop_wait(file, ur_read_code_bits, compute_start_delay);
         const uint8_t dly = 0;
-        auto inst = make_instruction(1, 0, 0, loops_compute, 0, dly, inc_r0, 0, 0, code_bytes, ur_read_code_bits);
+        auto inst = make_instruction(1, 0, 0, loops_source, 0, dly, inc_r0, 0, 0,
+                                     code_bytes, ur_read_code_bits);
         file.para_data.insert(file.para_data.end(), inst.begin(), inst.end());
+        append_end(file, ur_read_code_bits);
         files.push_back(file);
     }
 
@@ -892,37 +912,74 @@ std::vector<IqInstructionFile> MulScalarOpInstructions::get_iq_files() const {
 
         const uint32_t code = encode_ur_read_code_v418(para_ur_read_crus[0], 1, para_smc_id_en);
         const auto code_bytes = serialize_code(code, ur_read_code_bits);
-        const auto zero_code = serialize_code(0, ur_read_code_bits);
-
-        // True-scalar stream: same scalar word is reused every step.
         append_nop_wait(file, ur_read_code_bits, compute_start_delay);
         const uint8_t dly = 0;
-        auto inst = make_instruction(1, 0, 0, loops_compute, 0, dly, inc_r1, 0, 0, code_bytes, ur_read_code_bits);
+        auto inst = make_instruction(1, 0, 0, loops_source, 0, dly, inc_r1, 0, 0,
+                                     code_bytes, ur_read_code_bits);
         file.para_data.insert(file.para_data.end(), inst.begin(), inst.end());
+        append_end(file, ur_read_code_bits);
         files.push_back(file);
     }
+
+    auto append_vin_vout = [&](uint32_t iq_id, const char* name,
+                               uint8_t dly) {
+        IqInstructionFile file;
+        file.para_iq_id = iq_id;
+        // v4.22 exposes the physical VIN0/VIN1/VOUT0 controls as IQ68/69/70.
+        file.para_iq_name = name;
+        file.para_width_bits = 41 + MUL_SCALAR_VIN_VOUT_CODE_BITS;
+
+        const uint8_t control = static_cast<uint8_t>(
+            ((para_smc_id_en & 0x1Fu) << 1) | 1u);
+        const auto code_bytes = serialize_code(control, MUL_SCALAR_VIN_VOUT_CODE_BITS);
+        append_nop_wait(file, MUL_SCALAR_VIN_VOUT_CODE_BITS, compute_start_delay);
+        auto inst = make_instruction(1, 0, 0, loops_pipeline, 0, dly, 0, 0, 0,
+                                     code_bytes, MUL_SCALAR_VIN_VOUT_CODE_BITS);
+        file.para_data.insert(file.para_data.end(), inst.begin(), inst.end());
+        append_end(file, MUL_SCALAR_VIN_VOUT_CODE_BITS);
+        files.push_back(std::move(file));
+    };
+
+    append_vin_vout(MUL_SCALAR_IQ_ID_VIN0, "68_vin0", 1);
+    append_vin_vout(MUL_SCALAR_IQ_ID_VIN1, "69_vin1", 1);
+    append_vin_vout(MUL_SCALAR_IQ_ID_VOUT0, "70_vout0", 7);
 
     for (const auto& route : para_rtovr_routes) {
         const uint8_t target_port = route.first;
         const uint8_t src_id = route.second;
-        const bool is_read_route =
-            (target_port == RTOVR_OUT_DVR_FPMUL_S0 || target_port == RTOVR_OUT_DVR_FPMUL_S1);
 
         IqInstructionFile file;
-        file.para_iq_id = is_read_route ? iq::IQ_ID_RTOVR_TO_FPMUL : iq::IQ_ID_RTOVR_TO_UR;
+        file.para_iq_id = iq::IQ_ID_RTOVR_BASE + target_port;
         file.para_iq_name = "rtovr-" + std::to_string(target_port);
         file.para_width_bits = 41 + 7;
 
         const uint8_t route_code = static_cast<uint8_t>((src_id << 1) | 1u);
         const auto code_bytes = serialize_code(route_code, 7);
-        const auto zero_code = serialize_code(0u, 7);
-
-        // Align with NEG-style stage timing:
-        //   route-to-compute at t=1, route-to-writeback at t=6.
         append_nop_wait(file, 7, compute_start_delay);
-        const uint8_t dly = static_cast<uint8_t>(is_read_route ? 1u : 6u);
-        auto inst = make_instruction(1, 0, 0, loops_compute, 0, dly, 0, 0, 0, code_bytes, 7);
+        uint16_t loops = loops_pipeline;
+        uint8_t dly = 0;
+        if (target_port == RTOVR_OUT_DVR_VIN0_S ||
+            target_port == RTOVR_OUT_DVR_VIN1_S) {
+            loops = loops_source;
+            dly = 1;
+        } else if (target_port == RTOVR_OUT_DVR_FPMUL_S0 ||
+                   target_port == RTOVR_OUT_DVR_FPMUL_S1) {
+            dly = 2;
+        } else if (target_port == RTOVR_OUT_DVR_VOUT0_S) {
+            // Start one cycle earlier than the original pow schedule so the
+            // first FPMUL result is not replaced by the pipeline reset zero.
+            dly = 6;
+        } else if (target_port == RTOVR_OUT_UVR_WDATA_0) {
+            const auto zero_code = serialize_code(0u, 7);
+            auto wait = make_instruction(1, 0, 0, 0, 0, 7, 0, 0, 0,
+                                         zero_code, 7);
+            file.para_data.insert(file.para_data.end(), wait.begin(), wait.end());
+            dly = 0;
+        }
+        auto inst = make_instruction(1, 0, 0, loops, 0, dly, 0, 0, 0,
+                                     code_bytes, 7);
         file.para_data.insert(file.para_data.end(), inst.begin(), inst.end());
+        append_end(file, 7);
         files.push_back(file);
     }
 
@@ -937,13 +994,12 @@ std::vector<IqInstructionFile> MulScalarOpInstructions::get_iq_files() const {
         const uint32_t fpmul_code_final =
             static_cast<uint32_t>(((para_smc_id_en & 0x1Fu) << 3) | (para_fpmul_inst & 0x7u));
         const auto code_bytes = serialize_code(fpmul_code_final, kFpmulCodeBits);
-        const auto zero_code = serialize_code(0u, kFpmulCodeBits);
-
-        // FPMUL fires at t=2 (after UR read + RtoVR setup).
         append_nop_wait(file, kFpmulCodeBits, compute_start_delay);
-        const uint8_t dly = 2;
-        auto inst = make_instruction(1, 0, 0, loops_compute, 0, dly, 0, 0, 0, code_bytes, kFpmulCodeBits);
+        const uint8_t dly = 3;
+        auto inst = make_instruction(1, 0, 0, loops_pipeline, 0, dly, 0, 0, 0,
+                                     code_bytes, kFpmulCodeBits);
         file.para_data.insert(file.para_data.end(), inst.begin(), inst.end());
+        append_end(file, kFpmulCodeBits);
         files.push_back(file);
     }
 
@@ -955,12 +1011,17 @@ std::vector<IqInstructionFile> MulScalarOpInstructions::get_iq_files() const {
 
         const uint64_t code = encode_ur_write_code_v418(para_ur_write_crus[0], 0, para_smc_id_en);
 
-        // Writeback at t=7 (after FPMUL latency and route-to-UVR ready).
         append_nop_wait(file, ur_write_code_bits, compute_start_delay);
-        const uint8_t dly = 7;
-
-        auto inst = serialize_ur_wdata_inst(1, 0, 0, loops_write, 0, dly, inc_w0, 0, 0, code, ur_write_code_bits);
+        // dly applies only to the first issue; loop replays have zero dly.
+        // Four warm-up issues align the v4.22 RTL model. The FPGA finalizer
+        // advances this window by two issues for the bitstream pipeline.
+        auto wait = serialize_ur_wdata_inst(1, 0, 0, 3, 0, 7, 0, 0, 0,
+                                            0, ur_write_code_bits);
+        file.para_data.insert(file.para_data.end(), wait.begin(), wait.end());
+        auto inst = serialize_ur_wdata_inst(1, 0, 0, loops_write, 0, 4, inc_w0,
+                                            0, 0, code, ur_write_code_bits);
         file.para_data.insert(file.para_data.end(), inst.begin(), inst.end());
+        append_end(file, ur_write_code_bits, 2);
         files.push_back(file);
     }
 
