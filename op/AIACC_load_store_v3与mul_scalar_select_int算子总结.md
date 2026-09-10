@@ -238,6 +238,7 @@ llama 长序列按 chunk 切分(如 5160 chunks),由 v4.22 仿真沙箱批量跑
 | 2026-09-04 | v4.22 RTL | llama v422 **r1 smoke**(chunk0000/5160) | **PASS,8 SMC DDR==golden**(255 words) | `llama_mul_scalar_v422_r1_smoke_20260904/` summary.tsv |
 | 2026-09-04 | v4.22 RTL | llama v422 **r2 初版**(5 chunk) | FAIL 5/5(sim_rc=ddr_rc=1,~0.4s 即败,case 级问题) | `…_r2_20260904/` 与 `…_retry/` summary.tsv |
 | 2026-09-04 | v4.22 RTL | llama v422 **r2 escalated**(时序上探) | **PASS 5/5**(末 chunk 仅部分 SMC 有有效数据) | `…_r2_20260904_escalated/` summary.tsv |
+| 2026-09-04 | **U280 板(zwz 服务器,XDMA)** | llama r2 v422 8SMC 5 chunks **真实上板** | **5/5 chunk CASE PASS,40/40 SMC DDR bit-exact 255 lines**;另做 first/second 两轮 reset 重复性检查均 PASS | `u280_fpga_packages/mul_scalar_llama_r2_v422_8smc_5chunks_rtl_pass_20260904_173154.tar.gz`(sha256 2d2009b0…d2d) |
 | 2026-09-07 | v4.22 RTL | 当前工作区代码 8smc 回归 | **VCS license 中断,未完成**(待重跑) | `mul_scalar_8smc_v3_rtl.log` |
 
 要点:
@@ -245,11 +246,18 @@ llama 长序列按 chunk 切分(如 5160 chunks),由 v4.22 仿真沙箱批量跑
 - 发码侧 v4.22「VIN0/VIN1/VOUT0 桥」结构最早于 2026-08-26~09-04 在 v4.22 仿真沙箱
   (`/home/juno1023/u280_sim_v422`)验证;9/4 的 r1/r2 PASS 产物与 9/7 工作区代码
   生成的产物逐文件同名同构。
+- **U280 板端已实测通过**(2026-09-04):llama round-2 decode 真实 `QK score × softmax_scale`
+  (`_vllm_fa2_C::varlen_fwd`,qk_shape=1,32,1148,scale=0.08838834764831845)5 个 chunk,
+  fp32、8 SMC,RTL_VERSION=0x00042200、IQ_PACKER_CAP=0x49515031(IQP1)。
+  每 chunk 三阶段装载(stage_0 load 2 IQ order [26,27] / stage_1 compute 13 IQ order 含 68/69/70 /
+  stage_2 store 2 IQ order [24,25]),逐 chunk `CASE PASS compared_smc=8`,汇总
+  `LLAMA_R2_U280_SUMMARY pass=5 fail=0 total=5`。这是**真实模型算子链片段在 FPGA 原型上的端到端实测**,
+  而非纯随机数据用例。
 - 9/7 迭代(§3.3/§4.3)是面向 U280 bitstream 物理流水的再对齐(写回预热、dly、
-  burst 收尾、guard line),**改动后尚未完成仿真回归**(9/7 尝试被 license 中断)。
+  burst 收尾、guard line),**改动后尚未完成仿真回归**(9/7 尝试被 license 中断);
+  该轮改动不改变上板包内容(上板包为 9/4 由 RTL 全通过的 case 原样打包,instruction_patch=none)。
 - U280 上板的打包/交付流程、版本门(RTL_VERSION)、板上结果判定标准见上游交付文档
-  (`~/AIACC_U280算子上板运行交付流程.md`、`~/AIACC_v4.22算子修改注意事项.md` 等,未归档本仓库);
-  本总结只覆盖到「FPGA 版 case 定稿(finalize)」为止。
+  (`~/AIACC_U280算子上板运行交付流程.md`、`~/AIACC_v4.22算子修改注意事项.md` 等,未归档本仓库)。
 
 ---
 
