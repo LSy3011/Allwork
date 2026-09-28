@@ -1,0 +1,18 @@
+name: "scale_sum"
+# ADR-056 §E 候选新公式：y = alpha * (x + other)
+# 张量布局与 add.yaml 同构（仅公式根算子由 Add 换为 Mul）；配置-only 新增，无任何代码改动。
+# 预检阶段专用（只读：get_dfg + 绕行 pass + solve；不触碰展开发射路径）。
+# 2026-09-26（步②数值检查落地同步）：test_data 按 §C.4-2 改安全域 x,other∈[1,2]——
+# 预检遗留域 [-10,10]/[-5,15] 与亚正规带相交，静态道 §C.4(a) 保守拒绝；
+# 旧域取值留档：x [-10.0, 10.0] / other [-5.0, 15.0]（静态拒绝记录见 step② 归档）。
+formula: "alpha * (x + other)"
+tensors:
+  x: { bank: 0, role: "input", offset: 0 }
+  other: { bank: 1, role: "input", offset: 0 }
+  alpha: { bank: 3, role: "param", offset: 0 } # 标量系数
+  constants: { bank: 7, role: "constant", offset: 0 }
+  y: { bank: 2, role: "output", offset: 0 }
+test_data:
+  x: { range: [1.0, 2.0] }   # §C.4-2 安全域（静态区间 ⊥ 亚正规带且 ⊥ ±FLT_MAX）
+  other: { range: [1.0, 2.0] }
+  alpha: [2.5]

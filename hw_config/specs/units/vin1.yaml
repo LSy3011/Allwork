@@ -1,0 +1,29 @@
+# ADR-053 D2/D6：VIN1 = IPR 输入流水寄存器（RtoVR out15 → IPR 1 拍 → sel12 回 RtoVR）。
+# 与 master.yaml functional_units.VIN1 逐字同步（守卫② 四向同步校验）。
+unit_name: VIN1
+latency: 1
+attributes:
+  throughput: 1
+  desc: IPR input pipe register (RtoVR out15 -> sel12), vld && smc_id_en>=SMC_ID gated
+ports:
+  inputs:
+  - name: S
+    width: 128
+  outputs:
+  - name: D
+    width: 128
+    type: data
+    rtovr_src_id: 12
+micro_instructions:
+- field: VALID
+  width: 1
+  default: 0
+  encoding:
+    0: INVALID
+    1: VALID
+- field: smc_id_en
+  width: 5
+  default: 31
+- field: RESERVED
+  width: 1      # CODE[6] 保留位（vh:16）→ decoder payload=7、header VLD 归 bit47（2026-09-12 errata，见 vin0.yaml）
+  default: 0

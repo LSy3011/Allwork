@@ -316,9 +316,13 @@ class HardwareSpec(BaseModel):
             if iq_id in ids:
                 idx = iq_id - ids[0]
                 u_u = unit_type.upper()
+                # ADR-050/052：单实例流，名不带 idx 后缀（assembler '_'→'-' → ldb / ldb-axi / stb / stb-axi）。
+                # ⚠ 本清单在 get_iq_name 内有**两份**（unit_type 快路径 + 全局扫描兜底），必须同步，
+                #   否则另一条路径返回 "stb_axi-0" → resolve_iq_type 抛 ValueError（ADR-052 D2）。
+                # ADR-053：VIN0/VIN1/VOUT0 入列（TB IQ_NAME_TO_ID 期望裸名 vin0/vin1/vout0 → 槽 68/69/70）。
                 if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT",
                            "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16",
-                           "LDB", "LDB_AXI"]:   # ADR-050：单实例流，名不带 idx 后缀（assembler '_'→'-' → ldb / ldb-axi）
+                           "LDB", "LDB_AXI", "STB", "STB_AXI", "VIN0", "VIN1", "VOUT0"]:
                     return u_u.lower()
                 p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
                 if "-r" in p_name or "-w" in p_name:
@@ -332,9 +336,13 @@ class HardwareSpec(BaseModel):
             if iq_id in ids:
                 idx = iq_id - ids[0]
                 u_u = u_type.upper()
+                # ADR-050/052：单实例流，名不带 idx 后缀（assembler '_'→'-' → ldb / ldb-axi / stb / stb-axi）。
+                # ⚠ 本清单在 get_iq_name 内有**两份**（unit_type 快路径 + 全局扫描兜底），必须同步，
+                #   否则另一条路径返回 "stb_axi-0" → resolve_iq_type 抛 ValueError（ADR-052 D2）。
+                # ADR-053：VIN0/VIN1/VOUT0 入列（与上一处快路径清单同步）。
                 if u_u in ["FPADD", "FPMUL", "INTADD", "LOGIC", "FPTOFP", "FPTOINT", "INTTOFP", "INTTOINT",
                            "SHIFTUP", "SHIFTDN", "FP32ADDTREE5TO1", "FP32ADDTREE8TO1", "FP16MUL", "INT8TOFP16",
-                           "LDB", "LDB_AXI"]:   # ADR-050：单实例流，名不带 idx 后缀（assembler '_'→'-' → ldb / ldb-axi）
+                           "LDB", "LDB_AXI", "STB", "STB_AXI", "VIN0", "VIN1", "VOUT0"]:
                     return u_u.lower()
                 p_name = u_u.lower().replace("_read", "-r").replace("_write", "-w")
                 return f"{p_name}-{idx}"
@@ -366,3 +374,27 @@ class HardwareSpec(BaseModel):
             if unit not in dr_map: dr_map[unit] = {}
             dr_map[unit][port] = sel_id
         return dr_map
+
+    # ====================================================================
+    # ADR-053 D1：RtoVR 稀疏邻接表（编译器从"全连接假设"到"RTL 稀疏路由"）
+    # ====================================================================
+
+    def get_rtovr_connectivity(self) -> Dict[int, frozenset]:
+        """返回 {producers_dvr 槽号(out): frozenset(允许的 consumers_dr sel)}。
+
+        数据由 verification_v2/tools/gen_rtovr_allowed.py 从
+        u280_sim_v422/smc/RtoVR/RtoVR.v 的 USE_RTOVR_SPARSE_MASK 分支生成，
+        落盘于 hw_config/rtovr_config.yaml 的 allowed 段（GENERATED 标记内，禁手改）；
+        tests/regression 守卫① 保证其与 RTL 逐位一致。
+
+        物理语义（RtoVR.v mux）：被屏蔽的 select 输出 0——不是直通、不是报错。
+        这正是 51/51 算子「472/680 条 select 被屏蔽」假绿的根因（ADR-053 §1）。
+        """
+        raw = self.rtovr_config.get("allowed", {})
+        return {int(out): frozenset(int(s) for s in sels) for out, sels in raw.items()}
+
+    def is_rtovr_select_legal(self, out_slot: int, sel: int) -> bool:
+        """单条 (out, sel) 合法性。fail-closed：表缺项/表缺失一律判非法
+        （宁可全红也不假绿——邻接表缺失本身就是配置事故）。"""
+        conn = self.get_rtovr_connectivity()
+        return int(sel) in conn.get(int(out_slot), frozenset())

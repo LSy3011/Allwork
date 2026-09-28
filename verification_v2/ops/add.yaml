@@ -1,12 +1,18 @@
 name: "add"
 # 对应 torch.add(input, other, alpha=1) -> out = x + alpha * other
 formula: "x + alpha * other"
+# ADR-056 §B.1：L1 准入请求标记（仅请求，非能力证明；L2 八闸门静态判定 + L3 VCS 验证）。
+# 本文件是 §B.4 触点 5 的唯一迁移对象——白名单制名称准入 → 受限结构准入，发码产物
+# 须与冻结基线（artifacts/e2e_add_20260926）零字节一致。
+experimental_unroll: true
 tensors:
-  x: { bank: 0, role: "input", offset: 0 }
-  other: { bank: 1, role: "input", offset: 0 }
-  alpha: { bank: 3, role: "param", offset: 0 } # 标量系数
-  constants: { bank: 7, role: "constant", offset: 0 }
-  y: { bank: 2, role: "output", offset: 0 }
+  # length = bank 内 UR word 静态分配上界（ADR-056 §F.5，hco M5：准入算子必填）。
+  # 各张量 offset=0 独占其 bank → 取满 bank_depth=256。
+  x: { bank: 0, role: "input", offset: 0, length: 256 }
+  other: { bank: 1, role: "input", offset: 0, length: 256 }
+  alpha: { bank: 3, role: "param", offset: 0, length: 256 } # 标量系数（stride=0 驻留，消耗 1 word）
+  constants: { bank: 7, role: "constant", offset: 0, length: 256 }
+  y: { bank: 2, role: "output", offset: 0, length: 256 }
 test_data:
   x: { range: [-10.0, 10.0] }
   other: { range: [-5.0, 15.0] }

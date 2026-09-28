@@ -46,6 +46,11 @@ system_core:
       SMI_DS_T: 1   # ADR-034: SMI_DS_T 跨-SMC 转置（SMI 中心单实例）
       LDB: 1        # ADR-050: Load-Buffer 两流
       LDB_AXI: 1
+      STB: 1        # ADR-052: Store-Buffer 两流（LDB 的反向）
+      STB_AXI: 1
+      VIN0: 1       # ADR-053: RtoVR 绕行寄存器（IPR/OPR，1 拍；UR↔计算 唯一合法路径）
+      VIN1: 1
+      VOUT0: 1
     # ADR-018 v7 D1: 显式 per-SMC schema（值同 unit_instances，语义为每 SMC 一套）
     unit_instances_per_smc:
       FPMUL: 1
@@ -66,6 +71,11 @@ system_core:
       SMI_DS_T: 1   # ADR-034
       LDB: 1        # ADR-050
       LDB_AXI: 1
+      STB: 1        # ADR-052
+      STB_AXI: 1
+      VIN0: 1       # ADR-053
+      VIN1: 1
+      VOUT0: 1
     smc_shared_units: []
   iq_registry:
     UR_READ: 30
@@ -85,10 +95,18 @@ system_core:
     FP32ADDTREE8TO1: 28
     SHIFTUP: 29
     SHIFTDN: 34
-    STB: 7
     SMI_DS_T: 40   # ADR-034: base id 40（清晰空档，避让 0-38 + 100+ RTOVR；单实例 → [40]）
     LDB: 50        # ADR-050: Load-Buffer 两流逻辑 id（emit→iq_ldb.hex / iq_ldb-axi.hex → TB 槽 26/27）
     LDB_AXI: 51
+    # ADR-052: STB Store-Buffer 两流逻辑 id（emit→iq_stb.hex / iq_stb-axi.hex → TB 槽 24/25）
+    #   ⚠ 原 STB: 7 与 INTTOINT: 7 撞号，一并修掉。
+    STB: 52
+    STB_AXI: 53
+    # ADR-053: VIN/VOUT 绕行寄存器逻辑 id（清晰空档 54/55/56；emit→iq_vin0/iq_vin1/iq_vout0.hex，
+    #   TB generate_data_list IQ_NAME_TO_ID 按 iq_name 归 RTL 槽 68/69/70——逻辑 id 不写 RTL 槽号）
+    VIN0: 54
+    VIN1: 55
+    VOUT0: 56
   iq_header:
   - field: INC_EMBED
     width: 6
@@ -881,6 +899,98 @@ functional_units:
         1: VALID
     - field: SEL
       width: 6
+      default: 0
+  # ADR-053：VIN/VOUT 绕行寄存器（IPR/OPR，1 拍，CRU 6bit={smc_id_en[5:1],vld[0]}，
+  #   IQ68/69/70；smi_iq_cru_widths.vh:30-31 + smi_top.v:788-790 + IPR.sv:87/OPR.sv:87）。
+  #   与 modules.yaml 双写同步（守卫②）；type=reg_pipe 只活在 modules.yaml（master 只覆盖
+  #   micro_instructions→code_fields 与 latency，hw_spec.py:209-221）。
+  #   2026-09-12 errata：IQ 帧 CODE 为 7bit（smi_iq_cru_widths.vh:16「CODE[6] is reserved」），
+  #   micro_instructions 显式登记 RESERVED(1bit) → decoder payload=7、header 落 [47:7]、VLD 归 bit47，
+  #   与 modules.yaml code_bits=7 对齐。缺失则 decoder VLD 读 bit46=0 → sim 全链路死（当日实证）。
+  VIN0:
+    unit_name: VIN0
+    latency: 1
+    attributes:
+      throughput: 1
+      desc: IPR input pipe register (RtoVR out14 -> sel11), vld && smc_id_en>=SMC_ID gated
+    ports:
+      inputs:
+      - name: S
+        width: 128
+      outputs:
+      - name: D
+        width: 128
+        type: data
+        rtovr_src_id: 11
+    micro_instructions:
+    - field: VALID
+      width: 1
+      default: 0
+      encoding:
+        0: INVALID
+        1: VALID
+    - field: smc_id_en
+      width: 5
+      default: 31   # default 仅为文档值；实际由 D4 pass 显式写 PARAM_SMC_NUM-1=7
+                    # （2026-09-11 errata：golden 普查 19/20=0x0f，仅 sub_8smc_v3 一份 0x3f）
+    - field: RESERVED
+      width: 1      # CODE[6] 保留位（vh:16）；payload 归 7bit，见段首 2026-09-12 errata
+      default: 0
+  VIN1:
+    unit_name: VIN1
+    latency: 1
+    attributes:
+      throughput: 1
+      desc: IPR input pipe register (RtoVR out15 -> sel12), vld && smc_id_en>=SMC_ID gated
+    ports:
+      inputs:
+      - name: S
+        width: 128
+      outputs:
+      - name: D
+        width: 128
+        type: data
+        rtovr_src_id: 12
+    micro_instructions:
+    - field: VALID
+      width: 1
+      default: 0
+      encoding:
+        0: INVALID
+        1: VALID
+    - field: smc_id_en
+      width: 5
+      default: 31
+    - field: RESERVED
+      width: 1      # CODE[6] 保留位（vh:16）；payload 归 7bit，见段首 2026-09-12 errata
+      default: 0
+  VOUT0:
+    unit_name: VOUT0
+    latency: 1
+    attributes:
+      throughput: 1
+      desc: OPR output pipe register (RtoVR out16 -> sel13), vld && smc_id_en>=SMC_ID gated
+    ports:
+      inputs:
+      - name: S
+        width: 128
+      outputs:
+      - name: D
+        width: 128
+        type: data
+        rtovr_src_id: 13
+    micro_instructions:
+    - field: VALID
+      width: 1
+      default: 0
+      encoding:
+        0: INVALID
+        1: VALID
+    - field: smc_id_en
+      width: 5
+      default: 31
+    - field: RESERVED
+      width: 1      # CODE[6] 保留位（vh:16）；payload 归 7bit，见段首 2026-09-12 errata
       default: 0
   FPTOFP:
     unit_name: FPTOFP

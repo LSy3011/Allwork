@@ -53,6 +53,13 @@ resource_constraints:
     # ADR-050: LDB Load-Buffer 两流（各单实例）
     LDB: 1
     LDB_AXI: 1
+    # ADR-052: STB Store-Buffer 两流（各单实例；LDB 的反向）
+    STB: 1
+    STB_AXI: 1
+    # ADR-053: VIN/VOUT 绕行寄存器（IPR/OPR，各单实例）
+    VIN0: 1
+    VIN1: 1
+    VOUT0: 1
   # ADR-018 v7 D1: 显式 per-SMC schema（值同 unit_instances）+ 跨 SMC 共享单元清单（当前为空）
   unit_instances_per_smc:
     FPMUL: 1
@@ -73,6 +80,11 @@ resource_constraints:
     SMI_DS_T: 1
     LDB: 1
     LDB_AXI: 1
+    STB: 1
+    STB_AXI: 1
+    VIN0: 1
+    VIN1: 1
+    VOUT0: 1
   smc_shared_units: []
 
 iq_registry:
@@ -93,13 +105,22 @@ iq_registry:
   FP32ADDTREE8TO1: 28
   SHIFTUP: 29
   SHIFTDN: 34
-  STB: 7
   # ADR-034: SMI_DS_T base id 40（清晰空档，避让 0-38 密集区 + 100+ RTOVR；单实例 → [40]）
   SMI_DS_T: 40
   # ADR-050: LDB Load-Buffer 两流（逻辑 id，清晰空档 50/51；emit→iq_ldb.hex/iq_ldb-axi.hex，
   #   TB generate_data_list IQ_LAYOUT_MAP 按 iq_name 归 RTL 槽 26/27）
   LDB: 50
   LDB_AXI: 51
+  # ADR-052: STB Store-Buffer 两流（逻辑 id，清晰空档 52/53；emit→iq_stb.hex/iq_stb-axi.hex，
+  #   TB generate_data_list IQ_LAYOUT_MAP 按 iq_name 归 RTL 槽 24/25）
+  #   ⚠ 原 STB: 7 **与 INTTOINT: 7 撞号**（同一 registry 内 id 重复），此处一并修掉。
+  STB: 52
+  STB_AXI: 53
+  # ADR-053: VIN/VOUT 绕行寄存器逻辑 id（清晰空档 54/55/56；emit→iq_vin0/iq_vin1/iq_vout0.hex，
+  #   TB IQ_NAME_TO_ID 按名归 RTL 槽 68/69/70）
+  VIN0: 54
+  VIN1: 55
+  VOUT0: 56
 
 iq_header:
   - field: INC_EMBED

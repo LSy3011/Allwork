@@ -3,11 +3,28 @@ import numpy as np
 from typing import List, Dict, Any
 from api.hw_spec import HardwareSpec
 from synthesis.ucode_solver import UCodeSynthesizer
-from driver.assembler import PhysicalAssembler
+from driver.assembler import PhysicalAssembler, UnrollAdmission
 from driver.emitter import LIRPacker
 from collections import namedtuple
 
 TensorObj = namedtuple("TensorObj", ["bank", "offset", "shape", "role"])
+
+# ADR-055 M3：算子身份**规范化契约**。调用方标签可带渠道前缀（hw-parity 物理验收渠道在
+# tests/integration/test_smt_hw_parity.py:67 传 f"hw_parity_{op_name}"）；剥离**已知闭集前缀**、
+# 小写化、形态校验。无法规范化 → ValueError（响亮失败），绝不静默降级到 embed 主线。
+_OP_LABEL_PREFIXES = ("hw_parity_",)
+
+def normalize_top_op(raw):
+    """规范化顶层算子身份：小写、剥离已知渠道前缀、形态校验。None → None。"""
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    for _p in _OP_LABEL_PREFIXES:
+        if s.startswith(_p):
+            s = s[len(_p):]
+    if not s or s[0].isdigit() or any(not (c.isalnum() or c == "_") for c in s):
+        raise ValueError(f"ADR-055 M3：算子身份标签无法规范化: {raw!r}")
+    return s
 
 class PipelineRunner:
     def __init__(self, hw_config_name: str = "hw_config", show_review: bool = True, show_model: bool = False):
@@ -51,6 +68,11 @@ class PipelineRunner:
             programs = None
 
         ops = operator.get_dfg(spec=self.spec)
+        # ADR-053 D4：RtoVR 稀疏掩码确定性绕行 lowering（UR↔compute 全路径经
+        # VIN0/VIN1/VOUT0 中继；非法且不可绕行的 UR↔compute 边 → 编译期硬错误）。
+        # 必须在 get_dfg 之后、solve 之前：改写后的拓扑进 SMT，延迟结构性推出。
+        from frontend.rtovr_bypass import apply_rtovr_sparse_bypass
+        ops = apply_rtovr_sparse_bypass(ops, self.spec)
         if self.show_model:
             print("\n[DEBUG] DFG Nodes Metadata:")
             for op in ops:
@@ -111,8 +133,36 @@ class PipelineRunner:
         # 不进 emit/sim —— 真实数值由指令驱动的流式 SMI_DS_T 单元提供（ds_transpose hex →
         # _tick_smi_ds_t_trigger；ADR-033 的 apply_smi_ds_t run-前 backdoor 已删 S3-c）。
         # solve 已对全部 ops（含 structural）排程并设 global_t；此处仅从 emit/assemble 路径剔除。
+        # ADR-056 §B.1/§B.4 触点 3（取代 ADR-055 M2/M3 名称白名单双向闸）：准入凭据在
+        #   assemble **之前**定案。名称级白名单 A1_UNROLL_ALLOWLIST 已删——名称不再构成
+        #   准入依据；请求信号 = 算子 YAML `experimental_unroll: true`（ConfigurableOperator
+        #   构造期严格 bool 解析，缺省缺席=未请求）。标签规范化保留：仍作
+        #   branch_report/返回值的算子身份载体与下述接线闸输入。
+        norm_label = normalize_top_op(op_name)
+        op_identity = getattr(operator, "name", None)
+        norm_identity = (normalize_top_op(op_identity)
+                         if isinstance(op_identity, str) and op_identity else None)
+        if norm_label is None:
+            norm_label = norm_identity or normalize_top_op(operator.__class__.__name__)
+        # 接线闸（ADR-055 M3 的 ADR-056 形态）：算子本体声明了准入请求，但调用标签规范
+        #   化后与本体身份不一致 → 接线错（hw-parity 渠道前缀已剥；前缀拼错/张冠李戴即
+        #   此类）——响亮失败，不得静默回落 embed（该形态在 RTL 存疑、不计覆盖）。
+        request_unroll = bool(getattr(operator, "experimental_unroll", False))
+        if (request_unroll and norm_identity is not None
+                and norm_label != norm_identity):
+            raise ValueError(
+                f"ADR-056 §B.1：算子本体 '{op_identity}' 声明 experimental_unroll，但调用"
+                f"标签 '{op_name!r}' 规范化后为 '{norm_label}'，与本体身份不符——响亮失败"
+                f"（不得静默回落 embed）")
+
+        admission = None
+        if request_unroll:
+            admission = self._build_admission(operator, norm_label,
+                                              num_loop_iters, _per_smc_len, vector_lanes)
+
         emit_ops = [op for op in ops if not op.metadata.get("structural_only")]
-        physical_instrs = assembler.assemble(emit_ops, II=II, num_iterations=num_loop_iters)
+        physical_instrs = assembler.assemble(emit_ops, II=II, num_iterations=num_loop_iters,
+                                             admission=admission)
  
         if is_multi_smc and hasattr(operator, "inject_data_per_smc"):
             operator.inject_data_per_smc(
@@ -136,6 +186,13 @@ class PipelineRunner:
             op_name = operator.__class__.__name__.lower()
         output_dir = os.path.join(self.output_root, op_name)
         os.makedirs(output_dir, exist_ok=True)
+
+        # ADR-055 M4：落地逐队列实际选中分支（branch_report），守卫⑭泛化后据此
+        #   断言白名单算子全队列走 unroll——sim 同构建模下这是唯一防静默回落的证物。
+        if assembler.branch_report:
+            with open(os.path.join(output_dir, "branch_report.json"), "w") as f:
+                json.dump({"top_op": norm_label, "branches": assembler.branch_report},
+                          f, indent=2, sort_keys=True)
         
         actual_max_t = max((instr.abs_t for instr in physical_instrs), default=0)
         safe_max_cycles = actual_max_t + (II * num_loop_iters) + 50
@@ -199,9 +256,20 @@ class PipelineRunner:
         with open(os.path.join(output_dir, "expected_values.json"), "w") as f:
             json.dump(golden_res["intermediates"], f, indent=2)
         
+        # ADR-055 D4(b-1)：独立事件检查器（tools/emit_expected_fire_sequence.py）须从 **solver 侧**
+        #   独立重建展开行的 (BANK, ADDR)——地址契约 `orig_offset_k + stride_k·(j − r_k)` 的两个输入
+        #   （stride / logical_addr）必须与 t 一同落盘，否则检查器只能回读产物 payload（同源、零信号）。
+        #   纯附加字段：既有读者（auditor / g14b / timing_diff）只取 `t` / `iq`。
         schedule_dump = {
             "II": II,
-            "ops": {op.trace_id: {"t": int(op.metadata["global_t"]), "iq": op.metadata["unit_id"]} for op in ops}
+            "ops": {op.trace_id: {
+                "t": int(op.metadata["global_t"]),
+                "iq": op.metadata["unit_id"],
+                "stride": int(op.metadata.get("stride", 0) or 0),
+                "logical_addr": int(op.metadata.get("logical_addr", 0) or 0),
+                "dly": int(op.metadata.get("dly", 0) or 0),
+                "op_type": str(op.op_type),
+            } for op in ops}
         }
         with open(os.path.join(output_dir, "compiler_schedule.json"), "w") as f:
             json.dump(schedule_dump, f, indent=2)
@@ -244,11 +312,53 @@ class PipelineRunner:
             "num_iterations": num_loop_iters,
             "sim_success": (res.returncode == 0),
             "ops": ops,
+            # ADR-055：规范化后的顶层算子身份 + 逐队列分支分类（⑭-on-add 用）
+            "top_op": norm_label,
+            "branch_report": assembler.branch_report,
             # ADR-020 v3：multi-SMC 路径在本函数内 line 39 重生成 input_data（_prepare_input_parallel_n,
             # rng.uniform(1,5) + default_rng(0)），与 main_verify.run_test 入口前 prepare_input(n_rows)
             # 的 randn 输出不一致。Auditor 须用 sim 实际吃到的这份算 expected，否则系统性 mismatch。
             "input_data": input_data,
         }
+
+    def _build_admission(self, operator: Any, norm_label: str,
+                         num_loop_iters: int, per_smc_len: int,
+                         vector_lanes: int) -> UnrollAdmission:
+        """ADR-056 §B.4 触点 3：由算子张量声明物化 UnrollAdmission（L1 请求 → L2 凭据）。
+
+        - bank 须为标量 int（list 形态属多 bank 布局，越出 V1 包络 → TYPE_LAYOUT_UNSUPPORTED）。
+        - 规模约束：per_smc_len 须整除 vector_lanes（尾批不满一拍向量的布局 V1 不支持）。
+        - §F.5 静态容量：stride=1 张量（input/output）N_eff 迭代消费
+          stride·(N_eff−1)+1 words；stride=0 驻留参数/常量每标量 1 word（不得按 n_rows/4）。
+          消耗 > length（声明的 bank 内 UR word 静态分配上界）→ TYPE_LAYOUT_UNSUPPORTED。
+        字段形态校验（int/bool 拒/正值/同 bank 两两不交）由 UnrollAdmission.__post_init__ 兜底。
+        """
+        if per_smc_len % vector_lanes != 0:
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] 准入算子 '{norm_label}' 输入长度 "
+                f"{per_smc_len} 不整除 vector_lanes={vector_lanes}——尾批布局越出 V1 "
+                f"规模约束（ADR-056 §A.2-5），显式拒绝")
+        regions: Dict[str, tuple] = {}
+        _DEFAULT_STRIDE = {"input": 1, "output": 1, "param": 0, "constant": 0}
+        for tname, tcfg in operator.tensor_configs.items():
+            bank = tcfg.get("bank")
+            if isinstance(bank, list) or not isinstance(bank, int) or isinstance(bank, bool):
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] 准入算子 '{norm_label}' 张量 '{tname}' "
+                    f"bank={bank!r}——V1 要求标量 int bank（多 bank 布局属 A2a 非目标，"
+                    f"ADR-056 §A.3），显式拒绝")
+            offset = tcfg.get("offset", 0)
+            length = tcfg.get("length")
+            stride = tcfg.get("stride", _DEFAULT_STRIDE.get(tcfg.get("role"), 0))
+            consumed = 1 if stride == 0 else stride * (num_loop_iters - 1) + 1
+            if length is not None and consumed > length:
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] 准入算子 '{norm_label}' 张量 '{tname}' "
+                    f"声明 length={length} 不足以承载 N_eff={num_loop_iters} 迭代的静态消耗 "
+                    f"{consumed} words（stride={stride}；stride=0 驻留=每标量 1 word）"
+                    f"——ADR-056 §F.5，显式拒绝")
+            regions[tname] = (bank, offset, length)
+        return UnrollAdmission(op_name=norm_label, tensor_regions=regions)
 
     def _compute_smc_num(self, operator: Any):
         """

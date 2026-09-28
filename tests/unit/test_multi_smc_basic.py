@@ -329,15 +329,32 @@ class TestShiftupMirToLirLowering(unittest.TestCase):
         )
 
     def test_shiftup_physical_instr_emitted(self):
-        """SHIFTUP MIROp 应产 iq_name='shiftup' 的 PhysicalInstruction (INIT+HDR+BODY)."""
+        """SHIFTUP MIROp 应产 iq_name='shiftup' 的 PhysicalInstruction。
+
+        ADR-054（2026-09-12）：gold＝level-0 平坦流，assembler 对 II=1 且单槽
+        kernel 的队列改发 [INIT(vld=0)][BODY(vld=1, level=0)][TERM(vld=1, jump=1)]，
+        不再产 INIT/HDR/BODY 旧形——fma_parallel_n 的 shiftup 正是此类（II=1、
+        单槽）。embed/HDR 形仅保留给 II>1 或多槽 kernel（add 的 ur-r0 双行 kernel
+        走旧主线，由 add e2e 覆盖）。"""
         instrs = self._build_physical_instrs("verification_v2/ops/fma_parallel_n.yaml")
         sup_instrs = [p for p in instrs if p.iq_name == "shiftup"]
         stages = sorted(p.stage for p in sup_instrs)
         self.assertIn("INIT", stages)
-        self.assertIn("HDR", stages)
         self.assertIn("BODY", stages)
+        self.assertIn("TERM", stages)
+        self.assertNotIn("HDR", stages,
+            "II=1 单槽队列按 ADR-054 平坦化，不得再产 HDR（embed）行")
         for p in sup_instrs:
             self.assertEqual(p.op_type.upper(), "SHIFTUP")
+        # 平坦协议形（assembler.py ADR-054 分支的 header 契约）
+        sup_init = next(p for p in sup_instrs if p.stage == "INIT")
+        sup_body = next(p for p in sup_instrs if p.stage == "BODY")
+        sup_term = next(p for p in sup_instrs if p.stage == "TERM")
+        self.assertEqual(sup_init.header.vld, 0)
+        self.assertEqual(sup_body.header.vld, 1)
+        self.assertEqual(sup_body.header.level, 0)
+        self.assertEqual(sup_term.header.vld, 1)
+        self.assertEqual(sup_term.header.jump, 1)
 
     def test_shiftup_body_payload_axiom_fields_intact(self):
         """SHIFTUP BODY payload 应有 BROADCAST=1 / SMC_ID_EN=31 / VALID=1（非 default 0）.

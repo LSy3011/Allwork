@@ -5,6 +5,25 @@ import sympy as sp
 from typing import List, Dict, Any
 from .base import BaseOperator
 
+# ============ ADR-056 §B.4 触点 4/7：L1 配置面（键 allowlist + 请求标记 + 文本闸） ============
+# 键 allowlist = 存量 37 份 YAML 实测键并集冻结（2026-09-28 取证；chain_reduce_depth/shape
+# 无一使用但是认可的解析键，予以保留）。未知键 = 伪造/拼错字段（如 experimental_unrol）
+# → 响亮失败，不得静默忽略（hco notes-4）。全量强制（非仅准入算子），存量并集零冲突已证。
+_TOP_KEYS = frozenset({
+    "name", "formula", "tensors", "test_data", "parallel_dim", "chain_reduce_depth",
+    "experimental_unroll",
+})
+_TENSOR_KEYS = frozenset({
+    "bank", "role", "offset", "precision", "element_bits", "smc_layout", "stride",
+    "length", "shape",
+})
+_TESTDATA_DICT_KEYS = frozenset({"range"})
+
+# §A.2-4：role → 要求 stride（输入 stride=1、param/constant stride=0 驻留、输出单写口=1）。
+# 键缺席 = 取 role 默认（add.yaml 即无 stride 键，与 prepare_input/inject_data 现有缺省一致）。
+_ROLE_STRIDE = {"input": 1, "param": 0, "constant": 0, "output": 1}
+
+
 class ConfigurableOperator(BaseOperator):
     """
     高级抽象算子。
@@ -13,7 +32,9 @@ class ConfigurableOperator(BaseOperator):
     def __init__(self, config_path: str):
         with open(config_path, 'r', encoding='utf-8') as f:
             self.cfg = yaml.safe_load(f)
-        
+
+        self._validate_yaml_keys()
+
         self.name = self.cfg.get("name", "anon_op")
         self.formula_str = self.cfg["formula"]
         self.tensors_cfg = self.cfg["tensors"]
@@ -29,10 +50,146 @@ class ConfigurableOperator(BaseOperator):
                 f"[ADR-018 D4.5] op '{self.name}' parallel_dim={self.parallel_dim!r} 非法；"
                 f"合法值: None / 'N' / 'K'"
             )
-        
+
+        # ADR-056 §B.1 L1：experimental_unroll = 用户对展开路径的**请求**（仅请求，
+        # 不构成能力证明）。缺省缺席 = 未请求；非 bool（含 1/0、"true" 字符串）响亮失败。
+        _flag = self.cfg.get("experimental_unroll", False)
+        if type(_flag) is not bool:
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] op '{self.name}' 字段 experimental_unroll="
+                f"{_flag!r} 非 bool——L1 请求标记只接受 true/false（ADR-056 §B.1）")
+        self.experimental_unroll = _flag
+
         # 🛸 [V5.0 FIX] 构建 locals，强制把 tensors_cfg 里的名字当作 Symbol，防止 gamma/beta 等与 SymPy 内置冲突
+        # ADR-056 §A.2-1 文本级取负闸在 sympify **之前**（SymPy 会把 -x 规整为
+        # Mul(-1,x)，改写后字面量与取负不可区分；hco M2）。
+        self._gate_text_formula()
         locals_dict = {name: sp.Symbol(name) for name in self.tensors_cfg}
         self.formula = sp.sympify(self.formula_str, locals=locals_dict)
+
+        if self.experimental_unroll:
+            self._gate_requested_admission()
+
+    def _validate_yaml_keys(self) -> None:
+        """ADR-056 §B.4 触点 4：三层键集合 allowlist（顶层 / tensors / test_data 字典项）。
+        未知键响亮失败并带允许集提示；校验先于任何字段消费。"""
+        label = self.cfg.get("name", "<unnamed>")
+        unknown_top = set(self.cfg) - _TOP_KEYS
+        if unknown_top:
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] op '{label}' YAML 顶层含未知键 "
+                f"{sorted(unknown_top)}——允许集 {sorted(_TOP_KEYS)}；拼错字段"
+                f"（如 experimental_unrol）在此响亮失败（ADR-056 §B.4）")
+        tensors = self.cfg.get("tensors", {})
+        if not isinstance(tensors, dict):
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] op '{label}' 字段 tensors 非映射："
+                f"{type(tensors).__name__}")
+        for tname, tcfg in tensors.items():
+            if not isinstance(tcfg, dict):
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] op '{label}' 张量 '{tname}' 配置非映射："
+                    f"{tcfg!r}")
+            unknown_t = set(tcfg) - _TENSOR_KEYS
+            if unknown_t:
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] op '{label}' 张量 '{tname}' 含未知键 "
+                    f"{sorted(unknown_t)}——允许集 {sorted(_TENSOR_KEYS)}（ADR-056 §B.4）")
+        test_data = self.cfg.get("test_data", {}) or {}
+        if not isinstance(test_data, dict):
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] op '{label}' 字段 test_data 非映射："
+                f"{type(test_data).__name__}")
+        for dname, dcfg in test_data.items():
+            if isinstance(dcfg, dict):
+                unknown_d = set(dcfg) - _TESTDATA_DICT_KEYS
+                if unknown_d:
+                    raise ValueError(
+                        f"[TYPE_LAYOUT_UNSUPPORTED] op '{label}' test_data '{dname}' "
+                        f"字典形态含未知键 {sorted(unknown_d)}——允许集 "
+                        f"{sorted(_TESTDATA_DICT_KEYS)}（ADR-056 §B.4）")
+
+    def _gate_text_formula(self) -> None:
+        """ADR-056 §A.2-1 文本级一元取负闸（hco M2：须在 sp.sympify 之前的原始语法树阶段）。
+
+        全量无条件执行（非仅准入算子）——存量 21 处 USub 跨 14 文件逐一取证全为数值
+        字面量取负，兼容已证。规则（与 verification_v2.reference.ordered_ast._build 逐条
+        对齐）：负数值字面量允许（`x + (-2.5)`、`-3.0 * x`）；表达式取负（`-x`、`-(x+y)`、
+        `-alpha`）拒绝 [SYNTAX_UNSUPPORTED]；一元正号 +x 允许（对 fp32 位模式恒等）。
+        """
+        import ast
+        try:
+            tree = ast.parse(self.formula_str, mode="eval")
+        except SyntaxError as e:
+            raise ValueError(
+                f"[SYNTAX_UNSUPPORTED] op '{self.name}' 公式文本无法解析：{e}"
+                f"（ADR-056 §A.2-1 语法子集判定入口）") from e
+        for node in ast.walk(tree):
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                operand = node.operand
+                if not (isinstance(operand, ast.Constant)
+                        and isinstance(operand.value, (int, float))
+                        and not isinstance(operand.value, bool)):
+                    raise ValueError(
+                        f"[SYNTAX_UNSUPPORTED] op '{self.name}' 公式含表达式取负："
+                        f"USub 操作数非数值字面量——负 fp32 字面量允许，"
+                        f"-x / -(x+y) / -alpha 等表达式取负范围外（ADR-056 §A.2-1）")
+
+    def _gate_requested_admission(self) -> None:
+        """ADR-056 准入算子（experimental_unroll=true）的配置面承诺，不满足即响亮失败。
+
+        (0) 严格子集闸（§A.2-1/2，hco M2）：公式语言 ≡ 参考发生器语言——复用
+            verification_v2.reference.ordered_ast 的同一解析器复核，§C.2 恒等式由构造
+            保证；FormulaRejection 转译 [SYNTAX_UNSUPPORTED]。
+        (a) fp32 仅（§A.2-3）；(b) 恰一 output（单输出式）；
+        (c) role→stride 一致（§A.2-4）；(d) length 必填 int>0（§F.5 hco M5，UR word 上界）。
+        """
+        # (0) 严格子集闸：deferred import（ops→reference 方向合法；reference 自身保持
+        #   纯 numpy+stdlib。tensor_names = role input/param 声明名，reserved = 输出/常驻名）
+        from verification_v2.reference.ordered_ast import (
+            FormulaRejection, parse_ordered_formula)
+        formula_names = [n for n, c in self.tensors_cfg.items()
+                         if c.get("role") in ("input", "param")]
+        try:
+            parse_ordered_formula(self.formula_str, formula_names,
+                                  reserved_names=("y", "constants"))
+        except FormulaRejection as e:
+            raise ValueError(
+                f"[SYNTAX_UNSUPPORTED] op '{self.name}' 准入复核对公式拒绝：{e}"
+                f"（ADR-056 §A.2-1，准入门语言 ≡ 参考发生器语言）") from e
+        # (a) fp32 仅
+        if self.element_bits != 32:
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] op '{self.name}' 准入要求 dtype=fp32，"
+                f"实得 element_bits={self.element_bits}（ADR-056 §A.2-3）")
+        # (b) 恰一 output
+        outputs = [n for n, c in self.tensors_cfg.items() if c.get("role") == "output"]
+        if len(outputs) != 1:
+            raise ValueError(
+                f"[TYPE_LAYOUT_UNSUPPORTED] op '{self.name}' 准入要求恰一 output 张量，"
+                f"实得 {outputs}（ADR-056 §A.2-4 单输出式）")
+        # (c)+(d) 逐张量 role→stride 一致 + length 必填
+        for tname, tcfg in self.tensors_cfg.items():
+            role = tcfg.get("role")
+            if role not in _ROLE_STRIDE:
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] op '{self.name}' 张量 '{tname}' "
+                    f"role={role!r} 越出 {sorted(_ROLE_STRIDE)}（ADR-056 §A.2-4）")
+            expect_stride = _ROLE_STRIDE[role]
+            got_stride = tcfg.get("stride", expect_stride)
+            if got_stride != expect_stride:
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] op '{self.name}' 张量 '{tname}' "
+                    f"role={role} 要求 stride={expect_stride}，实得 {got_stride}"
+                    f"（ADR-056 §A.2-4：输入 stride=1、param/constant stride=0）")
+            length = tcfg.get("length")
+            if (length is None or not isinstance(length, int)
+                    or isinstance(length, bool) or length <= 0):
+                raise ValueError(
+                    f"[TYPE_LAYOUT_UNSUPPORTED] op '{self.name}' 张量 '{tname}' "
+                    f"length={length!r}——准入算子 length 必填且为 >0 的 int"
+                    f"（bank 内 UR word 静态分配上界，ADR-056 §F.5）")
+
 
     @property
     def tensor_configs(self) -> Dict[str, Dict[str, Any]]:

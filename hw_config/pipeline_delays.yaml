@@ -23,6 +23,15 @@ pipeline_delays:
   #   LDB_AXI 仅 ordering（→LDB），=1。升 Accepted 换 done-握手事件建模。
   LDB:                 40
   LDB_AXI:             1
+  # ADR-052（共享 DEBT-050-VARLAT）：STB 与 LDB 是同族的变延迟 DMA（UR 读 → AXI 写 HBM round-trip，
+  #   非固定流水）。此处**镜像 LDB 的相位隔离约定**：保守上界 40 + AXI 侧仅 ordering = 1。
+  #   ⚠ 边界（诚实标注）：40 是**镜像自 LDB、未经 STB 自身 VCS 标定**；且 STB 的 DFG 边方向
+  #     （STB→下游，而非 LDB 的 LDB_AXI→LDB）**ADR-052 未取证** —— 本注释只声明「镜像 LDB 约定」，
+  #     不声称边权语义已与 LDB 逐一对齐。
+  #   阶段 1 该值实际不被消费（STB 是 DFG sink、无下游消费者），加上是为防后续「STB 居中」的算子
+  #   被 `hw_spec.py:92` 的 `delays.get(key,1)` 静默落 1 → 欠隔离（hco 审查 2026-09-10 指出）。
+  STB:                 40
+  STB_AXI:             1
   SMI_DS_T:            19   # ds_transpose→SHIFTUP 的 RAW 边权 = collect(16) + drain(3)。
                            #   collect = B×WR_BEATS = 2×8 = 16（输入 tile 填充：B=2 配对×每 unit 8 beat 串行，
                            #     smi_ds_t.v:268/305-309 + :107-110；**与 PARAM_SMC_NUM 和元素宽度(fp16/fp32)无关**，
@@ -48,6 +57,8 @@ pipeline_delays:
                            #   仅对采驻留末 beat 的 compute-side 边（consumer 带 dst_compute_resident）；unit streaming-to-bank
                            #   仍 19。compute 采的是唯一 held 末 beat（shift_up.v:52-58 每拍覆盖、只末拍保持、单 token held 无界）。
   INT8toFP16:          1    # INT8转FP16延迟
-  VIN0:                0    # 向量输入流水线寄存器0
-  VIN1:                0    # 向量输入流水线寄存器1
-  VOUT0:               0    # 向量输出流水线寄存器0
+  # ADR-053：VIN/VOUT = IPR/OPR 流水寄存器，实测各 1 拍（IPR.sv:87 / OPR.sv:87 "One cycle delay"）。
+  #   原占位 0 是错的——绕行链 UR→VIN→计算 单方向 = 2 次 RtoVR 穿越 + IPR = 3 拍（结构性推出，禁硬编码）。
+  VIN0:                1    # 向量输入流水线寄存器0（IPR）
+  VIN1:                1    # 向量输入流水线寄存器1（IPR）
+  VOUT0:               1    # 向量输出流水线寄存器0（OPR）

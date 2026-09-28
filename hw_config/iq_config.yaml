@@ -100,3 +100,27 @@ iq_config:
     EN_LOOPS: true
     BITS_LOOPS: 10
     BITS_CODE: 5 # 表598: vld+intlv_en+intlv_grp+intlv_in+intlv_out 各 1bit（Stage-I 单指令 payload；CRI 框架宽 gated NEEDS-USER-FACT-034-CRI）
+
+  # ADR-053: VIN/VOUT 绕行寄存器（逻辑 id 54/55/56 → TB 归 RTL 槽 68/69/70）。
+  #   BITS_CODE=7：CODE[5:0] = vld(1) + smc_id_en(5)、CODE[6] 为保留位（恒 0）
+  #   —— smi_iq_cru_widths.vh:16「IQ68..70 use CODE[5:0] for VIN..CODE[6] is reserved」；
+  #   曾为 6，致 header 落在 [46:6]、RTL 读 bit47 VLD=0，VCS 实测 bank2 全零（2026-09-12 errata）。
+  #   ⚠ 文档性条目：emit 帧宽实际由 packer.py 读 modules.yaml code_bits（STB/LDB 同此先例，
+  #   均无 iq_config 条目）；此处登记为四向同步守卫② 的一环 + 防未来严格消费。
+  IQ_VIN0:
+    module: VIN0
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 7
+
+  IQ_VIN1:
+    module: VIN1
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 7
+
+  IQ_VOUT0:
+    module: VOUT0
+    EN_LOOPS: true
+    BITS_LOOPS: 10
+    BITS_CODE: 7

@@ -1,0 +1,29 @@
+# ADR-053 D2/D6：VOUT0 = OPR 输出流水寄存器（RtoVR out16 → OPR 1 拍 → sel13 回 RtoVR）。
+# 与 master.yaml functional_units.VOUT0 逐字同步（守卫② 四向同步校验）。
+unit_name: VOUT0
+latency: 1
+attributes:
+  throughput: 1
+  desc: OPR output pipe register (RtoVR out16 -> sel13), vld && smc_id_en>=SMC_ID gated
+ports:
+  inputs:
+  - name: S
+    width: 128
+  outputs:
+  - name: D
+    width: 128
+    type: data
+    rtovr_src_id: 13
+micro_instructions:
+- field: VALID
+  width: 1
+  default: 0
+  encoding:
+    0: INVALID
+    1: VALID
+- field: smc_id_en
+  width: 5
+  default: 31
+- field: RESERVED
+  width: 1      # CODE[6] 保留位（vh:16）→ decoder payload=7、header VLD 归 bit47（2026-09-12 errata，见 vin0.yaml）
+  default: 0

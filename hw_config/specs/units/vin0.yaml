@@ -1,0 +1,33 @@
+# ADR-053 D2/D6：VIN0 = IPR 输入流水寄存器（RtoVR out14 → IPR 1 拍 → sel11 回 RtoVR）。
+# 与 master.yaml functional_units.VIN0 逐字同步（守卫② 四向同步校验）。
+unit_name: VIN0
+latency: 1
+attributes:
+  throughput: 1
+  desc: IPR input pipe register (RtoVR out14 -> sel11), vld && smc_id_en>=SMC_ID gated
+ports:
+  inputs:
+  - name: S
+    width: 128
+  outputs:
+  - name: D
+    width: 128
+    type: data
+    rtovr_src_id: 11
+micro_instructions:
+- field: VALID
+  width: 1
+  default: 0
+  encoding:
+    0: INVALID
+    1: VALID
+- field: smc_id_en
+  width: 5
+  default: 31   # default 仅为文档值（解码缺省）；实际发射由 D4 pass 显式写
+                # PARAM_SMC_NUM-1=7（2026-09-11 errata：golden 普查 19/20=0x0f，
+                # 仅 sub_8smc_v3 一份 0x3f，原 D5「照 golden 发 31」裁决据误记修订）
+- field: RESERVED
+  width: 1      # CODE[6] 保留位（smi_iq_cru_widths.vh:16）。
+  default: 0    # 2026-09-12 errata：本字段使 decoder payload=7、header VLD 归 bit47，
+                # 与发射侧 modules.yaml code_bits=7 对齐；缺失则 sim 侧 VLD 读 bit46=0
+                # → controls=0 → VIN 永不锁存 → e2e 物理仿真全零（实证）。

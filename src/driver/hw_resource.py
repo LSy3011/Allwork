@@ -25,6 +25,11 @@ class ResourceType(Enum):
     SMI_DS_T = "SMI_DS_T"   # ADR-034: 跨-SMC 转置（SMI 中心单实例，指令驱动）
     LDB = "LDB"             # ADR-050: Load-Buffer UR 写侧（iq_inst[26]，56b CRU）
     LDB_AXI = "LDB_AXI"     # ADR-050: Load-Buffer AXI 读侧（iq_inst[27]，104b CRU）
+    STB = "STB"             # ADR-052: Store-Buffer UR 读侧（iq_inst[24]，50b CRU）
+    STB_AXI = "STB_AXI"     # ADR-052: Store-Buffer AXI 写侧（iq_inst[25]，102b CRU）
+    VIN0 = "VIN0"           # ADR-053: IPR 输入流水寄存器（iq_inst[68]，6b CRU；UR→计算 绕行中继）
+    VIN1 = "VIN1"           # ADR-053: IPR 输入流水寄存器（iq_inst[69]，6b CRU）
+    VOUT0 = "VOUT0"         # ADR-053: OPR 输出流水寄存器（iq_inst[70]，6b CRU；计算→UR 绕行中继）
 
 class PortSlot(IntEnum):
     """

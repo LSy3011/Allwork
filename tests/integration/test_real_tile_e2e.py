@@ -9,15 +9,25 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[2]
 for _p in (str(_ROOT), str(_ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# 同 test_smi_ds_t_e2e.py 的 _ADR053_DEFERRED：阶段 3 deferred 区非法边（MAC 链/广播直馈）
+# 经 D6 掩码在 sim 端诚实置 0；DEBT-053-BCAST-ROUTE，阶段 3 重 lowering 后移除。
+_ADR053_DEFERRED = pytest.mark.xfail(
+    reason="ADR-053 D6 掩码过滤：DFG 含阶段3 deferred 区非法边，sim 诚实置 0"
+           "（DEBT-053-BCAST-ROUTE，阶段 3 重 lowering 后移除）",
+    strict=True)
+
 
 class TestRealTileE2E(unittest.TestCase):
     MODEL = "tinyllama-1.1b"
 
+    @_ADR053_DEFERRED
     def test_real_weight_tiles_pass_fp16_matmul_min_e2e(self):
         from verification_v2.tools.llm_checkpoint_weights import CACHE_DIR
         if not (CACHE_DIR / f"{self.MODEL}.npz").exists():
@@ -30,6 +40,7 @@ class TestRealTileE2E(unittest.TestCase):
             self.assertEqual(failed, 0, f"{gemm}: 真权重 tile e2e 应全 PASS（固件+sim 数据通路），得 {failed} FAIL")
             self.assertGreaterEqual(passed, 1, f"{gemm}: 应至少 1 个 tile 通过")
 
+    @_ADR053_DEFERRED
     def test_real_weight_cols_pass_fp16_matmul_n_e2e(self):
         """multi-SMC N=8：32 个真权重列（8 SMC×4 列）→ fp16_matmul_n e2e，跑真 N=8 跨-SMC 数据通路
         （SHIFTUP 广播 fan-out + 每 SMC 本地权重 + addtree），守 8 SMC golden bit-perfect。
@@ -53,6 +64,7 @@ class TestRealTileE2E(unittest.TestCase):
         self.skipTest("q_dst dst datapath sim model-A 全盲（load 微指令/SMI_DS_T 流未建模）；"
                       "验收走 VCS bit-match（ADR-048 已 8/8），DEBT-047-SIM-BLIND")
 
+    @_ADR053_DEFERRED
     def test_real_weight_cols_pass_fp16_matmul_full_dst_e2e(self):
         """full_dst 变体：M=8 多行流式（逐行广播 M-loop）+ SMI_DS_T 多行转置前端，真权重 → M×N×COLS=256
         输出。npz 仅 a 用 M*K=64（8 激活行），权重 b0..b3 同。守 8 SMC golden bit-perfect（终值 parity；

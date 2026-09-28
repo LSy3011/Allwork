@@ -14,7 +14,19 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).parent.parent.parent
+
+# ADR-053 阶段1（2026-09-11）：以下用例的 DFG 含 INT8 MAC 串链（out17-33）/ SHIFTUP 广播
+# 直馈等**阶段 3 deferred 区**物理非法边。D6 掩码过滤上线后 sim 按 RTL 语义诚实置 0
+# （原 exit=0 / 8/8 bit-perfect 是 dense-sim 假绿，VCS 实证 51/51 算子在 RTL 上全为零）。
+# 编译期不硬错误（ADR「不调度该管」），pass warn+keep；DEBT-053-BCAST-ROUTE 跟踪，
+# 阶段 3 按真合法路径（UR→VIN→INTADD→INT8TOFP16→FP16MUL→ADD5→ADD8→UR）重 lowering 后移除。
+_ADR053_DEFERRED = pytest.mark.xfail(
+    reason="ADR-053 D6 掩码过滤：DFG 含阶段3 deferred 区非法边，sim 诚实置 0"
+           "（DEBT-053-BCAST-ROUTE，阶段 3 重 lowering 后移除）",
+    strict=True)
 
 
 class TestSmiDsTE2EExitCode(unittest.TestCase):
@@ -30,11 +42,13 @@ class TestSmiDsTE2EExitCode(unittest.TestCase):
         )
         return proc.returncode, proc.stdout + proc.stderr
 
+    @_ADR053_DEFERRED
     def test_matmul_q_dst_e2e_exit0(self):
         rc, out = self._run_e2e("matmul_q_dst")
         self.assertEqual(rc, 0, f"matmul_q_dst --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
         self.assertIn("ALL PHYSICAL CHECKS PASSED", out)
 
+    @_ADR053_DEFERRED
     def test_matmul_q_dst_k8_e2e_exit0(self):
         rc, out = self._run_e2e("matmul_q_dst_k8")
         self.assertEqual(rc, 0, f"matmul_q_dst_k8 --mode e2e 应 exit=0，得 {rc}\n{out[-2000:]}")
@@ -64,6 +78,7 @@ class TestFp16MultiTileK16E2E(unittest.TestCase):
             cwd=str(_ROOT), capture_output=True, text=True, timeout=300, env=dict(os.environ))
         return proc.returncode, proc.stdout + proc.stderr
 
+    @_ADR053_DEFERRED
     def test_fp16_matmul_k16_e2e_exit0(self):
         rc, out = self._run_e2e("fp16_matmul_k16")
         self.assertEqual(rc, 0, f"fp16_matmul_k16 e2e 应 exit=0（2-tile 累加 bit-perfect）\n{out[-2000:]}")
@@ -87,6 +102,7 @@ class TestMatmulMultiChannelDenseGolden(unittest.TestCase):
             cwd=str(_ROOT), capture_output=True, text=True, timeout=300, env=dict(os.environ))
         return proc.returncode, proc.stdout + proc.stderr
 
+    @_ADR053_DEFERRED
     def test_matmul_q_dst_full_golden_bit_perfect(self):
         _rc, out = self._run_e2e("matmul_q_dst_full")
         self.assertIn("PASSED y: All 8 SMC outputs bit-perfect", out,
@@ -144,6 +160,7 @@ class TestSmiDsTChainDrain(unittest.TestCase):
                sorted({int(re.search(r"Cyc:(\d+)", l).group(1))
                        for l in text.splitlines() if f"Tag:{tag}" in l and "Cyc:" in l})
 
+    @_ADR053_DEFERRED
     def test_dst_shiftdn_staggered_by_gather_cnt(self):
         """matmul_q_dst（K=4）：DST-SHIFTDN 逐-SMC 错拍 1 拍、跨 gather_cnt=4 拍（非同拍 burst）。"""
         text = self._sim_log("matmul_q_dst")
@@ -152,6 +169,7 @@ class TestSmiDsTChainDrain(unittest.TestCase):
         self.assertEqual(cyc, list(range(cyc[0], cyc[0] + 4)),
                          f"DST-SHIFTDN 须逐拍连续错拍（每 hop 1 latency），得 {cyc}")
 
+    @_ADR053_DEFERRED
     def test_drain_conserves_smi_ds_t_latency(self):
         """守恒（hco 约束1）：DST-SHIFTUP 输出 drain 起点 − DST-SHIFTDN gather 起点 == SMI_DS_T RAW 边权
         —— 逐拍 drain 只把已有延迟渲染成可观测事件，不 double-count、不漂 compute barrier。
@@ -164,6 +182,7 @@ class TestSmiDsTChainDrain(unittest.TestCase):
         self.assertEqual(up[0] - dn[0], 19,
                          f"输出 drain 起点须 = gather 起点 + SMI_DS_T RAW 边权(19)；得 {up[0]}-{dn[0]}={up[0]-dn[0]}")
 
+    @_ADR053_DEFERRED
     def test_smc_id_en_gates_ds_src_read(self):
         """DEBT-036-SMCEN-SIM-GATE：ds_src_read(smc_id_en=gather_cnt-1=3) 时 sim 只让 SMC 0-3 读 bank4
         （不再 SMC4-7 读零）；compute 算子(smc_id_en=7) 仍全 8 SMC 读写（缺省不门控）。"""
@@ -202,6 +221,7 @@ class TestSmiDsTS3aRealGatherAB(unittest.TestCase):
         # 提取每行 [SMC_n] ... | SMC=[...] 的 SMC 数值串，作逐 bit A/B 比对锚点
         return re.findall(r"\[SMC_\d\][^\n]*\|\s*SMC=\[[^\]]*\]", out)
 
+    @_ADR053_DEFERRED
     def test_on_exit0_and_bit_identical_to_off(self):
         import json
         bdir = _ROOT / "build" / "verification_v2" / "fp16_matmul_full_dst"

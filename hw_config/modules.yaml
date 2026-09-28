@@ -122,6 +122,51 @@ modules:
       - {name: VALID, bits: 1}
       - {name: SEL, bits: 6}
 
+  # ADR-053：VIN0/VIN1/VOUT0 绕行寄存器单元（RtoVR 稀疏掩码下 UR↔计算 的唯一合法路径）。
+  #   物理：IPR/OPR（u280_sim_v422/smc/common/{IPR,OPR}.sv:87 "One cycle delay"），
+  #   IQ68/69/70（smi/smi_top.v:788-790）。
+  #   ⚠ 帧宽错误链（2026-09-12 VCS 取证，ADR-053 errata）：CRU_VIN_W=6（smi_iq_cru_widths.vh:30-31）
+  #     只是**数据通路**提取的 {smc_id_en[4:0],vld}6bit（smi_top.v:788 iq_inst[68][CRU_VIN_W-1:0]）；
+  #     而 IQ 帧宽 = 41 header + 7 CODE——同文件 :16「IQ68..70 use CODE[5:0] for VIN..CODE[6] is reserved」
+  #     即 CODE 有第 7 个保留位，header 必须落在 bit[47:7]、VLD 在 bit47。
+  #     曾按 code_bits=6 建模 → header 落在 [46:6] → RTL 读 bit47=0 → 全部 VIN 行 header vld=0，
+  #     VCS 实测 bank2 全零（golden 流在同样数据上通过；golden C++ MUL_SCALAR_VIN_VOUT_CODE_BITS=7 一致）。
+  #     故 code_bits=7，code_fields 显式登记 RESERVED(body[6]) 使字段和=7（test_codebits_consistency 不红，
+  #     master/specs 侧同步登记 → 模拟器 decoder payload=7、header 同样落 [47:7]——三向同源）。
+  #   位布局 {smc_id_en[5:1], vld[0]}；per-SMC 门控 vld_eff = vld && (smc_id_en >= SMC_ID)（IPR.sv:74-76）。
+  #   端口映射：VIN0_S=RtoVR out14→VIN0_D=sel11；VIN1_S=out15→VIN1_D=sel12；VOUT0_S=out16→VOUT0_D=sel13。
+  #   smc_id_en 由 D4 绕行 pass 显式写 metadata=31（照 golden；不经 payload_factory 缺省分支，ADR-053 D5/B3）。
+  VIN0:
+    type: reg_pipe        # ADR-053 D2 新增类型（hco 裁决批准）：vld 门控 1 拍流水寄存器
+    latency: 1
+    inputs: [DVR-VIN0-S]
+    outputs: [DR-VIN0-D]
+    code_bits: 7  # 帧宽 41+7（body[6] 保留恒 0，CRU 取 body[5:0]）；曾按 6 建模致 header 左偏 1 位全行 vld=0（上方注释）
+    code_fields:
+      - {name: VALID, bits: 1}          # body[0]
+      - {name: smc_id_en, bits: 5}      # body[5:1]
+      - {name: RESERVED, bits: 1}       # body[6] CODE[6] 保留位（vh:16）；packer 未给值时补 0（packer.py:68）
+  VIN1:
+    type: reg_pipe
+    latency: 1
+    inputs: [DVR-VIN1-S]
+    outputs: [DR-VIN1-D]
+    code_bits: 7  # 同 VIN0（帧宽 41+7，body[6] 保留恒 0）
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: smc_id_en, bits: 5}
+      - {name: RESERVED, bits: 1}   # body[6] 保留位（同 VIN0）
+  VOUT0:
+    type: reg_pipe
+    latency: 1
+    inputs: [DVR-VOUT0-S]
+    outputs: [DR-VOUT0-D]
+    code_bits: 7  # 同 VIN0（帧宽 41+7，body[6] 保留恒 0）
+    code_fields:
+      - {name: VALID, bits: 1}
+      - {name: smc_id_en, bits: 5}
+      - {name: RESERVED, bits: 1}   # body[6] 保留位（同 VIN0）
+
   UR_READ:
     type: memory_access
     latency: 1
@@ -144,13 +189,41 @@ modules:
       - {name: wbe, bits: 16}
       - {name: smc_id_en, bits: 5}   # ADR-031：SMC_ID 是 smc_id_en 异名，统一命名（除 RTOVR 全单元一致）
 
+  # ADR-052：STB Store-Buffer（UR → AXI → 外部 HBM，LDB 的反向）。两条 CRU 微指令流：
+  #   STB（iq_inst[24], 50b, UR 读侧）+ STB_AXI（iq_inst[25], 102b, AXI 写侧）。
+  #   字段逐位对齐 RTL stb_ur_axi_conv.v:252-315 的**行级位选**（reg [49:0] / reg [101:0]）
+  #   + 打包实现 iq/modules/stb_iq.cpp:26-56（hco 行级独立取证，2026-09-10）。emit iq_stb.hex + iq_stb-axi.hex。
+  #   与 LDB 镜像：STB = LDB − {const(6b), pre_fill(1b), post_fill(1b)} + {tid(2b)}，后段**整体下移 8 位**
+  #   （是 8 不是 6：删的是 8 bit；inst_id LDB[50:47]→STB[42:39]、smc_id_en LDB[55:51]→STB[47:43]）。
+  #   变延迟 DMA + done 握手（与 LDB 同族，共享 DEBT-050-VARLAT）→ 阶段 1 latency 取保守上界 + 相位隔离。
   STB:
     type: transfer
-    latency: 1
-    code_bits: 7
+    latency: 1        # 占位：STB 变延迟，阶段 1 靠 DFG 相位隔离 + pipeline_delays 的 STB:40（见 D6）
+    code_bits: 50
     code_fields:
-      - {name: vld, bits: 1}
-      - {name: slot_id, bits: 6}
+      - {name: VALID, bits: 1}            # [0]
+      - {name: ur_addr, bits: 15}         # [15:1]  字节地址：bank=[14:12]/depth=[11:4]/byteoff=[3:0]
+      - {name: ur_rd_line_cnt, bits: 8}   # [23:16] 读 UR 行数（LDB 是 ur_wr_*，仅语义与字段名不同）
+      - {name: line_byte_cnt, bits: 9}    # [32:24] 每行字节数
+      - {name: line_stride, bits: 6}      # [38:33] UR 行步长（字节步 = <<4）
+      - {name: inst_id, bits: 4}          # [42:39] 完成握手匹配
+      - {name: smc_id_en, bits: 5}        # [47:43]
+      - {name: tid, bits: 2}              # [49:48] AXI 事务 ID → axism_m_tid（stb_ur_axi_conv.v:292→:689）
+
+  STB_AXI:
+    type: transfer
+    latency: 1
+    code_bits: 102
+    code_fields:
+      - {name: VALID, bits: 1}            # [0]
+      - {name: first_byte_strb, bits: 4}  # [4:1]
+      - {name: last_byte_strb, bits: 4}   # [8:5]
+      - {name: brst, bits: 4}             # [12:9]  AXI burst len → awlen；≤15=16 拍（256B/16 行）
+      - {name: gr_base_addr, bits: 40}    # [52:13] HBM 字节基址
+      - {name: gr_intlv_addr, bits: 40}   # [92:53] per-SMC 交织步长（awaddr = gr_base + smc_id × gr_intlv）
+      - {name: inst_id, bits: 4}          # [96:93]
+      - {name: smc_id_en, bits: 5}        # [101:97]
+      # ⚠ 无 tid：STB_AXI = LDB_AXI − {tid(2b)}（LDB_AXI 的 tid 在 [103:102]，本流不带）
 
   # ADR-050：LDB Load-Buffer（外部 HBM 经 AXI → UR）。两条 CRU 微指令流（同 fp16mul s0123/s4567 分桶范式）：
   #   LDB（iq_inst[26], 56b, UR 写侧）+ LDB_AXI（iq_inst[27], 104b, AXI 读侧）。字段逐位对齐 RTL

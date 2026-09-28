@@ -40,6 +40,7 @@ from smc_simulator.units.fp32_add_tree_unit import FP32AddTree5To1Unit
 from smc_simulator.units.fp32addtree8to1_unit import FP32AddTree8To1Unit
 from smc_simulator.units.fp16_mul_unit import FP16MulUnit
 from smc_simulator.units.int8_to_fp16_unit import Int8ToFp16Unit
+from smc_simulator.units.reg_pipe_unit import RegPipeUnit
 
 from api.hw_spec import HardwareSpec
 
@@ -79,7 +80,10 @@ class ParallelKernel:
         self.ur_bank = URBank('UR', 
                               num_banks=self.bank_count, 
                               num_read_ports=self.read_ports)
-        self.rtovr = RtoVRUnit('RtoVR', num_outputs=64)
+        # ADR-053 D6：注入 RTL 稀疏掩码邻接表（D1 同一张表），
+        # 让模拟器与 RtoVR.v 一致地屏蔽非法 (port, src)——数据置 0、vld 仍传播。
+        self.rtovr = RtoVRUnit('RtoVR', num_outputs=64,
+                               allowed=self.hw_spec.get_rtovr_connectivity())
         
         # 3. 初始化所有计算单元
         self.units = {
@@ -97,6 +101,11 @@ class ParallelKernel:
             'fp32addtree8to1': FP32AddTree8To1Unit('FP32ADDTREE8TO1'),
             'fp16mul': FP16MulUnit('FP16MUL'),
             'int8tofp16': Int8ToFp16Unit('INT8TOFP16'),
+            # ADR-053 D6：VIN/VOUT 绕行流水寄存器（IPR/OPR，RTL 稀疏掩码下
+            # UR↔compute 的唯一合法中继；1 拍 vld 门控寄存器）。
+            'vin0': RegPipeUnit('VIN0'),
+            'vin1': RegPipeUnit('VIN1'),
+            'vout0': RegPipeUnit('VOUT0'),
         }
         
         # 4. 初始化 IQs
@@ -519,7 +528,9 @@ class ParallelKernel:
         }, cycle=self.cycle_count)
         
         # 简单转换单元 (S 输入)
-        for name in ['fptofp', 'fptoint', 'inttofp', 'inttoint']:
+        # ADR-053 D6：vin0/vin1/vout0 同为单 S 口 1 拍寄存器，复用同一接线模板
+        # （DVR_VIN0_S/DVR_VIN1_S/DVR_VOUT0_S 端口常量已存在于 constants.py:56-58）。
+        for name in ['fptofp', 'fptoint', 'inttofp', 'inttoint', 'vin0', 'vin1', 'vout0']:
             port = getattr(RtoVROutput, f"DVR_{name.upper()}_S")
             self.units[name].evaluate({
                 'ctrl': controls.get(name, 0),
