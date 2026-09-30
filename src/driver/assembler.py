@@ -607,7 +607,8 @@ class PhysicalAssembler:
                         f"构造预测 L_q=iq_II·R_q+2={L_q_pred}")
                 if emitted_rows > 128:
                     raise ValueError(
-                        f"ADR-055 D3 容量拒绝：iq={iq_name} 实算行数 {emitted_rows} > 128 "
+                        f"[STATIC_ADMISSION_REJECTED/G-cap] ADR-055 D3 容量拒绝："
+                        f"iq={iq_name} 实算行数 {emitted_rows} > 128 "
                         f"（IQ 容量墙 smi_top.v:22 SMI_IQ_INSTQ_DEPTH）——DEBT-055-CAPACITY，"
                         f"A2 分段前置")
                 self.branch_report[iq_name] = "unroll"

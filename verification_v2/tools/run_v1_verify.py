@@ -112,7 +112,9 @@ DOMAIN_MODES = ("v1_admission", "frozen_regression")
 # frozen_regression 下允许放行（记录为设计内证据）的静态保守拒类别
 FROZEN_STATIC_TOLERATED = frozenset(["SUBNORMAL_BAND"])
 
-_CODE_RE = re.compile(r"\[([A-Z0-9_]+(?:\|[A-Z0-9_]+)*)\]")
+# 提取契约：[CODE] 或 [CODE1|CODE2]，允许一个 "/注解" 尾巴（如 assembler L2 闸门的
+# "[STATIC_ADMISSION_REJECTED/G-cap]"）——注解只是定位信息，提取时丢弃，只认 §D.2 码。
+_CODE_RE = re.compile(r"\[([A-Z0-9_]+(?:\|[A-Z0-9_]+)*)(?:/[A-Za-z0-9_-]+)?\]")
 
 
 # ---------------------------------------------------------------------------
@@ -450,9 +452,13 @@ class Orchestrator:
             sctx.failure = {"codes": ["CONFIG_INVALID"], "stage": name,
                             "detail": str(e), "exit_code": None, "logs": {}}
         except Exception as e:  # noqa: BLE001 —— 兜底也必须是 RED，绝不静默
+            # 逃逸到兜底的 ValueError 仍可能带 [CODE] 前缀（如阶段未自行包装的
+            # 组装期闸门消息）——先按契约提取；仅未登记码/无码才落 UNCLASSIFIED。
+            codes = codes_from_value_error(e) if isinstance(e, ValueError) else []
             rec["status"] = "fail"
             sctx.outcome = "RED"
-            sctx.failure = {"codes": ["UNCLASSIFIED_INTERNAL_ERROR"], "stage": name,
+            sctx.failure = {"codes": codes or ["UNCLASSIFIED_INTERNAL_ERROR"],
+                            "stage": name,
                             "detail": f"{type(e).__name__}: {e}",
                             "exit_code": None, "logs": {}}
         rec["finished_utc"] = utc_now_iso()

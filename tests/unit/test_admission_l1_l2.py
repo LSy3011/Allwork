@@ -420,10 +420,15 @@ class TestYamlCorpusCompat(unittest.TestCase):
     名单沿革：步③时恰 add 一份（触点 5 唯一迁移对象）；步④-3 增 add_v1
     （V1 准入证据用例：同公式同布局、test_data 声明域收紧避开 SUBNORMAL_BAND，
     供 v1_admission 双道全过——与 add 的 frozen_regression 回归通道严格分列，
-    见 run_v1_verify.py 发布规则）。任何第三份声明 flag 的算子仍会令本测试失败。"""
+    见 run_v1_verify.py 发布规则）；步⑤ 增 scale_sum（V1 验收对象 y=alpha*(x+other)，
+    配置-only 新增）。**本测试是语料快照守卫而非名称许可**：名单随新配置算子更新，
+    准入与否由 L2 结构闸门判定（见 test_run_v1_verify 更名用例证明任意合法名
+    不影响准入）。任何未登记的 flag 声明仍会令本测试失败。"""
 
     def test_yaml_corpus_zero_conflict_and_single_flag(self):
         paths = sorted(OPS_DIR.glob("*.yaml"))
+        # scale_sum.yaml 自 2026-09-26 预检期已在语料（当时无 flag），步⑤ 仅补 flag+length，
+        # 语料规模不变。
         self.assertEqual(len(paths), 38,
                          f"ops/*.yaml 语料规模漂移（键并集取证的基数前提）: {len(paths)}")
         flagged = []
@@ -431,8 +436,8 @@ class TestYamlCorpusCompat(unittest.TestCase):
             op = ConfigurableOperator(str(p))   # 任何一份构造失败即 RED
             if op.experimental_unroll:
                 flagged.append(op.name)
-        self.assertEqual(flagged, ["add", "add_v1"],
-                         f"声明 experimental_unroll 的算子应恰为 [add, add_v1]: {flagged}")
+        self.assertEqual(flagged, ["add", "add_v1", "scale_sum"],
+                         f"声明 experimental_unroll 的算子应恰为 [add, add_v1, scale_sum]: {flagged}")
 
 
 if __name__ == "__main__":

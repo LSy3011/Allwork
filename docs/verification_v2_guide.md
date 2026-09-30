@@ -43,6 +43,52 @@ python3 verification_v2/scratch/final_smoke_test.py
 
 ---
 
+## 2.3 V1 受限通用准入：统一验证入口（ADR-056）
+
+`verification_v2/tools/run_v1_verify.py` 是 ADR-056 的一键统一入口：一份运行配置
+驱动「配置校验 → 公式域双道 → 编译准入 → 独立参考 → 产物审计 → 打包 → 真实 VCS →
+原生比对 → 三区比对 → 逐拍仲裁」十段链，任一阶段失败即 fail-fast（后续阶段显式
+`not_executed`、后续规模 `NOT_RUN`）。
+
+```bash
+# 运行配置（YAML）方式（推荐，参数全部留档）
+python3 verification_v2/tools/run_v1_verify.py --config <run_config.yaml>
+
+# CLI 直给（等价键见下）
+python3 verification_v2/tools/run_v1_verify.py \
+    --op-yaml verification_v2/ops/add_v1.yaml --n-rows 4,8,60 \
+    --domain-mode v1_admission
+```
+
+运行配置键（未知键响亮拒绝 `CONFIG_INVALID`）：
+
+| 键 | 语义 | 缺省 |
+|---|---|---|
+| `op_yaml` | 算子配置路径（必填） | — |
+| `n_rows` | 规模列表，须 4 的倍数（必填，如 `[4, 8, 60]`） | — |
+| `domain_mode` | `v1_admission`（§C.4 静态+动态双道 AND 必过）/ `frozen_regression`（静态仅容忍 SUBNORMAL_BAND 族、动态必过） | `v1_admission` |
+| `run_vcs` | 是否执行真实 VCS 段；`false` → 该段 UNVERIFIED(VCS_NOT_RUN)，整体不可 GREEN | `true` |
+| `hw_config` / `sandbox` / `vcs_timeout_s` / `run_id` | 环境覆盖（CLI 同名旗标 `--hw-config` 等亦可用） | 内置默认 |
+| `suite` / `case_prefix` / `runs_root` / `releases_root` | 路径/命名覆盖（**仅配置 YAML 可设**，无 CLI 旗标） | 内置默认 |
+
+**结果三态与发布制**：GREEN（全部必需检查 pass → 原子发布指针包：README +
+与 run 目录逐字节一致的 `run_report.json`）；RED（11 类 §D.2 失败码 + 编排级三码
+`CONFIG_INVALID`/`REGISTRY_SEAL_MISMATCH`/`UNCLASSIFIED_INTERNAL_ERROR`，exit=1，
+不发布、旧包不变）；UNVERIFIED（如 VCS 未执行、非 unroll 分支，exit=1，不发布）。
+`frozen_regression` 通道的成功包发布到 `releases/regression/` 子通道，README 明示
+**不构成、不得引用为 V1 数值域准入成功证据**；`v1_admission` 通道发布到主通道。
+
+**新增 V1 公式（配置-only）**：在 `verification_v2/ops/` 新建 YAML，声明
+`experimental_unroll: true` 与全部张量 `length`（静态分配上界），`test_data`
+给安全数值域；准入由 §B.2 结构闸门（G-op/G-II/G-slot/G-stride/G-addr/G-cap/G-stage/
+G-dp）判定，**与算子名无关**（由更名用例测试锁定）。IQ 容量墙
+`smi_top.v:22 SMI_IQ_INSTQ_DEPTH=128`：任一队列展开行数 >128 →
+`STATIC_ADMISSION_REJECTED`（scale_sum 实测边界 n_max=240，rtovr-14 恰 128 行顶格）。
+步⑤ 验收证据与覆盖矩阵见
+`verification_v2/artifacts/v1_step5_scale_sum_acceptance_20260930/README.md`。
+
+---
+
 ## 3. 开发新算子
 
 要增加一个新的验证算子，请遵循以下模块化步骤：

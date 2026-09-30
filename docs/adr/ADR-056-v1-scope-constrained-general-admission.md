@@ -474,6 +474,39 @@ CSE、路由、端口分配、调度与填充——全部以预检和产物为�
      另一张量的声明区——读不污染有效输出（三区机制不抓读侧），属**允许行为**，成文以免
      后续审查反复。
 
+## §F-回填（2026-09-30 步⑤ 验收实测结论；归档 `verification_v2/artifacts/v1_step5_scale_sum_acceptance_20260930/`）
+
+- **配置-only 准入成立**：scale_sum 仅补 `experimental_unroll: true` + 全部张量
+  `length`（公式/域为步②定稿值），生产代码零算子名特判。用户必查点「`[add, add_v1]`
+  白名单」三层闭环：生产代码无名称门（旧 A1_UNROLL_ALLOWLIST 步③已删）；语料测试
+  定性为快照守卫（名单随新配置更新为 `[add, add_v1, scale_sum]`，非许可名单）；
+  更名用例动态证明（add 公式改名 zz_rename_probe 走真链至打包全 pass，
+  `test_arbitrary_legal_name_does_not_affect_admission`）。
+- **⑤-2 三规模 GREEN**：run `20260930_032104_669350`（n=4/8/60），30/30 必需检查
+  pass，§C.4 双道零诊断 ×3，原生 COMPARE pass，三区零违例，逐拍仲裁 GREEN×3，
+  发布 `releases/scale_sum_20260930_032104_669350`。
+- **⑤-3 容量边界预测升级为实测**：§E.3-回填预测式 `L_q=2·N_eff+8≤128`（束缚队列
+  rtovr-14）给出 n_max^IQ=240；run `20260930_032502_a757e9`（n=240）GREEN 且
+  **产物 rtovr-14 恰 128 行顶格**（次大 vin0/ur-r0=126），布局界 1024 未到达，
+  IQ 界先到达与预测一致。边界成功用例落在 IQ 界（§F.2 允许）。
+- **⑤-4 超限响亮拒绝**：n=244 → rtovr-14 实算 130>128，RED +
+  `STATIC_ADMISSION_REJECTED`（G-cap，DEBT-055-CAPACITY），exit=1，不发布、
+  releases/ 零新增、旧成功包逐字节不变（sha256 快照比对）。
+- **⑤-4 暴露并已修复的失败码传递缺陷**（透明披露，纯错误路径）：assembler L2 闸门
+  `[CODE/G-xxx]` 注解形态不匹配编排器提取正则，且 `_invoke_stage` 兜底不提取——
+  容量拒绝一度落 UNCLASSIFIED。修复 = G-cap 消息补前缀 + `_CODE_RE` 允许并丢弃
+  `/注解` 尾巴 + 兜底对逃逸 ValueError 先按契约提取；+8 测试锁定。GREEN 路径
+  零行为变化（add 双通道在修复后代码状态下重跑仍 GREEN 作交叉印证）。
+- **⑤-5 全回归**：pytest 349 passed / 7 skipped / 11 xfailed / 148 subtests
+  （基线 340 → +9 全为步⑤新增，skip/xfail/subtests 零漂移）；add 双通道重跑
+  GREEN（frozen `20260930_034720_d28bfb` → `releases/regression/`；add_v1
+  `20260930_034801_f8f35c` → 主通道）；mul 既定零字节回归 GREEN（13 文件对
+  M1 沙箱基线逐字节一致）。
+- **交付结论（限定范围口径）**：在 §A 子集、II=1..2 已证形态、无反压展开分支、
+  单 SMC 的限定范围内，**只新增公式配置即可自动生成指令、完成 VCS 验证并发布
+  算子包**。遗留债务保留（flat ISSUE 实证缺口、c0_spread 未冻结、反压未建模、
+  check_iq_probe_trace 注册表化缓办）；本回填为 VCS RTL 级证据，非上板证据。
+
 ## §G. 证据口径订正（对本 ADR 之前相关表述的书面更正）
 
 | 原表述 | 订正 |
@@ -500,3 +533,8 @@ CSE、路由、端口分配、调度与填充——全部以预检和产物为�
   ③ 实现配置传递、结构准入及 add 显式迁移，检查零字节回归（§B.4 触点 1-7）
   ④ 整合入口、探针、全局监测与冻结协议模型（§D）⑤ 执行 scale_sum 三规模、实际容量边界
   及拒绝用例，再完成全回归（§F）。全程 ADR-004 路由；§E.3 预检已完成并回填。
+- **五步序状态（2026-09-30）**：①②③ DONE（develop@ee74f1f）；④ DONE（develop@74d6557，
+  统一入口真实跑通、失败正确传递、发布条件严格成立，双通道分列经真实运行验证）；
+  **⑤ DONE（本提交）——结果见 §F-回填**：scale_sum 配置-only 准入、三规模 GREEN、
+  实测容量边界 n_max=240、n=244 响亮拒绝（STATIC_ADMISSION_REJECTED）、全回归通过。
+  V1 受限通用准入在 §A 限定范围内闭环；A2a/A2b 等挂账项不阻塞、不变序。

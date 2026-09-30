@@ -170,6 +170,36 @@ def test_generic_exception_is_unclassified_never_silent(tmp_path):
     assert "ValueError" in fail["detail"] and "无码" in fail["detail"]
 
 
+@pytest.mark.parametrize("msg,want", [
+    ("[STATIC_ADMISSION_REJECTED] plain", ["STATIC_ADMISSION_REJECTED"]),
+    ("[STATIC_ADMISSION_REJECTED|BASE_OP_OUT_OF_SCOPE] dual",
+     ["STATIC_ADMISSION_REJECTED", "BASE_OP_OUT_OF_SCOPE"]),
+    # assembler L2 闸门的 "/注解" 尾巴形态（步⑤-4 实证缺口：尾巴曾使正则不匹配，
+    # 容量拒绝落 UNCLASSIFIED）——注解须被丢弃、只提取 §D.2 码
+    ("[STATIC_ADMISSION_REJECTED/G-cap] ADR-055 D3 容量拒绝",
+     ["STATIC_ADMISSION_REJECTED"]),
+    ("[STATIC_ADMISSION_REJECTED/G-addr] x", ["STATIC_ADMISSION_REJECTED"]),
+    ("[STATIC_ADMISSION_REJECTED/G-II] y", ["STATIC_ADMISSION_REJECTED"]),
+    ("无码普通 ValueError", []),
+    ("[NOT_A_REAL_CODE/G-cap] 未登记码不得提取", []),
+])
+def test_codes_from_value_error_extraction_contract(msg, want):
+    assert rv.codes_from_value_error(ValueError(msg)) == want
+
+
+def test_slash_annotated_gate_valueerror_propagates_clean_code(tmp_path):
+    """端到端：compile_admit 抛带 "/G-cap" 注解的 ValueError（n=244 容量拒绝的真实
+    形态），报告须落 codes=["STATIC_ADMISSION_REJECTED"] 而非 UNCLASSIFIED。"""
+    exc = lambda: ValueError(                                          # noqa: E731
+        "[STATIC_ADMISSION_REJECTED/G-cap] ADR-055 D3 容量拒绝："
+        "iq=rtovr-14 实算行数 130 > 128——DEBT-055-CAPACITY")
+    _, _, report = run_orch(tmp_path, stages=many_params_stages("compile_admit", exc))
+    frag = report["sizes"]["4"]
+    assert report["outcome"] == "RED" and report["published"] is False
+    assert frag["failure"]["codes"] == ["STATIC_ADMISSION_REJECTED"]
+    assert "DEBT-055-CAPACITY" in frag["failure"]["detail"]
+
+
 # ---------------------------------------------------------------------------
 # 出口 2-c：失败不发布——旧成功包 sentinel 逐字节不变、无半截包
 # ---------------------------------------------------------------------------
@@ -406,6 +436,35 @@ def test_cli_unknown_key_config_file_rejected(tmp_path):
     with pytest.raises(rv.ConfigInvalid) as ei:
         rv.build_config(["--config", str(cfg_yaml)])
     assert "zz_extra" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# 步⑤ 用户要求（2026-09-30）：更名用例——任意合法名字不影响准入
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _SANDBOX_OK, reason="VCS 沙箱不在位")
+def test_arbitrary_legal_name_does_not_affect_admission(tmp_path):
+    """同一 add 公式/布局改名 zz_rename_probe（tmp 目录、不入语料），统一入口走至
+    打包：config_check..package 须全 pass、vcs=UNVERIFIED(VCS_NOT_RUN)。
+    若生产代码存在算子名特判/名称许可，本用例必红（准入由 L2 结构闸门判定，
+    与语料快照守卫 test_yaml_corpus_zero_conflict_and_single_flag 互补）。"""
+    src = (rv.REPO_ROOT / "verification_v2" / "ops" / "add.yaml").read_text(encoding="utf-8")
+    probe = tmp_path / "zz_rename_probe.yaml"
+    probe.write_text(src.replace('name: "add"', 'name: "zz_rename_probe"'), encoding="utf-8")
+    cfg = rv.RunConfig({
+        "op_yaml": str(probe), "n_rows": [4], "domain_mode": "frozen_regression",
+        "run_vcs": False, "runs_root": str(tmp_path / "runs"),
+        "releases_root": str(tmp_path / "releases"),
+    })
+    report = rv.Orchestrator(cfg).run()
+    assert report["outcome"] == "UNVERIFIED"
+    assert report["published"] is False
+    rec = {r["stage"]: r["status"] for r in report["sizes"]["4"]["stages"]}
+    for s in ("config_check", "formula_domain_check", "compile_admit",
+              "independent_reference", "artifact_audit", "package"):
+        assert rec[s] == "pass", f"{s} 在更名配置下失败——存在名称特判: {report['sizes']['4']}"
+    assert rec["vcs"] == "unverified"
+    assert report["sizes"]["4"]["unverified"]["reason_code"] == "VCS_NOT_RUN"
 
 
 # ---------------------------------------------------------------------------
