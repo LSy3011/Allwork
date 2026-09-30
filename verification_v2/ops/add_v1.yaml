@@ -1,0 +1,19 @@
+name: "add_v1"
+# ADR-056 步④-3 V1 准入证据用例：公式/布局与 add 完全相同，仅 test_data 声明域收紧，
+# 使 §C.4 双道（静态+动态）在 v1_admission 模式下无诊断全过：
+#   alpha*other ∈ [2.5, 37.5]；x + alpha*other ∈ [3.5, 47.5]
+#   全链中间量幅值 ≥ 2.5，远离 SUBNORMAL_BAND(±FLT_MIN≈1.18e-38) 与溢出端。
+# 不得与 add.yaml（冻结基线域 [-10,10]/[-5,15]，仅 frozen_regression 可跑）混用——
+# 两者发布通道分列（releases/ vs releases/regression/），证据类别不得混称。
+formula: "x + alpha * other"
+experimental_unroll: true
+tensors:
+  x: { bank: 0, role: "input", offset: 0, length: 256 }
+  other: { bank: 1, role: "input", offset: 0, length: 256 }
+  alpha: { bank: 3, role: "param", offset: 0, length: 256 } # 标量系数（stride=0 驻留，消耗 1 word）
+  constants: { bank: 7, role: "constant", offset: 0, length: 256 }
+  y: { bank: 2, role: "output", offset: 0, length: 256 }
+test_data:
+  x: { range: [1.0, 10.0] }
+  other: { range: [1.0, 15.0] }
+  alpha: [2.5]

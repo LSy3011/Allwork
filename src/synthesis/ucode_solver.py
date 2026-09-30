@@ -15,6 +15,35 @@ class SolverStatus(Enum):
     UNKNOWN = "unknown"
 
 
+class SolverReport:
+    """ADR-056 §D.2 hco notes-5：求解器三态沿扫描全程聚合透出（臻 verdict 透亮）。
+
+    ``solve_with_units_report`` 的返回值；与 ``None`` 失败语义兼容的同时，把
+    「为什么失败」机器可读化：
+      * ``final``      SAT | UNSAT | UNKNOWN（聚合规则见 ``_aggregate_final``）；
+      * ``per_ii``     每个探测的 II → SolverStatus（含既验之 SAT 反证失败记 VERIFIER_FAIL）；
+      * ``budget_exhausted``  True = ADR-011 总预算踩停（该状态语义属 UNKNOWN：
+                       未完成证明，λ 不能当 UNSAT 用）。
+    """
+
+    def __init__(self, result, per_ii, final, budget_exhausted):
+        self.result = result                 # Optional[dict]，与 solve_with_units 返回同构
+        self.per_ii = per_ii                 # List[Tuple[int, str]]，按探测顺序
+        self.final = final                   # "SAT" | "UNSAT" | "UNKNOWN"
+        self.budget_exhausted = budget_exhausted
+
+    @staticmethod
+    def _aggregate_final(per_ii, budget_exhausted):
+        """任一 UNKNOWN / 预算踩停 → UNKNOWN（未证明不可满足）；仅全部 UNSAT 才 UNSAT。
+        校验失败的 SAT 探测（VERIFIER_FAIL）与 UNKNOWN 同级——不能证明无解。"""
+        if budget_exhausted:
+            return SolverStatus.UNKNOWN.value
+        seen = {s for (_ii, s) in per_ii}
+        if seen and seen <= {SolverStatus.UNSAT.value}:
+            return SolverStatus.UNSAT.value
+        return SolverStatus.UNKNOWN.value
+
+
 # ADR-011 constants（per-II timeout env-gated：大 DFG 如 matmul_q_full full-unroll spill II=16 需 >30s
 # 攻破单个 II，否则默认 30s 即 UNKNOWN 跳过。默认不变、低风险；跑该算子须 AIACC_SOLVER_TIMEOUT_MS≈90000）
 _TIMEOUT_PRIMARY_MS = int(os.environ.get("AIACC_SOLVER_TIMEOUT_MS", "30000"))   # 单次 z3 timeout（默认 30s）
@@ -44,27 +73,39 @@ class UCodeSynthesizer:
         return u
 
     def solve_with_units(self, ops: List[MIROp], MII: int = 1, MAX_II: int = 32) -> Optional[Dict[str, Any]]:
+        """行为不变薄壳：只取 report.result。三态亮出请用 solve_with_units_report。"""
+        return self.solve_with_units_report(ops, MII=MII, MAX_II=MAX_II).result
+
+    def solve_with_units_report(self, ops: List[MIROp], MII: int = 1, MAX_II: int = 32) -> SolverReport:
         """
         🚀 [SAT-OPT-1] 线性扫描：从精确 MII 向上寻找第一个 SAT 且验证通过的方案。
         彻底解决非单调硬件约束下的二分查找漏检问题（例如 addcmul 的 II=2..4 为 SAT, II=5 为 UNSAT）。
         因为精确 MII 极准，所以通常第 1 次或第 2 次探测即 SAT，综合性能、稳定性和最优解质量均达到极致。
+
+        ADR-056 §D.2：失败时不得只掉 None——per-II 三态（z3 unsat/unknown 原文态 + 验证
+        失败 SAT 探测）聚合入 SolverReport，final ∈ {SAT, UNSAT, UNKNOWN}：
+        全部 II 证明 UNSAT 且扫描完整 → UNSAT；任一 UNKNOWN / 验证失败探测 / 预算踩停
+        → UNKNOWN（未证明不可满足，不得当 UNSAT 用）。
         """
         from core.ii_analyzer import IIAnalyzer
         computed_mii = IIAnalyzer(self.hw_spec).compute(ops)
         effective_mii = max(MII, computed_mii)
-        
+
         # 保存初始 metadata 状态，防止被之前 SAT 的迭代污染
         original_meta = {op.trace_id: {"iq_id": op.metadata.get("iq_id"), "slot_id": op.metadata.get("slot_id")} for op in ops}
-        
+
         best_res = None
         best_meta = None
         budget_start = time.perf_counter()
+        per_ii: List[Tuple[int, str]] = []
+        budget_exhausted = False
 
         for ii in range(effective_mii, MAX_II + 1):
             # ADR-011: total-budget cap; 病态 case 防卡死
             if time.perf_counter() - budget_start > _TOTAL_BUDGET_S:
                 print(f"[BUDGET-EXHAUSTED] {_TOTAL_BUDGET_S}s exceeded at II={ii}; "
                       f"set AIACC_SOLVER_BUDGET_S=N to extend")
+                budget_exhausted = True
                 break
 
             # 每次探测前恢复初始状态
@@ -96,14 +137,20 @@ class UCodeSynthesizer:
                     print(f"[SOLVER] II={ii} is SAT and Verified. Found optimal II.")
                     best_res = {"schedule": schedule, "II": ii, "unit_assignments": unit_map}
                     best_meta = {op.trace_id: {"iq_id": op.metadata.get("iq_id"), "slot_id": op.metadata.get("slot_id")} for op in ops}
+                    per_ii.append((ii, SolverStatus.SAT.value))
                     break
                 else:
                     print(f"[VERIFIER] Counter-verification FAILED for II={ii}. Trying next.")
+                    # z3 已证 SAT 但物理校验驳回：该 II 未被证明不可用 → 聚合时必须按
+                    # 「非 UNSAT」对待（三态透亮：不能报 SOLVER_UNSAT）。
+                    per_ii.append((ii, "verify_fail"))
             elif status == SolverStatus.UNSAT:
                 print(f"[SOLVER] II={ii} is UNSAT (proven). Trying next.")
+                per_ii.append((ii, SolverStatus.UNSAT.value))
             else:  # UNKNOWN after both seeds
                 print(f"[SOLVER] II={ii} UNKNOWN after 2 seeds (seed=0 + seed=42); skipping")
-                
+                per_ii.append((ii, SolverStatus.UNKNOWN.value))
+
         # 应用最佳的 metadata 结果
         if best_meta:
             for op in ops:
@@ -111,8 +158,13 @@ class UCodeSynthesizer:
                     op.metadata["iq_id"] = best_meta[op.trace_id]["iq_id"]
                 if best_meta[op.trace_id]["slot_id"] is not None:
                     op.metadata["slot_id"] = best_meta[op.trace_id]["slot_id"]
-                    
-        return best_res
+
+        if best_res is not None:
+            return SolverReport(best_res, per_ii, SolverStatus.SAT.value, budget_exhausted)
+        return SolverReport(
+            None, per_ii,
+            SolverReport._aggregate_final(per_ii, budget_exhausted),
+            budget_exhausted)
 
     def validate_physical_schedule(self, ops: List[MIROp], schedule: Dict[str, int], unit_map: Dict[str, str], II: int) -> bool:
         """

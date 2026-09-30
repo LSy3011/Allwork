@@ -414,20 +414,25 @@ class TestRunnerAdmission(unittest.TestCase):
 # ---------------------------------------------------------------- 存量 YAML 语料契约
 
 class TestYamlCorpusCompat(unittest.TestCase):
-    """ADR-056 §B.3 兼容面直接证明：键 allowlist / 文本闸对存量 37 份 YAML 零冲突；
-    且全语料**恰 add 一份**声明 experimental_unroll=true（触点 5 唯一迁移对象）。"""
+    """ADR-056 §B.3 兼容面直接证明：键 allowlist / 文本闸对存量 YAML 零冲突；
+    且全语料声明 experimental_unroll=true 的算子被**显式名单**锁定。
+
+    名单沿革：步③时恰 add 一份（触点 5 唯一迁移对象）；步④-3 增 add_v1
+    （V1 准入证据用例：同公式同布局、test_data 声明域收紧避开 SUBNORMAL_BAND，
+    供 v1_admission 双道全过——与 add 的 frozen_regression 回归通道严格分列，
+    见 run_v1_verify.py 发布规则）。任何第三份声明 flag 的算子仍会令本测试失败。"""
 
     def test_yaml_corpus_zero_conflict_and_single_flag(self):
         paths = sorted(OPS_DIR.glob("*.yaml"))
-        self.assertEqual(len(paths), 37,
+        self.assertEqual(len(paths), 38,
                          f"ops/*.yaml 语料规模漂移（键并集取证的基数前提）: {len(paths)}")
         flagged = []
         for p in paths:
             op = ConfigurableOperator(str(p))   # 任何一份构造失败即 RED
             if op.experimental_unroll:
                 flagged.append(op.name)
-        self.assertEqual(flagged, ["add"],
-                         f"声明 experimental_unroll 的算子应恰为 add: {flagged}")
+        self.assertEqual(flagged, ["add", "add_v1"],
+                         f"声明 experimental_unroll 的算子应恰为 [add, add_v1]: {flagged}")
 
 
 if __name__ == "__main__":

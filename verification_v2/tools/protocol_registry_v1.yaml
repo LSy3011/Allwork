@@ -1,0 +1,80 @@
+# ADR-056 §D.3 协议模型注册表 v1（版本化冻结清单）
+#
+# 定位：协议模型常数与断言形式（**非硬件事实**），故不放 hw_config（§D.3 hco notes-1）。
+# 冻结语义（§D.3 用户修约③）：
+#   * 期望由「调度 + 本注册表协议延迟模型」在**仿真前**生成；禁止从 trace 读常数当期望。
+#   * trace 与冻结值不符 → PER_BEAT_PROTOCOL_MISMATCH，**不得回改常数拟合**；
+#     同样不得改动 schedule 侧输入拟合（对称规则）。
+#   * 新形态上的首个常数值只能走「探索 → 独立论证（RTL 文本/不变量，非被验 trace）→
+#     追加冻结」，不得直接引用已有冻结值外推。
+# 完整性：records_sha256 = 对 records 的 canonical JSON（sort_keys, 紧凑分隔符, utf-8）
+#   的 sha256；任何记录改动不重算本值 → 加载器 RED。重算用 infra/protocol_registry.py --seal。
+registry: protocol_model
+version: 1
+frozen_at: "2026-09-28"
+governing: "ADR-056 v4 §D.3（用户修约③）/ §D.4（hco M4 + 待决项③）；hco notes-1 载体裁决"
+records:
+  # ---------- §D.3 冻结对象①：INIT 垫拍公式 ----------
+  - name: INIT_PAD_FORMULA
+    kind: formula
+    value: "skip*II + 1"
+    binds: {skip: "t_min//II（本队列 IQ 局部）", II: "队列发射 II"}
+    result: l_init
+    provenance:
+      - "ADR-055 M7：+1 拍来源（无 HDR 占位拍，多垫 1 拍）"
+      - "A1 实测：INIT fetch c0 与首 BODY fetch c1 满足 c1−c0 = l_init+1 = 4（II=2, skip=1）"
+      - "RTL：smi_iq_iic.v INIT 行回放（§D.4 表 INIT 行 ISSUE 层 l_init+1 拍）"
+    proven_boundary: "A1 已证形态：add，II=2，单槽(ur-r0)与两槽(ur-r3)队列；「垫拍与槽数无关」为 A1 已证结构命题，新队列继承该命题；II=1/flat/压缩形态不在已证边界内"
+    status: frozen
+  # ---------- §D.3 冻结对象②：TERM 相位公式 ----------
+  - name: TERM_PHASE_FORMULA
+    kind: formula
+    value: "l_init + 1 + II*R_q"
+    binds: {l_init: "INIT_PAD_FORMULA", II: "队列发射 II", R_q: "(t_max//II + N_eff) − skip"}
+    result: term_abs_t
+    provenance:
+      - "ADR-055 (iii)：TERM 落在 l_init+1+II·R_q 拍（A1 三规模探针实证）"
+    proven_boundary: "同 INIT_PAD_FORMULA（II=2 展开形）"
+    status: frozen
+  # ---------- §D.3 冻结对象③：残尾取指 __probes 语义 ----------
+  - name: PROBES_TAIL_SEMANTICS
+    kind: semantics
+    value: "TERM/JUMP 行取指之后，TB 探针（__probes）允许出现残尾取指事件；裁决只覆盖至 TERM（含），残尾不计违例；本语义仅限并集内队列（并集外队列任何取指即 RED，见 GLOBAL_MONITOR_RULE）"
+    provenance:
+      - "A1 已证（add 三规模 iq_probe_trace.log 残尾观测，check_iq_probe_trace.py 沿用）"
+    proven_boundary: "仅 TERM/JUMP 之后的尾部；BODY 段任何额外取指仍属违例（断言 (ii) 严格连续 + (e0) 行数 L_q 双重锁死）"
+    status: frozen
+  # ---------- §D.3 冻结对象④：(i)–(iv) 断言形式 ----------
+  - name: ASSERT_FORMS_I_IV
+    kind: assertion
+    value: "(i) c1−c0 == l_init+1（首 BODY 相位）；(ii) BODY 段严格连续 c_{k+1}−c_k == 1；(iii) TERM 相位 c_last−c0 == l_init+1+II·R_q；(iv) 单槽与多 op 队列同法成立（垫拍与槽数无关）"
+    provenance:
+      - "ADR-055 D4(b-2) 验收四点；A1 add 三规模全绿"
+    proven_boundary: "A1 已证形态 II=2 展开形；断言*形式*可继承，常数值在新形态须独立论证后冻结"
+    status: frozen
+  # ---------- §D.4 事件投影规则（FETCH 层） ----------
+  - name: PROJ_FETCH_UNROLL
+    kind: projection
+    value: "展开形（level=0, loops=0）队列：INIT 1 次取指 + 有效/气泡行各 1 次（严格连续）+ TERM 1 次；FETCH rel_cycle = abs_t（INIT=0，BODY=l_init+1+k+j*II，TERM=TERM_PHASE_FORMULA）；行数恒等式 L_q = II*R_q + 2"
+    provenance:
+      - "§D.4 逐形态映射表行1/行3（A1 (i)(ii) 实证：1 次/行、严格连续）"
+      - "smi_iq.v:165-166 信号锚 w_rdi_addr_valid / w_rdi_addr"
+    proven_boundary: "unroll 分支（II≥2 展开）；flat（II=1）与压缩行（loops≥1）FETCH 投影为不同规则，不在本条"
+    status: frozen
+  # ---------- §D.4 事件投影规则（ISSUE 层） ----------
+  - name: PROJ_ISSUE_UNROLL
+    kind: projection
+    value: "展开形队列 ISSUE 层（信号锚 w_dly_data_valid, smi_iq.v:170）：INIT 行回放 l_init+1 拍（rel_cycle 0..l_init）；每展开行回放 1 拍（rel_cycle = 该行 abs_t）；TERM 无 ISSUE；ISSUE 总拍数 = l_init+1+II*R_q"
+    provenance:
+      - "§D.4 逐形态映射表：展开行 1 拍/行；INIT 行 l_init+1 拍（A1 实测 c1−c0=4 的 RTL 级解释）"
+    proven_boundary: "unroll 分支已证（A1）；**flat 形 ISSUE 层为实证缺口（§D.4：mul flat 无 VCS 探针证据）——II=1 形态不得引用本条，列入步④-5 自验清单与 §F.1 门槛**"
+    status: frozen
+  # ---------- §D.4 全局活动监测规则 ----------
+  - name: GLOBAL_MONITOR_RULE
+    kind: semantics
+    value: "以 FETCH 层信号常开监测全部 IQ 实例（SMI_IQ_CNT=94 减 stub；stub 位 67、71-91 显式排除并记录）：内部回放不取指，任何队列首拍活动必然先取指 → 并集外队列出现取指脉冲即 RED；复位后公共 cycle 基准（TB iq_probe_cycle）为共同启动锚，跨队列相对相位在该锚下检查，不允许逐队列独立平移后宣布一致"
+    provenance:
+      - "§D.4（hco M4 + 用户裁示④-a）；smi_top.v:21 SMI_IQ_CNT=94；布针三族 u_iq_0..27/92/93、gen_iq[28..66]、gen_iq_bridge[68..70]（tb:2442-2485 现探针属第一族）"
+    proven_boundary: "监测逻辑在步④-2 泛化探针时实例化；自验含对抗用例（人为触发一次并集外 fetch 须被 RED 捕获）"
+    status: frozen
+records_sha256: "ed486202ee53c7c6b289381d80f0efca341475fea4b5aaa2b9c30d46f6baa3e0"

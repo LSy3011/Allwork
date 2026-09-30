@@ -2,12 +2,32 @@ import os, sys, json, subprocess
 import numpy as np
 from typing import List, Dict, Any
 from api.hw_spec import HardwareSpec
-from synthesis.ucode_solver import UCodeSynthesizer
+from synthesis.ucode_solver import UCodeSynthesizer, SolverReport
 from driver.assembler import PhysicalAssembler, UnrollAdmission
 from driver.emitter import LIRPacker
 from collections import namedtuple
 
 TensorObj = namedtuple("TensorObj", ["bank", "offset", "shape", "role"])
+
+
+class SynthesisRejected(RuntimeError):
+    """ADR-056 §D.2：求解失败带三态分类抛出（替代裸 RuntimeError("Synthesis failed.")）。
+
+    ``.failure_code`` ∈ {"SOLVER_UNSAT", "SOLVER_UNKNOWN"}；``.report`` 为
+    ``SolverReport``（per-II 三态、预算踩停标记）沿异常透出，臻 verdict json 可
+    逐字引用 z3 态而不必 grep 日志。message 前缀与 ADR-056 失败码同名，text 级一致。
+    是 RuntimeError 子类——凡捕获 RuntimeError 的既有调用方行为不变。
+    """
+
+    def __init__(self, report: SolverReport):
+        self.report = report
+        self.failure_code = "SOLVER_UNSAT" if report.final == "unsat" else "SOLVER_UNKNOWN"
+        per_ii = ", ".join(f"II={ii}:{st}" for ii, st in report.per_ii) or "(无探测记录)"
+        budget = "；总预算踩停" if report.budget_exhausted else ""
+        super().__init__(
+            f"[{self.failure_code}] Synthesis failed: final={report.final}{budget}；"
+            f"per-II 三态: {per_ii}"
+        )
 
 # ADR-055 M3：算子身份**规范化契约**。调用方标签可带渠道前缀（hw-parity 物理验收渠道在
 # tests/integration/test_smt_hw_parity.py:67 传 f"hw_parity_{op_name}"）；剥离**已知闭集前缀**、
@@ -79,9 +99,10 @@ class PipelineRunner:
                 print(f"  Node: {op.trace_id:<15} | Type: {op.op_type:<10} | Meta: {op.metadata}")
                 
         synth = UCodeSynthesizer(self.spec)
-        result = synth.solve_with_units(ops, MII=1, MAX_II=64)
+        report = synth.solve_with_units_report(ops, MII=1, MAX_II=64)
+        result = report.result
         if not result:
-            raise RuntimeError("Synthesis failed.")
+            raise SynthesisRejected(report)
         
         schedule, II, unit_map = result["schedule"], result["II"], result.get("unit_assignments", {})
         for op in ops:
