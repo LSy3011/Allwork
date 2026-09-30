@@ -133,10 +133,22 @@ class PhysicalAssembler:
                     f"（ADR-056 §B.2-7 / §A.3）")
 
     def assemble(self, lir_stream: List[LIROp], II: int = 1, num_iterations: int = 1,
-                 admission: Optional[UnrollAdmission] = None) -> List[PhysicalInstruction]:
+                 admission: Optional[UnrollAdmission] = None,
+                 stage_start: int = 0) -> List[PhysicalInstruction]:
         # ADR-056 §B.1：admission = L1 请求 + L2 判定凭据（runner 由 YAML
         #   `experimental_unroll: true` 物化）；None = 未请求 → 不启用展开分支
         #   （census/旧调用点/其余算子零行为变化，§B.3 兼容语义）。
+        # ADR-057 D2（验收① 最小分段侦察）：stage_start = 段起始逻辑迭代 s——
+        #   段内第 j 次重复的全局迭代 = s + j（地址按 orig_offset + stride·(s+j−r_k)
+        #   烘焙，LIVE 判定与 G-addr 声明区检查以全局迭代计）。仅展开分支消费；
+        #   默认 0 = 单段全量，既有行为逐字节不变。num_iterations 语义随之收窄为
+        #   「本段迭代数 m」（R_q = span_q + m 由调度槽时自动继承，无需新参数）。
+        if not isinstance(stage_start, int) or isinstance(stage_start, bool) or stage_start < 0:
+            raise ValueError(f"[STATIC_ADMISSION_REJECTED/G-stage] ADR-057 stage_start 必须为非负整数: {stage_start!r}")
+        if stage_start != 0 and (admission is None or II < 2):
+            raise ValueError(
+                "ADR-057 D2：stage_start≠0 仅在 unroll 准入分支有意义（embed/平坦"
+                "分支不消费段偏移）——显式拒绝，防静默忽略")
         if admission is not None:
             self._l2_stream_level_gates(lir_stream, admission)
         trace_to_slot = {}
@@ -554,10 +566,13 @@ class PhysicalAssembler:
                             #   落入允许；写侧无豁免属三区 zone3 语义，由运行时三区比对承担，
                             #   非本静态闸门）。N_eff = num_iterations（本分支 G-dp 已拒
                             #   smi_ds_t，eff_num_iter 恒等于 num_iterations）。
+                            # ADR-057 D2：分段时 num_iterations=本段 m，LIVE 局部判定不变
+                            #   （j_logical∈[0,m)），合法性以全局迭代 s+j_logical 的
+                            #   未取模地址对**完整张量声明区**判定。
                             if admission is not None:
                                 j_logical = j - relative_skip_k
                                 if 0 <= j_logical < num_iterations:
-                                    unwrapped = orig_offset_k + stride_k * j_logical
+                                    unwrapped = orig_offset_k + stride_k * (stage_start + j_logical)
                                     region = admission.find_region(bank_k, orig_offset_k)
                                     if region is None:
                                         raise ValueError(
@@ -576,7 +591,7 @@ class PhysicalAssembler:
                                             f"'{r_name}'=[{r_off}, {r_off + r_len})——mod 仅作用于"
                                             f"编码层，不作越界豁免（ADR-056 §F.5），显式拒绝")
                             addr_j = ((orig_offset_k - stride_k * relative_skip_k)
-                                      + stride_k * j) % layout.bank_depth
+                                      + stride_k * (stage_start + j)) % layout.bank_depth
                             payload["BANK"] = bank_k
                             payload["ADDR"] = addr_j
                         # D2 行规格铁律：全行 level=0 / loops=0 / inc=0 / embed_end=0 / inc_embed=0。
