@@ -497,3 +497,219 @@ def test_integration_add_n4_unverified_no_vcs(tmp_path):
     assert ref_golden["byte_identical"] is True
     assert not (tmp_path / "releases").exists() or not list((tmp_path / "releases").iterdir())
     assert report["frozen_baseline"]["checked"] is True
+
+
+# ---------------------------------------------------------------------------
+# ADR-057 ④号步 B 组：入口级 manifest 注入——运行前（artifact_audit，VCS 之
+# 前）拒绝且不发布。零 VCS / 零 SMT。
+#
+# 故障层选择（用户 2026-10-05 指令）：漏段/重复段/偏移一格/非法布局属「统一入口
+# 注入确认运行前拒绝」类，不必跑 VCS。接线链全真实：config_check →
+# formula_domain_check → compile_admit（仅 PipelineRunner 打桩物化合成多段构建）
+# → independent_reference（真实字节一致闸）→ artifact_audit（真实 D3 检查器，
+# manifest 检查是该阶段**第一步**）→ RED。检查器各层的判定正确性由
+# test_check_stage_manifest 钉死；本组证明的是入口接线：findings → StageFailure
+# → fail-fast → 不发布 + 旧发布 sentinel 不动。
+# ---------------------------------------------------------------------------
+
+_B_SYNTH_OPS = [("ur-r0", 0), ("ur-r0", 4), ("rtovr-14", 2), ("rtovr-14", 8),
+                ("vout0", 10)]   # 与 test_check_stage_manifest 同形态（II=2 → m_max=60）
+
+
+def _b_reseal(doc, sm):
+    doc["seal"] = sm.canonical_digest(doc["body"])
+
+
+def _t_missing(doc, sm):
+    """B1 漏段：抹掉尾段 + 重封。"""
+    doc["body"]["stages"] = doc["body"]["stages"][:1]
+    _b_reseal(doc, sm)
+
+
+def _t_duplicate(doc, sm):
+    """B2 重复段：stage_0 出现两次 + 重封。"""
+    doc["body"]["stages"].append(dict(doc["body"]["stages"][0]))
+    _b_reseal(doc, sm)
+
+
+def _t_off_by_one(doc, sm):
+    """B3 偏移一格：尾段 stage_start 60→61（iter_range 同步造假）+ 重封。"""
+    st = doc["body"]["stages"][1]
+    st["stage_start"] += 1
+    st["iter_range"] = [st["iter_range"][0] + 1, st["iter_range"][1] + 1]
+    _b_reseal(doc, sm)
+
+
+def _t_bad_layout(doc, sm):
+    """B4 非法布局：输出写区整体平移 1 word + 重封。"""
+    wr = doc["body"]["stages"][0]["expected_write_region"]
+    wr["addr_range_words"] = [wr["addr_range_words"][0] + 1,
+                              wr["addr_range_words"][1] + 1]
+    _b_reseal(doc, sm)
+
+
+def _materialize_synth_build(build_dir: Path, op, input_data, tamper=None):
+    """物化合成 scale_sum 两段（60+1）构建并返回 (stage_plan, n_eff)。
+
+    hex 由**生产 packer**（检查器同款 _repack_lines）从合成 physical_instructions
+    打包；manifest 由真生成器 build_manifest 产出。先自检 GREEN（证明后续 RED
+    全部来自注入篡改而非夹具漂移），再施加 tamper 重写。
+    """
+    from types import SimpleNamespace as _SN
+    import numpy as _np
+    import yaml as _yaml
+    from api.hw_spec import HardwareSpec
+    from driver.stage_partition import plan_compute_stages
+    from verification_v2.infra import stage_manifest as _smod
+    from verification_v2.infra.protocol_registry import load_default as _lreg
+    from verification_v2.reference.ordered_ast import parse_ordered_formula
+    from tests.unit.test_check_stage_manifest import _synth_rows
+    import check_stage_manifest as _ck
+    from export_golden_hex import pack_words
+
+    op_yaml = _ROOT / "verification_v2" / "ops" / "scale_sum.yaml"
+    op_cfg = _yaml.safe_load(op_yaml.read_text(encoding="utf-8"))
+    lanes = 4
+    # 与 pipeline_runner 同口径：首个 role=input 张量定迭代基数（param/常量不算）
+    input_key = next(k for k, c in op_cfg["tensors"].items()
+                     if c.get("role") == "input")
+    n = int(len(input_data[input_key]))
+    n_eff = n // lanes
+    ii = 2
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    schedule = {"II": ii, "ops": {
+        f"op{i}": {"t": t, "iq": q, "stride": 1, "logical_addr": 0,
+                   "dly": 0, "op_type": "UR_READ", "structural_only": False}
+        for i, (q, t) in enumerate(_B_SYNTH_OPS)}}
+    sched_path = build_dir / "compiler_schedule.json"
+    sched_path.write_text(json.dumps(schedule, indent=2), encoding="utf-8")
+
+    plan = plan_compute_stages(
+        [_SN(trace_id=f"op{i}", metadata={"unit_id": q, "global_t": t})
+         for i, (q, t) in enumerate(_B_SYNTH_OPS)], ii=ii, n_eff=n_eff)
+    spec = HardwareSpec.load(str(_ROOT / "hw_config"))
+
+    stage_dirs = []
+    for st in plan.stages:
+        sdir = build_dir / "stages" / f"stage_{st.stage_id}"
+        smc0 = sdir / "smc_0"
+        smc0.mkdir(parents=True)
+        all_rows = []
+        for q in ("rtovr-14", "ur-r0", "vout0"):
+            rows = _synth_rows(q, plan, st.m)
+            all_rows.extend(rows)
+            (smc0 / f"iq_{q}.hex").write_text(
+                "\n".join(_ck._repack_lines(spec, q, rows)) + "\n",
+                encoding="utf-8")
+        (sdir / "physical_instructions.json").write_text(
+            json.dumps(all_rows, indent=2), encoding="utf-8")
+        stage_dirs.append(sdir)
+
+    # golden + 输出 bank：independent_reference 要求 npz 逐位相等且重写区字节一致
+    golden_y = _np.asarray(op.get_golden(input_data, vector_lanes=lanes)["y"],
+                           dtype=_np.float32)
+    _np.savez(build_dir / "golden_data.npz", y=golden_y)
+    out_bank = int(op_cfg["tensors"]["y"]["bank"])
+    words = list(pack_words(golden_y))
+    words += [0] * (256 - len(words))
+    bank_dir = build_dir / "smc_0" / "output_bank"
+    bank_dir.mkdir(parents=True)
+    (bank_dir / f"bank{out_bank}_final.hex").write_text(
+        "".join(f"0x{w:032x}\n" for w in words), encoding="utf-8")
+    (build_dir / "sim_config.json").write_text(json.dumps({
+        "tensors": [{"name": "y", "role": "output", "bank": out_bank, "addr": 0}],
+    }), encoding="utf-8")
+
+    t_names = [k for k, c in op_cfg["tensors"].items()
+               if c.get("role") in ("input", "param")]
+    doc = _smod.build_manifest(
+        op_name="scale_sum", op_cfg=op_cfg,
+        ast_canonical=_smod.ast_to_canonical(
+            parse_ordered_formula(op_cfg["formula"], t_names)),
+        schedule_json=sched_path, hw_config_dir=_ROOT / "hw_config",
+        registry=_lreg(), plan=plan, stage_dirs=stage_dirs,
+        tensor_cfgs=op_cfg["tensors"], n=n, lanes=lanes)
+    mpath = build_dir / "stage_manifest.json"
+    _smod.write_manifest(doc, mpath)
+    pre = _ck.check_manifest(build_dir, op_yaml.parent)
+    assert pre == [], f"合成基线不自洽（篡改前即 RED）: {pre}"
+    if tamper is not None:
+        tamper(doc, _smod)
+        _smod.write_manifest(doc, mpath)
+
+    stage_plan = {"n_eff": plan.n_eff, "ii": plan.ii, "m_max": plan.m_max,
+                  "stages": [{"stage_id": s.stage_id, "start": s.start, "m": s.m}
+                             for s in plan.stages]}
+    return stage_plan, n_eff
+
+
+class _SynthMultiStageRunner:
+    """PipelineRunner 打桩：物化合成多段构建 + 返回多段 ctx（不经 SMT/sim）。"""
+
+    def __init__(self, *a, tamper=None, **kw):
+        from api.hw_spec import HardwareSpec
+        self.spec = HardwareSpec.load(str(_ROOT / "hw_config"))
+        self._tamper = tamper
+
+    def run_full_stack(self, op, input_data, op_name=None, external_input=False,
+                       **kw):
+        assert kw.get("allow_stage_partition") is True, \
+            "统一入口须显式选择加入分段拦截（ADR-057 修订②）"
+        build_dir = rv.REPO_ROOT / "build" / "verification_v2" / op_name
+        stage_plan, n_eff = _materialize_synth_build(build_dir, op, input_data,
+                                                     tamper=self._tamper)
+        return {"sim_success": True,
+                "branch_report": {q: "unroll" for q, _ in _B_SYNTH_OPS},
+                "num_iterations": n_eff, "ops": [],
+                "input_data": dict(input_data),
+                "log_path": str(build_dir / f"{op_name}_sim.log"),
+                "stage_plan": stage_plan,
+                "stage_dirs": [str(build_dir / "stages" / f"stage_{s['stage_id']}")
+                               for s in stage_plan["stages"]]}
+
+
+@pytest.mark.parametrize("tamper,expect", [
+    pytest.param(_t_missing, ("[COVER]",), id="B1-missing-stage"),
+    pytest.param(_t_duplicate, ("[COVER]",), id="B2-duplicate-stage"),
+    pytest.param(_t_off_by_one, ("[COVER]", "[ADDR]"),
+                 id="B3-stage-start-off-by-one"),
+    pytest.param(_t_bad_layout, ("[ADDR]",), id="B4-illegal-write-region"),
+])
+def test_b_manifest_injection_refused_before_vcs(tmp_path, monkeypatch,
+                                                 tamper, expect):
+    build_dir = rv.REPO_ROOT / "build" / "verification_v2" / "scale_sum"
+    rel = tmp_path / "releases"
+    legacy = rel / "scale_sum_LEGACY"
+    legacy.mkdir(parents=True)
+    sentinel = legacy / "SENTINEL.bin"
+    sentinel.write_bytes(b"legacy-success\x00bytes")
+
+    monkeypatch.setattr(rv, "PipelineRunner",
+                        lambda *a, **kw: _SynthMultiStageRunner(tamper=tamper))
+    try:
+        cfg = mk_cfg(tmp_path, op_name="scale_sum",
+                     op_yaml=str(_ROOT / "verification_v2" / "ops"
+                                 / "scale_sum.yaml"),
+                     n_rows=[244], run_id="adr057_inject")
+        report = rv.Orchestrator(cfg).run()   # 全真实阶段，仅 run_full_stack 打桩
+
+        assert report["outcome"] == "RED"
+        assert report["published"] is False
+        frag = report["sizes"]["244"]
+        fail = frag["failure"]
+        assert fail["stage"] == "artifact_audit"
+        assert fail["codes"] == ["PACKAGE_OR_EMISSION_ERROR"]
+        assert any(c in fail["detail"] for c in expect), fail["detail"]
+        rec = {r["stage"]: r["status"] for r in frag["stages"]}
+        assert rec["compile_admit"] == "pass"
+        assert rec["independent_reference"] == "pass"
+        assert rec["artifact_audit"] == "fail"
+        for later in ("package", "vcs", "native_compare", "three_zone",
+                      "arbitrate"):
+            assert rec[later] == "not_executed"
+        # 失败不发布：旧包 sentinel 逐字节不动、无新增发布物
+        assert sentinel.read_bytes() == b"legacy-success\x00bytes"
+        assert sorted(p.name for p in rel.iterdir()) == ["scale_sum_LEGACY"]
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)

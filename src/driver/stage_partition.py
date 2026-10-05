@@ -150,9 +150,16 @@ def plan_compute_stages(ops: List[Any], ii: int, n_eff: int,
                                    predecessor=(sid - 1) if sid else None))
         s += m
         sid += 1
-    # D1 覆盖断言：半开区间精确覆盖 [0, n_eff)，无重叠/遗漏/空段
-    assert stages and stages[0].start == 0 and stages[-1].end == n_eff
-    assert all(st.m > 0 for st in stages)
-    assert all(stages[i].end == stages[i + 1].start for i in range(len(stages) - 1))
+    # D1 覆盖断言：半开区间精确覆盖 [0, n_eff)，无重叠/遗漏/空段。
+    # 显式 raise 而非 assert（python -O 下 assert 被剥离——独立审计 MINOR-7；
+    # 真闸门在检查器 COVER 层，此处为纵深）。
+    if not (stages and stages[0].start == 0 and stages[-1].end == n_eff):
+        raise RuntimeError(
+            f"D1 覆盖不变量破坏：段序列未精确覆盖 [0,{n_eff})——分段器构造缺陷")
+    if not all(st.m > 0 for st in stages):
+        raise RuntimeError("D1 覆盖不变量破坏：存在空段——分段器构造缺陷")
+    if not all(stages[i].end == stages[i + 1].start
+               for i in range(len(stages) - 1)):
+        raise RuntimeError("D1 覆盖不变量破坏：段间重叠/空洞——分段器构造缺陷")
     return StagePlan(n_eff=n_eff, ii=ii, capacity=capacity, m_max=m_max,
                      spans=spans, stages=stages)

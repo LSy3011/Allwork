@@ -13,11 +13,19 @@ manifest（``stage_manifest.json``）是**生成产物，不是独立真值**。
      输出写区 [out_off+start, out_off+end)（word 单位，半开）。
   3. IQ 文件——逐段重数行数、重算 sha256；行数 ≤ 容量墙（SMI_IQ_INSTQ_DEPTH）
      且 == L_q(m)=II·(m+span_q)+2（公式↔实算互校，ADR-055 D3 同族）。
+  4. IQ-HEX（2026-10-05 MAJOR-2 处置，用户裁决「有界实现」）——逐段把
+     ``physical_instructions.json`` 经**生产 packer** 重打包，与 ``iq_*.hex``
+     逐行互校。堵「改 hex 内容 + 更新 sha + 重封」的事后篡改/打包损坏类
+     （独立审计实证此类曾六层全绿）。**同源限制如实登记**：重打包复用生产
+     packer，packer 自身系统性错误两侧同错不在本层捕获——行为正确性由
+     VCS / native_compare / three_zone 行为闸背书。
 
 篡改模型（D3 明文要求两层都测）：
   * 未重封印 → 验封即 RED（第一层）；
   * 重新计算 seal 的语义篡改 → 本检查器独立重算对照 RED（第二层）。
 两层缺一不可：仅有封印防不住「改完重封」，仅有对照防不住「产物与声明一起换」。
+知情登记（MINOR-7）：``generated_utc`` 等运行期元数据**有意**留在封印区外
+（保证同输入→同 seal 可复算），其篡改无语义影响，本检查器不设顶层键白名单。
 
 CLI：
     python verification_v2/tools/check_stage_manifest.py <build_dir> [--ops-dir DIR]
@@ -40,6 +48,9 @@ for _p in (str(_REPO), str(_REPO / "src")):
 import yaml  # noqa: E402
 
 from driver.assembler import SMI_IQ_INSTQ_DEPTH  # noqa: E402  容量墙唯一来源
+from driver.emitter import LIRPacker  # noqa: E402  micro_variant 判定唯一来源
+from driver.packer import BitPacker  # noqa: E402  IQ-HEX 层重打包（生产路径）
+from api.hw_spec import HardwareSpec  # noqa: E402  lanes 锚定 + IQ-HEX spec
 from driver.stage_partition import (  # noqa: E402
     PartitionRefused, plan_compute_stages)
 from verification_v2.infra import stage_manifest as _smod  # noqa: E402
@@ -69,11 +80,20 @@ def _load_manifest(build: Path) -> Dict[str, Any]:
 
 def _sched_ops(schedule: Dict[str, Any]) -> List[Any]:
     """compiler_schedule.json → 分段器输入（与构建期 emit_ops 同口径：
-    剔除 structural_only；仅取 unit_id/global_t 两字段，其余不回读）。"""
+    剔除 structural_only；仅取 unit_id/global_t 两字段，其余不回读）。
+
+    MINOR-7：调度行缺键须**响亮**报错（带行号/键名），不抛裸 KeyError——
+    对齐 emit_fx load_schedule 的同族口径。
+    """
     ops = []
     for tid, rec in schedule["ops"].items():
         if rec.get("structural_only"):
             continue
+        for key in ("iq", "t"):
+            if key not in rec:
+                raise ValueError(
+                    f"调度 JSON 行 {tid!r} 缺键 {key!r}——调度产物畸形，"
+                    f"分段计划独立重算拒绝在残缺输入上进行")
         ops.append(SimpleNamespace(
             trace_id=tid,
             metadata={"unit_id": rec["iq"], "global_t": rec["t"]},
@@ -140,8 +160,13 @@ def check_manifest(build_dir: Any, ops_dir: Optional[Any] = None) -> List[Findin
     schedule = json.loads(sched_path.read_text(encoding="utf-8"))
 
     hw_claim = hashes.get("hw_config", {})
+    # MINOR-7：manifest 记录的是相对路径（"hw_config"），锚到仓库根解析，
+    #   不依赖检查器进程 CWD（误报消除）；digest 的 per-file 键为相对键，不受影响。
+    hw_dir = Path(hw_claim.get("dir", ""))
+    if not hw_dir.is_absolute():
+        hw_dir = (_REPO / hw_dir).resolve()
     try:
-        hw_now = _smod.hw_config_digest(Path(hw_claim.get("dir", "")))
+        hw_now = _smod.hw_config_digest(hw_dir)
         if hw_now["digest"] != hw_claim.get("digest"):
             _red(findings, "HASH-HW", "hw_config 组合摘要不符——硬件配置漂移")
     except Exception as e:
@@ -162,6 +187,17 @@ def check_manifest(build_dir: Any, ops_dir: Optional[Any] = None) -> List[Findin
     n, lanes, n_eff = int(body["n"]), int(body["lanes"]), int(body["n_eff"])
     if n != n_eff * lanes:
         _red(findings, "TASK", f"n={n} != n_eff·lanes={n_eff}·{lanes}")
+    # MINOR-4：lanes 锚定独立来源 hw_config（V1 限 fp32 → 32 bit/元素；
+    #   多精度扩展时本断言须随类型系统一并扩展，不得静默放宽）。
+    try:
+        _hw_spec = HardwareSpec.load(str(hw_dir))
+        _vw = int(getattr(_hw_spec.params, "PARAM_SMC_VECTOR_WIDTH"))
+        if lanes != _vw // 32:
+            _red(findings, "TASK",
+                 f"lanes={lanes} != PARAM_SMC_VECTOR_WIDTH//32={_vw // 32}"
+                 f"——lanes 未锚定 hw_config（fp32 口径）")
+    except Exception as e:
+        _red(findings, "TASK", f"lanes 锚定（hw_config 向量位宽）读取失败: {e}")
     if int(body["ii"]) != int(schedule["II"]):
         _red(findings, "PLAN",
              f"body.ii={body['ii']} != 调度 II={schedule['II']}")
@@ -176,6 +212,8 @@ def check_manifest(build_dir: Any, ops_dir: Optional[Any] = None) -> List[Findin
                                    n_eff=n_eff)
     except PartitionRefused as pr:
         _red(findings, "PLAN", f"独立重算被拒（PartitionRefused）: {pr}")
+    except (ValueError, KeyError) as e:
+        _red(findings, "PLAN", f"调度产物畸形，独立重算中止: {e}")
     if plan is not None:
         if int(body["m_max"]) != plan.m_max:
             _red(findings, "PLAN", f"m_max: manifest={body['m_max']} vs 重算={plan.m_max}")
@@ -200,6 +238,12 @@ def check_manifest(build_dir: Any, ops_dir: Optional[Any] = None) -> List[Findin
                 _red(findings, "COVER",
                      f"stage_{k} iter_range={ms.get('iter_range')} != "
                      f"[{ps.start},{ps.end})")
+            # MINOR-3：active_smc 是 D3 明文最少字段，重封篡改此前六层全漏
+            #   （独立审计实验 A）——ADR-057 范围=单 SMC，逐段显式锚 [0]。
+            if ms.get("active_smc") != [0]:
+                _red(findings, "SMC",
+                     f"stage_{k} active_smc={ms.get('active_smc')} != [0]"
+                     f"——多 SMC 超 ADR-057 范围")
         # 覆盖断言（独立于逐段相等再显式断言一次：半开区间精确平铺 [0, n_eff)）
         covered: List[int] = []
         for ms in mstages:
@@ -296,10 +340,96 @@ def check_manifest(build_dir: Any, ops_dir: Optional[Any] = None) -> List[Findin
                              f"stage_{k} {fname} 实数 {rows} != L_q(m)="
                              f"{plan.ii}·({m}+{plan.spans[q]})+2={want_rows}"
                              f"（公式↔实算漂移）")
+    # ---- IQ-HEX：json 重编码 ↔ hex 逐行互校（MAJOR-2 处置） --------------------
+    _recheck_iq_hex(build, body, hw_dir, findings)
+
     if not any(c.startswith("IQ-") for c, _ in findings):
-        _ok("IQ", "逐段 IQ 文件集/行数/sha256/容量/公式互校一致")
+        _ok("IQ", "逐段 IQ 文件集/行数/sha256/容量/公式互校 + json↔hex 内容互校一致")
 
     return findings
+
+
+def _repack_lines(spec: Any, iq_name: str, rows: List[Dict[str, Any]]) -> List[str]:
+    """把一段某队列的 physical_instructions.json 行经**生产 packer** 重打包为
+    hex 行（与 emitter._emit_single_smc 同调用约定：bucket 内按 abs_t 稳定排序、
+    is_body=(stage=="BODY")、micro_variant 取 emitter 唯一来源）。
+
+    json header 键即 SMIHeader.to_dict() 键，正是 pack_capsule 的 **header_kwargs
+    同名实参（emitter.py:71-78 同式调用）。同源限制见模块 docstring 层 4。
+    """
+    lookup_type = _get_lookup_type(spec, iq_name)
+    micro_variant = LIRPacker._get_micro_variant(iq_name)
+    total_bits = BitPacker.get_unit_bits(spec, lookup_type, micro_variant)
+    hex_chars = (total_bits + 3) // 4
+    lines: List[str] = []
+    for r in sorted(rows, key=lambda r: r["abs_t"]):
+        val = BitPacker.pack_capsule(
+            spec=spec, unit_type=lookup_type, payload_dict=r["payload"],
+            is_body=(r["stage"] == "BODY"), micro_variant=micro_variant,
+            **r["header"])
+        lines.append(f"{val:0{hex_chars}x}")
+    return lines
+
+
+def _get_lookup_type(spec: Any, iq_name: str) -> str:
+    from driver.payload_factory import UnitPayloadFactory
+    return UnitPayloadFactory.resolve_iq_type(iq_name, spec)
+
+
+def _recheck_iq_hex(build: Path, body: Dict[str, Any], hw_dir: Path,
+                    findings: List[Finding]) -> None:
+    """逐段 json↔hex 内容互校（方向双向：json 有而 hex 无 / hex 有而 json 无 /
+    逐行内容不符，均 RED）。物理指令 json 缺失本身即 RED——无载体则本层不退化
+    为静默跳过。"""
+    try:
+        spec = HardwareSpec.load(str(hw_dir))
+    except Exception as e:
+        _red(findings, "IQ-HEX", f"HardwareSpec 加载失败（无法重打包）: {e}")
+        return
+    for k, ms in enumerate(body.get("stages", [])):
+        sid = ms.get("stage_id", k)
+        stage_dir = build / "stages" / f"stage_{sid}"
+        pi_path = stage_dir / "physical_instructions.json"
+        if not pi_path.is_file():
+            _red(findings, "IQ-HEX",
+                 f"stage_{sid} 缺 physical_instructions.json——内容互校无载体")
+            continue
+        try:
+            rows = json.loads(pi_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            _red(findings, "IQ-HEX", f"stage_{sid} 物理指令 json 解析失败: {e}")
+            continue
+        byq: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            byq.setdefault(str(r.get("iq_name")), []).append(r)
+        sdir = stage_dir / "smc_0"
+        on_disk = {f.name: f for f in sorted(sdir.glob("iq_*.hex"))} \
+            if sdir.is_dir() else {}
+        for q, qrows in sorted(byq.items()):
+            hex_path = sdir / f"iq_{q}.hex"
+            if not hex_path.is_file():
+                _red(findings, "IQ-HEX",
+                     f"stage_{sid} {q}: json 有 {len(qrows)} 行记录但 hex 缺文件")
+                continue
+            try:
+                want = _repack_lines(spec, q, qrows)
+            except Exception as e:
+                _red(findings, "IQ-HEX",
+                     f"stage_{sid} {q} 重打包失败: {type(e).__name__}: {e}")
+                continue
+            got = [ln.strip() for ln in hex_path.read_text().splitlines()
+                   if ln.strip()]
+            if got != want:
+                idx = next((i for i, (a, b) in enumerate(zip(got, want))
+                            if a != b), min(len(got), len(want)))
+                _red(findings, "IQ-HEX",
+                     f"stage_{sid} {q}: hex 与 json 重编码逐行不符（首差异行 {idx}，"
+                     f"行数 {len(got)} vs {len(want)}）——产物内容被改或打包损坏")
+        for fname in on_disk:
+            q = fname[len("iq_"):-len(".hex")]
+            if q not in byq:
+                _red(findings, "IQ-HEX",
+                     f"stage_{sid} {fname}: hex 存在但 json 无该队列记录")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

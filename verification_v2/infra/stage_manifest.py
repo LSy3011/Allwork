@@ -49,12 +49,18 @@ def hw_config_digest(hw_config_dir: Path) -> Dict[str, Any]:
 
 
 def _iq_file_entries(stage_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """每段 IQ 文件哈希 + 实际行数（一指令一行，与 ADR-055 D3 口径一致）。"""
+    """每段 IQ 文件哈希 + 实际行数（一指令一行，与 ADR-055 D3 口径一致）。
+
+    ``path`` 记**构建相对路径**（stages/stage_k/smc_0/iq_*.hex）——瞬态绝对路径
+    在下次运行 rmtree 后悬空（独立审计 MINOR-5），相对路径随发布包可重定位；
+    检查器 IQ-PATH 层按尾缀核对，两种历史形态均可过。
+    """
     out: Dict[str, Dict[str, Any]] = {}
     iq_dir = Path(stage_dir) / "smc_0"
     for f in sorted(iq_dir.glob("iq_*.hex")):
         rows = sum(1 for ln in f.read_text().splitlines() if ln.strip())
-        out[f.name] = {"path": str(f), "sha256": sha256_file(f), "rows": rows}
+        rel = f"stages/{Path(stage_dir).name}/smc_0/{f.name}"
+        out[f.name] = {"path": rel, "sha256": sha256_file(f), "rows": rows}
     if not out:
         raise FileNotFoundError(f"{iq_dir} 下无 iq_*.hex——段产物缺失，拒绝生成 manifest")
     return out

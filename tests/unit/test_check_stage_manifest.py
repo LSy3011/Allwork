@@ -1,14 +1,18 @@
-"""ADR-057 D3 检查器测试：GREEN 基线 + 篡改对抗（双层）+ 布局对抗。
+"""ADR-057 D3 检查器测试：GREEN 基线 + 篡改对抗（双层）+ 布局对抗 + 内容互校。
 
 D3 明文要求的两层篡改模型各至少一测：
   * 未重封印的篡改 → 验封 RED（test_tamper_without_reseal）；
   * 重新计算 seal 的语义篡改 → 独立重算对照 RED（test_tamper_resealed 等）。
 布局对抗：漏段 / 重复段 / 偏移一格 / 错误写区 / IQ 行数漂移，各须 RED。
+内容对抗（MAJOR-2，2026-10-05）：换 hex 内容 + 更新 sha + 重封 → IQ-HEX RED。
 
 夹具为合成最小多段构建（scale_sum 形态：II=2、spans {rtovr-14:3, ur-r0:2,
 vout0:0} → m_max=60，n_eff=61 → 段 (0,60)+(60,1)）；manifest 由真生成器
 stage_manifest.build_manifest 产出——检查器的独立性体现在重算对照，而非另写
-一份生成器。
+一份生成器。hex 产物由检查器同款的 _repack_lines（生产 packer）从合成
+physical_instructions.json 打包——green 用例的 json↔hex 一致性为构造性
+（本套件不重复证明 packer 正确性，其行为正确性由 VCS 链背书）；对抗价值
+来自篡改测试打破该一致对。
 """
 import json
 from pathlib import Path
@@ -17,11 +21,13 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from api.hw_spec import HardwareSpec
 from driver.stage_partition import plan_compute_stages
 from verification_v2.infra import stage_manifest as _smod
 from verification_v2.infra.protocol_registry import load_default as _load_reg
 from verification_v2.reference.ordered_ast import parse_ordered_formula
-from verification_v2.tools.check_stage_manifest import check_manifest
+from verification_v2.tools.check_stage_manifest import (
+    _repack_lines, check_manifest)
 
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -54,9 +60,40 @@ def _sched_ops():
             for i, (q, t) in enumerate(_OPS)]
 
 
-def _write_iq(dirpath: Path, queue: str, rows: int) -> None:
-    (dirpath / f"iq_{queue}.hex").write_text(
-        "".join(f"{i:032x}\n" for i in range(rows)), encoding="utf-8")
+# 每队列首拍（仅供夹具构造 INIT LOOPS / abs_t 布局；检查器不回读这些值，
+# 重打包只消费 header/payload/abs_t/stage 四字段）
+_Q_TMIN = {"ur-r0": 0, "rtovr-14": 2, "vout0": 10}
+
+# 真实 payload 形态（取自 scale_sum 实构建 physical_instructions.json 样本）
+_BODY_PAYLOAD = {
+    "ur-r0": lambda k: {"VALID": 1, "BANK": 1, "ADDR": k, "SMC_ID_EN": 7},
+    "rtovr-14": lambda k: {"SEL": 30, "VALID": 1},
+    "vout0": lambda k: {"VALID": 1, "SMC_ID_EN": 7, "RESERVED": 0},
+}
+
+
+def _hdr(**kw):
+    h = {"VLD": 0, "JUMP": 0, "INC_EMBED": 0, "EMBED_END": 0, "LOOPS": 0,
+         "COND": 0, "DLY": 0, "INC": 0, "EMBED_LOOPS": 0}
+    h.update(kw)
+    return h
+
+
+def _synth_rows(queue: str, plan, m: int) -> list:
+    """合成一队列一段的 physical_instructions.json 行（INIT+BODY+TERM，
+    行数 = L_q(m) = II·(m+span)+2，与分段器预测一致）。"""
+    l_init = (_Q_TMIN[queue] // _II) * _II + 1
+    n_body = plan.predicted_rows(queue, m) - 2
+    rows = [{"iq_name": queue, "abs_t": 0, "stage": "INIT",
+             "header": _hdr(LOOPS=l_init), "payload": {}}]
+    for k in range(n_body):
+        rows.append({"iq_name": queue, "abs_t": l_init + 1 + k,
+                     "stage": "BODY", "header": _hdr(),
+                     "payload": _BODY_PAYLOAD[queue](k)})
+    rows.append({"iq_name": queue, "abs_t": l_init + 1 + n_body,
+                 "stage": "TERM", "header": _hdr(JUMP=1, VLD=1),
+                 "payload": {}})
+    return rows
 
 
 @pytest.fixture()
@@ -78,14 +115,23 @@ def case(tmp_path):
     plan = plan_compute_stages(_sched_ops(), ii=_II, n_eff=_N_EFF)
     assert [(s.start, s.m) for s in plan.stages] == [(0, 60), (60, 1)]
 
+    spec = HardwareSpec.load(str(_REPO / "hw_config"))
     stage_dirs = []
     queues = ["rtovr-14", "ur-r0", "vout0"]
     for st in plan.stages:
-        sdir = build / "stages" / f"stage_{st.stage_id}" / "smc_0"
-        sdir.mkdir(parents=True)
+        stage_dir = build / "stages" / f"stage_{st.stage_id}"
+        smc0 = stage_dir / "smc_0"
+        smc0.mkdir(parents=True)
+        all_rows = []
         for q in queues:
-            _write_iq(sdir, q, plan.predicted_rows(q, st.m))
-        stage_dirs.append(sdir.parent)
+            rows = _synth_rows(q, plan, st.m)
+            all_rows.extend(rows)
+            lines = _repack_lines(spec, q, rows)
+            (smc0 / f"iq_{q}.hex").write_text("\n".join(lines) + "\n",
+                                              encoding="utf-8")
+        (stage_dir / "physical_instructions.json").write_text(
+            json.dumps(all_rows, indent=2), encoding="utf-8")
+        stage_dirs.append(stage_dir)
 
     op_cfg = yaml.safe_load((ops_dir / "fake_ck.yaml").read_text(encoding="utf-8"))
     t_names = [k for k, c in op_cfg["tensors"].items()
@@ -256,3 +302,53 @@ def test_schedule_replaced(case):
     sched["ops"]["op0"]["t"] = 99
     (build / "compiler_schedule.json").write_text(json.dumps(sched, indent=2))
     assert "HASH-SCHED" in _codes(check_manifest(build, ops_dir))
+
+
+# ------------------------------------------------- 内容互校对抗（MAJOR-2 处置）
+def test_hex_content_swap_resealed(case):
+    """审计实验 C 回归：换 hex 内容 + 更新 sha + 重封 → IQ-HEX RED，
+    且 IQ-SHA/IQ-ROWS 均不 RED（该篡改在 sha/行数两层之下完全隐形，
+    证明新层不是既有层的重复）。"""
+    import hashlib
+    build, ops_dir, mpath = case
+    f = build / "stages" / "stage_0" / "smc_0" / "iq_vout0.hex"
+    lines = f.read_text().splitlines()
+    width = len(lines[0])
+    f.write_text("\n".join("f" * width for _ in lines) + "\n",
+                 encoding="utf-8")
+
+    def tamper(doc):
+        doc["body"]["stages"][0]["iq_files"]["iq_vout0.hex"]["sha256"] = \
+            hashlib.sha256(f.read_bytes()).hexdigest()
+        _reseal(doc)
+    _rewrite(mpath, tamper)
+    codes = _codes(check_manifest(build, ops_dir))
+    assert "IQ-HEX" in codes
+    assert "IQ-SHA" not in codes
+    assert "IQ-ROWS" not in codes
+
+
+def test_active_smc_tamper_resealed(case):
+    """active_smc 改多 SMC + 重封 → SMC RED（MINOR-3：此前六层全漏）。"""
+    build, ops_dir, mpath = case
+
+    def tamper(doc):
+        doc["body"]["stages"][0]["active_smc"] = [0, 1]
+        _reseal(doc)
+    _rewrite(mpath, tamper)
+    assert "SMC" in _codes(check_manifest(build, ops_dir))
+
+
+def test_lanes_tamper_resealed(case):
+    """n/lanes 同改（保持 n==n_eff·lanes 成立）+ 重封 → 仅 lanes 锚定
+    hw_config 位宽的 TASK 层可捕（MINOR-4）。"""
+    build, ops_dir, mpath = case
+
+    def tamper(doc):
+        doc["body"]["n"] = 122          # = 61 * 2，n==n_eff·lanes 仍成立
+        doc["body"]["lanes"] = 2
+        _reseal(doc)
+    _rewrite(mpath, tamper)
+    findings = check_manifest(build, ops_dir)
+    assert "TASK" in _codes(findings)
+    assert not any("n=122" in msg and "n_eff" in msg for _, msg in findings)

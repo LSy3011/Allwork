@@ -104,3 +104,33 @@
   裁决轨迹证据。
 - 限制不变：不声称段间独立排干证明；C4 逐拍对注册表 v2 的尾段形态对账仍待做；单段发布包与
   多段发布包并存，n8/n60 旧包（669350 系）保留不改写。
+
+## 2026-10-05 ADR-057 挂账销号点收（四步序全闭合，时间盒内）
+
+- **状态口径（用户指令逐字）**：A2a 已有 n244/n480 正式运行与发布证据；本次销号关闭的是
+  ADR-057 验收条款④⑤的挂账项。n8/n60 系经批准的重立基线，不表述成对原冻结基线零字节一致。
+- **步① 条款对照表**：`artifacts/adr057_closure_20261005/CLAUSE45_MAP.md`——条款④ 8 子项 +
+  条款⑤ 6 子项逐条映射证据/缺项/处理，既有证据零重跑。
+- **步② D1/D3 独立审计**（独立审计员，只读）：2 MAJOR + 5 MINOR；五点焦点（分段覆盖/地址
+  偏移/manifest 独立性/改道默认关闭/发布条件）全过；**已发布两包正确性不受任一发现影响**。
+- **步③ C4 尾段对账**：`C4_TAIL_RECONCILIATION.md`——16 队列×2 段（n244）+ 32 组合（n480）
+  手工重算 vs 期望事件 vs 观测 trace 三层全一致；尾段 ISSUE 逐拍抽查 3 队列精确匹配 v2 模型；
+  无新常数消费。
+- **步④ 对抗与回归**：
+  - MAJOR-2（检查器不解码指令，换 hex+改 sha+重封曾六层全绿）按用户裁决**有界实现**：
+    检查器新增 IQ-HEX 层（physical_instructions.json 经生产 packer 重编码 ↔ iq_*.hex 逐行
+    互校，双向，缺 json 即 RED）；同源限制如实登记（packer 同错不捕，由 VCS 行为闸背书）。
+  - MINOR-3/4/5/7 全落：active_smc 逐段锚 [0]（SMC 码）、lanes 锚定 hw_config 位宽（TASK 码）、
+    manifest iq path 相对化、调度缺键响拒/hw_dir 解析/assert→RuntimeError。
+  - 新增测试 14 个全绿：A 组拦截闸矩阵 7（test_pipeline_runner_gate.py）+ B 组入口注入 4
+    （漏段/重复段/偏移一格/非法布局 → artifact_audit 阶段 RED + 不发布 + sentinel 不动，
+    先自检合成基线 GREEN 再注入）+ 检查器对抗 3（IQ-HEX 重封/active_smc/lanes）。
+  - **新检查器复跑两已发布运行 build 快照双双 GREEN**——IQ-HEX 层对真实产物首次实证。
+  - 回归：add frozen 补跑 GREEN（run `adr057_closure_add_reg`，n=4/8/60，frozen_baseline
+    verdict=PASS，落 regression 通道）；mul 零字节审计 @99f4acc GREEN（13 文件 cmp -s）。
+  - 全量 pytest **414 passed** / 7 skipped / 11 xfailed / 148 subtests（400→414 只增不减）。
+- **限制登记（不推翻既有成果）**：裁决器检出证据=检查器有效性非 RTL 实验；写监测仅输出
+  bank；IQ-HEX 同源限制；FETCH 逐拍相位未独立重核；c0_spread 未冻结仅记录；写区↔发射
+  互校缺席（失效姿态响亮——引入第二地址源时升级为阻断项）。
+- 关闭说明：`artifacts/adr057_closure_20261005/CLOSURE.md`。下一步主线 = M3-lite 三道门
+  （单 SMC/单 chunk/安全规模/顺序执行；STB 2-3 工作日阻断熔断）+ A2b 半天预检小预算。
