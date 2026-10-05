@@ -31,6 +31,7 @@
         ./sim_multi_stage/run_sim_aiacc_top_f_multi_stage.sh multi_inst_stage/compiler_mul/smc_0
 """
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -92,6 +93,78 @@ def package(build_dir: Path, suite: str, case_name: str,
     return case
 
 
+def package_multi(build_dir: Path, suite: str, case_name: str,
+                  sandbox: Path, clean: bool) -> Path:
+    """ADR-057 D5：多段构建（含 stage_manifest.json + stages/stage_k/）的打包。
+
+    契约（任一不满足即 SystemExit，拒绝半截打包）：
+      * 段目录 stages/stage_0 .. stage_{K-1} 编号连续、与 manifest body.stages
+        段数一致（manifest 在此仅作交叉计数——字段真值由 check_stage_manifest
+        独立裁决，打包器不复算）；
+      * 每段 stages/stage_k/smc_0/iq_*.hex 非空 → case/smi_iq_inst/stage_k/；
+      * 输入 banks 只取 stage_0 的 smc_0/ur_data（全量输入单份装载，UR 跨段
+        持久——python sim 侧 poison 一次的镜像）；
+      * golden 侧 = build 顶层 smc_0/output_bank（链式 sim **全段终态**，
+        由 physical_runner 多段链式驱动产出），缺即拒绝；
+      * clean=True 只在入口抹一次 case 目录（多段共享同一 case，逐段 clean
+        会抹掉前段指令——验收①侦察教训的形式化）。
+    """
+    man_path = Path(build_dir) / "stage_manifest.json"
+    if not man_path.is_file():
+        raise SystemExit(f"{build_dir} 无 stage_manifest.json——非多段构建，"
+                         f"单段请用 package()")
+    body = (json.loads(man_path.read_text(encoding="utf-8")).get("body") or {})
+    stages_root = Path(build_dir) / "stages"
+    ids = sorted(int(d.name.split("_", 1)[1])
+                 for d in stages_root.glob("stage_*") if d.is_dir())
+    if not ids or ids != list(range(len(ids))):
+        raise SystemExit(f"段目录编号不连续或缺失: {ids}——拒绝打包（漏段/重号）")
+    if len(body.get("stages", [])) != len(ids):
+        raise SystemExit(f"manifest 段数 {len(body.get('stages', []))} != "
+                         f"磁盘段数 {len(ids)}——manifest 与产物不一致，拒绝打包")
+
+    case = sandbox / "test_atomic_ops" / suite / case_name
+    if case.exists() and clean:
+        shutil.rmtree(case)            # 全 case 唯一一次清理
+    case.mkdir(parents=True, exist_ok=True)
+
+    ur_src = stages_root / "stage_0" / "smc_0" / "ur_data"
+    if not ur_src.is_dir():
+        raise SystemExit(f"缺 {ur_src}——stage_0 未携带全量输入，拒绝打包")
+    dst = case / "smc_0" / "ur_data"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(ur_src, dst)
+
+    ob_src = Path(build_dir) / "smc_0" / "output_bank"
+    if not ob_src.is_dir():
+        raise SystemExit(f"缺 {ob_src}——链式 sim 全段终态（golden 侧）不存在，拒绝打包")
+    dst = case / "smc_0" / "output_bank"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(ob_src, dst)
+
+    n_total = 0
+    for k in ids:
+        iqs = sorted((stages_root / f"stage_{k}" / "smc_0").glob("iq_*.hex"))
+        if not iqs:
+            raise SystemExit(f"stage_{k} 无 iq_*.hex——段产物缺失，拒绝打包")
+        dst = case / "smi_iq_inst" / f"stage_{k}"
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in iqs:
+            shutil.copy2(f, dst / f.name)
+        n_total += len(iqs)
+
+    rel = f"{suite}/{case_name}/smc_0"
+    print(f"[package_vcs_case] MULTI-STAGE case = {case}")
+    print(f"  段数：{len(ids)}（smi_iq_inst/stage_0..{len(ids) - 1}，共 {n_total} 个 iq 文件）")
+    print(f"  数据：smc_0/ur_data ← stages/stage_0（全量输入单份）；"
+          f"smc_0/output_bank ← 顶层（链式终态 golden）")
+    print(f"下一步：cd {sandbox} && "
+          f"./sim_multi_stage/run_sim_aiacc_top_f_multi_stage.sh {rel}")
+    return case
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--op", required=True, help="算子名（build 目录名，默认源 build/verification_v2/<op>）")
@@ -106,7 +179,11 @@ def main():
                     help="不清目标 case 旧内容（默认清理）")
     a = ap.parse_args()
     build = a.build_dir or (ROOT / "build" / "verification_v2" / a.op)
-    package(build.resolve(), a.suite, a.case or a.op, a.sandbox, a.clean)
+    # 形态由产物自声明：stage_manifest.json 存在 ⟺ 多段构建（ADR-057 D5）。
+    if (build / "stage_manifest.json").is_file():
+        package_multi(build.resolve(), a.suite, a.case or a.op, a.sandbox, a.clean)
+    else:
+        package(build.resolve(), a.suite, a.case or a.op, a.sandbox, a.clean)
 
 
 if __name__ == "__main__":

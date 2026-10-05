@@ -63,6 +63,31 @@ def poison_memory(kernel, ur_init_map_or_config, case_dir: Path):
                         val = int(line.strip(), 16)
                         kernel.ur_bank.storage[bank_id][i] = val
 
+def _run_stages_chained(kernel, case_path: Path, stages: list, default_max_cycles: int):
+    """ADR-057 D4 的 sim 侧执行模型：UR 持久（poison_memory 已在调用前执行一次），
+    逐段「重置 IQ 取指态 → 装载本段程序 → 运行本段预算」。
+
+    - iq.reset() 清 pc/loop/dly/terminated，不碰 UR（ur_bank 与 IQ 解耦）；
+    - 不在本段 iq_init 的队列显式清空 memory——防陈旧程序跨段复燃（静默重放
+      上段指令属段间污染，必须结构杜绝而非依赖"各段队列集相同"的现状）；
+    - kernel.cycle_count 跨段连续累加 = 各段共享公共时间轴（镜像 TB 的
+      全局 probe cycle；TB 侧段间次序由仲裁器裁决，sim 侧仅供数值比对）。
+    """
+    for st in stages:
+        sid = int(st["stage_id"])
+        iq_map = {n: str(case_path / h) for n, h in st["iq_init"].items()}
+        loaded = {n.lower() for n in iq_map}
+        for name, iq in kernel.iqs.items():
+            iq.reset()
+            if name not in loaded:
+                iq.memory = []
+        kernel.load_program(iq_map, {})
+        print(f"[SIM_MULTI_STAGE] stage_{sid} BEGIN "
+              f"(start={st.get('start')}, m={st.get('m')}) @cycle {kernel.cycle_count}")
+        kernel.run(max_cycles=int(st.get("max_cycles", default_max_cycles)))
+        print(f"[SIM_MULTI_STAGE] stage_{sid} DONE @cycle {kernel.cycle_count}")
+
+
 def run_physical_verification(case_dir: str):
     case_path = Path(case_dir)
     if not case_path.exists():
@@ -96,12 +121,16 @@ def run_physical_verification(case_dir: str):
     trace_file = case_path / "sim_trace.log"
     kernel.enable_trace()
 
-    # Phase 1: Decoupled Cold Start & Instruction Fetch
-    iq_map = {n: str(case_path / h) for n, h in config.get("iq_init", {}).items()}
-    # We load programs directly using paths
-    kernel.load_program(iq_map, {}) # Only load iq, UR is done via poisoning manually
+    # ADR-057 D4：sim_config 含 "stages" → 多段链式执行（COMPUTE 分段）。
+    #   单段路径（无 stages 键）下方 load→poison→run 顺序逐字不变。
+    stages = config.get("stages")
+    if not stages:
+        # Phase 1: Decoupled Cold Start & Instruction Fetch
+        iq_map = {n: str(case_path / h) for n, h in config.get("iq_init", {}).items()}
+        # We load programs directly using paths
+        kernel.load_program(iq_map, {}) # Only load iq, UR is done via poisoning manually
 
-    # Phase 1.3: Memory Poisoning
+    # Phase 1.3: Memory Poisoning（多段：仅一次——UR 跨段持久是 D4 既有设施前提）
     poison_memory(kernel, config, case_path)
 
     # Phase 2.1: Execution
@@ -128,7 +157,10 @@ def run_physical_verification(case_dir: str):
         with open(trace_file, "a") as f_trace:
             import contextlib
             with contextlib.redirect_stdout(Tee(sys.stdout, f_trace)):
-                kernel.run(max_cycles=max_cycles)
+                if stages:
+                    _run_stages_chained(kernel, case_path, stages, max_cycles)
+                else:
+                    kernel.run(max_cycles=max_cycles)
         
         # [Standard Alignment] Phase 2.1.2: Analysis and Traces
         analysis_dir = case_path / "smc_0" / "analysis"

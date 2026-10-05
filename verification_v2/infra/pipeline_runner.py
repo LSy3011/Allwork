@@ -1,9 +1,11 @@
-import os, sys, json, subprocess
+import os, sys, json, shutil, subprocess
+from pathlib import Path
 import numpy as np
 from typing import List, Dict, Any
 from api.hw_spec import HardwareSpec
 from synthesis.ucode_solver import UCodeSynthesizer, SolverReport
 from driver.assembler import PhysicalAssembler, UnrollAdmission
+from driver.stage_partition import PartitionRefused, plan_compute_stages
 from driver.emitter import LIRPacker
 from collections import namedtuple
 
@@ -56,7 +58,7 @@ class PipelineRunner:
         os.makedirs(self.output_root, exist_ok=True)
 
     def run_full_stack(self, operator: Any, input_data: Dict[str, np.ndarray], op_name: str = None,
-                       external_input: bool = False):
+                       external_input: bool = False, allow_stage_partition: bool = False):
         if self.show_review:
             print(f"\n>>> Starting Pipeline Runner...")
         
@@ -182,8 +184,47 @@ class PipelineRunner:
                                               num_loop_iters, _per_smc_len, vector_lanes)
 
         emit_ops = [op for op in ops if not op.metadata.get("structural_only")]
-        physical_instrs = assembler.assemble(emit_ops, II=II, num_iterations=num_loop_iters,
-                                             admission=admission)
+        # ADR-057 修订②：容量超限（G-cap）且属本 ADR 范围（unroll 准入 + 单 SMC）时
+        #   先交分段器；分段器拒收（PartitionRefused）→ 落回原 G-cap 响亮拒绝
+        #   （原诊断逐字透出，分段器理由挂 __cause__）；无 admission / 非 G-cap /
+        #   多 SMC → 行为零变化。
+        #   拦截**仅对显式选择加入的调用方生效**（allow_stage_partition=True，
+        #   当前唯一来源 = run_v1_verify 统一入口）：main_verify e2e 等既有入口
+        #   保持 ADR-055「超容量响亮拒绝」契约不变（test_g3_add_overcapacity_
+        #   refuses_loudly 钉死；2026-10-01 回归教训——拦截曾意外覆盖 main_verify）。
+        stage_runs = None   # 多段时：每段 {"stage": ComputeStage, "instrs": [...], "branches": {...}}
+        try:
+            physical_instrs = assembler.assemble(emit_ops, II=II, num_iterations=num_loop_iters,
+                                                 admission=admission)
+        except ValueError as e:
+            if (not allow_stage_partition or admission is None or is_multi_smc
+                    or "[STATIC_ADMISSION_REJECTED/G-cap]" not in str(e)):
+                raise
+            try:
+                stage_plan = plan_compute_stages(emit_ops, ii=II, n_eff=num_loop_iters)
+            except PartitionRefused as pr:
+                raise e from pr
+            # ADR-057 D2：逐段重新发射（禁切 hex）。**全部段共享同一份已求解调度**
+            #   （emit_ops 的 global_t/unit_map 在 solve 后固定；并行会话实证：两段
+            #   独立求解会改读端口分配 → 段间不一致）。每段独立 assembler 实例，
+            #   防 branch_report 跨段串写。
+            stage_runs = []
+            branch_ref = None
+            for st in stage_plan.stages:
+                asm_k = PhysicalAssembler(self.spec, verbosity=v_level)
+                instrs_k = asm_k.assemble(emit_ops, II=II, num_iterations=st.m,
+                                          admission=admission, stage_start=st.start)
+                if branch_ref is None:
+                    branch_ref = dict(asm_k.branch_report)
+                elif dict(asm_k.branch_report) != branch_ref:
+                    raise ValueError(
+                        f"[STATIC_ADMISSION_REJECTED/G-stage] ADR-057 段间分支漂移："
+                        f"stage_{st.stage_id}={dict(asm_k.branch_report)} != "
+                        f"stage_0={branch_ref}——共享调度下逐段分支须恒等，"
+                        f"漂移即发射路径缺陷，显式拒绝")
+                stage_runs.append({"stage": st, "instrs": instrs_k,
+                                   "branches": dict(asm_k.branch_report)})
+            physical_instrs = None   # 多段无单一指令流；置 None 防下游误消费
  
         if is_multi_smc and hasattr(operator, "inject_data_per_smc"):
             operator.inject_data_per_smc(
@@ -210,13 +251,27 @@ class PipelineRunner:
 
         # ADR-055 M4：落地逐队列实际选中分支（branch_report），守卫⑭泛化后据此
         #   断言白名单算子全队列走 unroll——sim 同构建模下这是唯一防静默回落的证物。
-        if assembler.branch_report:
+        # ADR-057：多段时取逐段分支（已断言段间恒等），并附 per_stage 明细。
+        eff_branches = (stage_runs[0]["branches"] if stage_runs
+                        else assembler.branch_report)
+        if eff_branches:
+            br_doc = {"top_op": norm_label, "branches": eff_branches}
+            if stage_runs:
+                br_doc["per_stage"] = [
+                    {"stage_id": sr["stage"].stage_id, "branches": sr["branches"]}
+                    for sr in stage_runs]
             with open(os.path.join(output_dir, "branch_report.json"), "w") as f:
-                json.dump({"top_op": norm_label, "branches": assembler.branch_report},
-                          f, indent=2, sort_keys=True)
-        
-        actual_max_t = max((instr.abs_t for instr in physical_instrs), default=0)
-        safe_max_cycles = actual_max_t + (II * num_loop_iters) + 50
+                json.dump(br_doc, f, indent=2, sort_keys=True)
+
+        if stage_runs is None:
+            actual_max_t = max((instr.abs_t for instr in physical_instrs), default=0)
+            safe_max_cycles = actual_max_t + (II * num_loop_iters) + 50
+        else:
+            # 多段：逐段预算（段内 max abs_t + II·m_k + 余量）；顶层取逐段最大值
+            for sr in stage_runs:
+                sr["max_cycles"] = (max((i.abs_t for i in sr["instrs"]), default=0)
+                                    + II * sr["stage"].m + 50)
+            safe_max_cycles = max(sr["max_cycles"] for sr in stage_runs)
         if self.show_review:
             print(f"[RUNNER] Dynamic Max Cycles set to: {safe_max_cycles}")
 
@@ -227,12 +282,57 @@ class PipelineRunner:
                   f"→ multi-SMC emit smc_num={smc_num_eff}")
         # 多 SMC 模式：传 programs list；emitter._emit_multi_smc 据此 per-SMC inject_data
         emit_program = programs if is_multi_smc else program
-        # ADR-020 v6: 多 SMC 路径必传 lir_stream (DFG 拓扑) 用于 per-SMC stagger
-        packer.emit_from_instructions(
-            physical_instrs, output_dir, program=emit_program, smc_num=smc_num_eff,
-            lir_stream=emit_ops if is_multi_smc else None,
-        )
-        self._patch_max_cycles(output_dir, safe_max_cycles)
+        if stage_runs is None:
+            # ADR-020 v6: 多 SMC 路径必传 lir_stream (DFG 拓扑) 用于 per-SMC stagger
+            packer.emit_from_instructions(
+                physical_instrs, output_dir, program=emit_program, smc_num=smc_num_eff,
+                lir_stream=emit_ops if is_multi_smc else None,
+            )
+            self._patch_max_cycles(output_dir, safe_max_cycles)
+        else:
+            # ADR-057 D2/D5：逐段发射到 stages/stage_k/（对称布局；顶层 smc_0/ 不留
+            #   iq_*.hex —— 防旧单段打包器 glob 到首段静默半截打包）。仅 stage_0 携带
+            #   program（ur_data 全量输入只写一次，UR 跨段持久）；顶层 sim_config.json
+            #   由本函数拼「stages」多段契约（physical_runner 据此链式执行）。
+            for sr in stage_runs:
+                k = sr["stage"].stage_id
+                stage_root = os.path.join(output_dir, "stages", f"stage_{k}")
+                packer.emit_from_instructions(
+                    sr["instrs"], stage_root,
+                    program=program if k == 0 else None, smc_num=None)
+                with open(os.path.join(stage_root, "physical_instructions.json"), "w") as f:
+                    json.dump([i.to_dict() for i in sr["instrs"]], f, indent=2)
+                with open(os.path.join(stage_root, "branch_report.json"), "w") as f:
+                    json.dump({"top_op": norm_label, "branches": sr["branches"]},
+                              f, indent=2, sort_keys=True)
+            st0_cfg_path = os.path.join(output_dir, "stages", "stage_0", "sim_config.json")
+            with open(st0_cfg_path) as f:
+                st0_cfg = json.load(f)
+            stages_cfg = []
+            for sr in stage_runs:
+                k = sr["stage"].stage_id
+                with open(os.path.join(output_dir, "stages", f"stage_{k}",
+                                       "sim_config.json")) as f:
+                    k_cfg = json.load(f)
+                stages_cfg.append({
+                    "stage_id": k, "kind": "COMPUTE",
+                    "start": sr["stage"].start, "m": sr["stage"].m,
+                    "iq_init": {n: f"stages/stage_{k}/{p}"
+                                for n, p in k_cfg["iq_init"].items()},
+                    "max_cycles": sr["max_cycles"],
+                })
+            top_cfg = {
+                "smc_id": 0,
+                "iq_init": {n: f"stages/stage_0/{p}"
+                            for n, p in st0_cfg["iq_init"].items()},
+                "ur_init": {b: f"stages/stage_0/{p}"
+                            for b, p in st0_cfg["ur_init"].items()},
+                "max_cycles": safe_max_cycles,
+                "tensors": st0_cfg.get("tensors", []),
+                "stages": stages_cfg,
+            }
+            with open(os.path.join(output_dir, "sim_config.json"), "w") as f:
+                json.dump(top_cfg, f, indent=2)
 
         # ADR-033 Stage-A：算子提供 SMI_DS_T 跨-SMC 转置 config → patch 进 sim_config.json
         # （照搬 _patch_max_cycles 的 post-emit patch 模式，零 emitter 签名改动）。
@@ -270,8 +370,12 @@ class PipelineRunner:
             self._patch_sim_config(output_dir, {"broadcast_capture": bcast_cfg})
 
         # 🛸 [V5.4 FIX] 保存物理指令供审计员使用
-        with open(os.path.join(output_dir, "physical_instructions.json"), "w") as f:
-            json.dump([instr.to_dict() for instr in physical_instrs], f, indent=2)
+        # ADR-057：多段时顶层不落单一 physical_instructions.json（两段拼接语义错误），
+        #   各段文件已在发射块写入 stages/stage_k/physical_instructions.json；
+        #   消费方（Auditor/emit_fx/三区）须走逐段路径。
+        if stage_runs is None:
+            with open(os.path.join(output_dir, "physical_instructions.json"), "w") as f:
+                json.dump([instr.to_dict() for instr in physical_instrs], f, indent=2)
         
         np.savez(os.path.join(output_dir, "golden_data.npz"), y=golden_res["y"])
         with open(os.path.join(output_dir, "expected_values.json"), "w") as f:
@@ -290,10 +394,43 @@ class PipelineRunner:
                 "logical_addr": int(op.metadata.get("logical_addr", 0) or 0),
                 "dly": int(op.metadata.get("dly", 0) or 0),
                 "op_type": str(op.op_type),
+                # ADR-057 D3：检查器须按与构建期分段器相同的口径过滤 structural_only
+                #   （dump 覆盖全量 ops，分段器只见 emit_ops）——纯附加字段，既有读者
+                #   （emit_fx/auditor/g14b）不读。
+                "structural_only": bool(op.metadata.get("structural_only")),
             } for op in ops}
         }
         with open(os.path.join(output_dir, "compiler_schedule.json"), "w") as f:
             json.dump(schedule_dump, f, indent=2)
+
+        if stage_runs is not None:
+            # ADR-057 D3：manifest 随 run 生成并封印（生成产物，**非独立真值**——
+            #   独立重算对照由 tools/check_stage_manifest.py 承担）。共享调度复制进
+            #   各段目录（段级自洽快照，供 emit_fx/审计逐段消费）。
+            import datetime as _dt
+            from verification_v2.infra import stage_manifest as _smod
+            from verification_v2.infra.protocol_registry import load_default as _load_reg
+            from verification_v2.reference.ordered_ast import parse_ordered_formula
+            for sr in stage_runs:
+                k = sr["stage"].stage_id
+                shutil.copy2(os.path.join(output_dir, "compiler_schedule.json"),
+                             os.path.join(output_dir, "stages", f"stage_{k}",
+                                          "compiler_schedule.json"))
+            _t_names = [k_ for k_, c in operator.tensor_configs.items()
+                        if c.get("role") in ("input", "param")]
+            _ast_root = parse_ordered_formula(operator.formula_str, _t_names)
+            _manifest = _smod.build_manifest(
+                op_name=norm_label, op_cfg=operator.cfg,
+                ast_canonical=_smod.ast_to_canonical(_ast_root),
+                schedule_json=Path(output_dir) / "compiler_schedule.json",
+                hw_config_dir=Path(self.hw_config_name),
+                registry=_load_reg(), plan=stage_plan,
+                stage_dirs=[Path(output_dir) / "stages" / f"stage_{sr['stage'].stage_id}"
+                            for sr in stage_runs],
+                tensor_cfgs={k_: dict(c) for k_, c in operator.tensor_configs.items()},
+                n=int(_per_smc_len), lanes=int(vector_lanes),
+                generated_utc=_dt.datetime.now(_dt.timezone.utc).isoformat())
+            _smod.write_manifest(_manifest, Path(output_dir) / "stage_manifest.json")
 
         if self.show_review:
             print(f"[STEP] Running Physical Simulation...")
@@ -335,7 +472,16 @@ class PipelineRunner:
             "ops": ops,
             # ADR-055：规范化后的顶层算子身份 + 逐队列分支分类（⑭-on-add 用）
             "top_op": norm_label,
-            "branch_report": assembler.branch_report,
+            "branch_report": eff_branches,
+            # ADR-057：多段计划（单段为 None）。编排器据此走逐段审计/仲裁路径。
+            "stage_plan": (
+                {"n_eff": stage_plan.n_eff, "ii": stage_plan.ii,
+                 "m_max": stage_plan.m_max,
+                 "stages": [{"stage_id": st.stage_id, "start": st.start, "m": st.m}
+                            for st in stage_plan.stages]}
+                if stage_runs is not None else None),
+            "stage_dirs": ([os.path.join(output_dir, "stages", f"stage_{sr['stage'].stage_id}")
+                            for sr in stage_runs] if stage_runs is not None else None),
             # ADR-020 v3：multi-SMC 路径在本函数内 line 39 重生成 input_data（_prepare_input_parallel_n,
             # rng.uniform(1,5) + default_rng(0)），与 main_verify.run_test 入口前 prepare_input(n_rows)
             # 的 randn 输出不一致。Auditor 须用 sim 实际吃到的这份算 expected，否则系统性 mismatch。

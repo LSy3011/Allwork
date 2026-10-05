@@ -57,7 +57,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("case_smc0_dir", type=Path)
     ap.add_argument("--label", default="")
-    ap.add_argument("--instructions", type=Path, default=None)
+    # ADR-057：多段构建逐段各有一份 physical_instructions.json——flag 可重复，
+    # 计数取各段之和（单段传一个，行为不变）。
+    ap.add_argument("--instructions", type=Path, action="append", default=None)
     ap.add_argument("--write-queue", default="vout0")
     a = ap.parse_args()
     d = a.case_smc0_dir
@@ -99,10 +101,12 @@ def main() -> int:
 
     expect = None
     if a.instructions is not None:
-        if not a.instructions.is_file():
-            print(f"[三区比对] 缺 {a.instructions}", file=sys.stderr)
-            return 2
-        expect = live_bodily_writes(a.instructions, a.write_queue)
+        expect = 0
+        for p in a.instructions:
+            if not p.is_file():
+                print(f"[三区比对] 缺 {p}", file=sys.stderr)
+                return 2
+            expect += live_bodily_writes(p, a.write_queue)
 
     green = (z1_bad == 0 and z3_bad == 0 and t_total > 0
              and (expect is None or t_total == expect))

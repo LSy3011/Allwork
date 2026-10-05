@@ -475,6 +475,25 @@ class Auditor:
                     name, trace = line.split("|")
                     sim_activity[name.strip()] = trace.strip().split()
 
+        # ADR-057 D4：多段链式 sim 的段界标记（physical_runner 逐段打印）。
+        # 刚性契约推广：段 k 内局部迭代 j' 的物理拍 = B_k + 2 + SMT_t + j'·II
+        # （B_k = stage_k BEGIN @cycle；段程序各自重启时间轴，2026-10-01 由
+        # n=244 链式日志实证：iter60 rtovr t=15 → abs 327 = 310+2+15+0·2）。
+        import re as _re
+        stage_marks = []   # [(start, m, begin_cycle)]，按 start 升序
+        try:
+            with open(log_path, "r") as f:
+                for line in f:
+                    m_ = _re.search(
+                        r"\[SIM_MULTI_STAGE\] stage_(\d+) BEGIN "
+                        r"\(start=(\d+), m=(\d+)\) @cycle (\d+)", line)
+                    if m_:
+                        stage_marks.append((int(m_.group(2)), int(m_.group(3)),
+                                            int(m_.group(4))))
+        except OSError:
+            pass
+        stage_marks.sort()
+
         all_matched = True
         # [REMOVED HARDCODED num_iterations]
 
@@ -538,7 +557,21 @@ class Auditor:
             debug_buffer = [] 
             
             for iter_idx in range(num_iterations):
-                expected_cyc = 2 + t_base + (iter_idx * ii)
+                if stage_marks:
+                    # 多段：定位 iter_idx 所属段 → 段内局部迭代 → 段锚重基
+                    _hit = None
+                    for (_s, _m, _b) in stage_marks:
+                        if _s <= iter_idx < _s + _m:
+                            _hit = (_s, _b)
+                            break
+                    if _hit is None:
+                        all_matched = False
+                        print(f"\n[FAIL] Op: {trace_id} ITER {iter_idx} 不属任何段"
+                              f"（段界 {stage_marks}）——链式 sim 覆盖断裂")
+                        break
+                    expected_cyc = _hit[1] + 2 + t_base + ((iter_idx - _hit[0]) * ii)
+                else:
+                    expected_cyc = 2 + t_base + (iter_idx * ii)
                 actual_char = sim_trace[expected_cyc] if expected_cyc < len(sim_trace) else "?"
                 # ADR-044：two-word DST 输入链时序豁免（drain-分离新时序，非刚性 cyc=2+SMT_t）。
                 timing_ok = (actual_char == target_char) or (trace_id in timing_exempt_ids)

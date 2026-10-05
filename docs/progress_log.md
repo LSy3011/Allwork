@@ -82,3 +82,25 @@
 - 证据索引：`verification_v2/artifacts/a2a_recon_followup_20260930/README.md`；各原始运行记录保留。
 - 修复实验目录/算子身份混用、独立求解导致不同端口分配、时间与 probe cycle 原点混淆、缺失标记未进入 RED 等问题；没有放宽既有模型期望。
 - 限制：C4 逐拍仍只记录；当前输出 bank 写检查不能代替全 bank 监测；应答与下一段 BEGIN 同拍导致 C2 空窗，不据此声称独立排干证明。正式分段器、manifest、统一入口尚待实现。
+
+## 2026-10-01 ADR-057 验收② 正式链双双 GREEN（统一入口）
+
+- **n=244（60+1）与 n=480（60+60）正式验收 GREEN 并发布**（统一入口 run_v1_verify，真实 VCS）：
+  run `adr057_accept_n244_r2` / `adr057_accept_n480`，发布包 `releases/scale_sum_adr057_accept_n244_r2` /
+  `scale_sum_adr057_accept_n480`。全链：G-cap→分段器→逐段重发射（共享同一 SMT 调度）→链式 sim→
+  manifest 封印+D3 独立检查五层→仿真前期望事件冻结→多段打包→VCS→三区比对→逐拍多段仲裁（C1/C2/C3）。
+- **C2 空窗语义修订（用户裁决 + evaluator 独立复核 APPROVE-with-notes）**：ack≡BEGIN 同拍空窗
+  由显式 RED 降为报告 `limitations[]`（verdict 仅由正向违例决定；限制声明落 stdout 与 run_report
+  落账，不静默）。依据：TB 主环零延迟顺序推进（同一 $time 打印两标记）系构造性空窗；残留写排除由
+  C1 次序+C3 写集不相交前提下的全时线写归因正向支撑。errata 落 ADR-057「Errata 2026-10-01」。
+  复核 notes 全落：N1 末段后写 RED 回归测试、N2 报告落账、N3 集合语义盲点披露、N4 硬键访问。
+- **验收③ 基线污染发现与重立（用户裁决）**：冻结基线 669350 的 n8/n60 不可由任何可恢复代码状态
+  复现（三向交叉取证：HEAD+WIP ≡ 7f92cb1 ≡ 74d6557+最终yaml，唯基线不同——74d6557 脏树中间态
+  产物）。ADR-057 对单段发射零扰动反获更强证明。重立基线 run `adr057_rebaseline_n8` /
+  `adr057_rebaseline_n60` 全链 VCS GREEN 已发布，字节与取证批次逐字节一致；n4/n240 基线不动。
+  errata 之二 + 取证包 `artifacts/adr057_baseline_forensics_20261001/`。
+  前向约束：git_dirty=true 的运行产物不得升格为冻结基线。
+- 首次正式跑（adr057_accept_n244）按旧语义 RED 于空窗——熔断线按设计触发，run 目录保留作
+  裁决轨迹证据。
+- 限制不变：不声称段间独立排干证明；C4 逐拍对注册表 v2 的尾段形态对账仍待做；单段发布包与
+  多段发布包并存，n8/n60 旧包（669350 系）保留不改写。

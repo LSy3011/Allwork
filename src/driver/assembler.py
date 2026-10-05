@@ -15,6 +15,11 @@ from api.hw_spec import HardwareSpec
 # G-op（§B.2-1 / §A.2-2）：V1 准许的计算单元闭集。
 _V1_COMPUTE_ALLOWED = frozenset({"FPMUL", "FPADD"})
 
+# IQ 容量墙（G-cap / ADR-057 D1 分段器的公共依据）：RTL smi_top.v:22
+# SMI_IQ_INSTQ_DEPTH=128。唯一来源即本常量——分段器 import 此值，
+# 禁止第二处字面量，防容量判定双源漂移。
+SMI_IQ_INSTQ_DEPTH = 128
+
 # 计算单元族全集（hw_config/modules.yaml 单元清单中的计算类）。用于 G-op 判定：
 # op_type ∈ 本族 且 ∉ _V1_COMPUTE_ALLOWED → BASE_OP_OUT_OF_SCOPE。
 # SHIFTUP/SHIFTDN/LDB/STB/VIN/VOUT/UR_*/RTOVR/SMI_DS_T 属搬运或端口单元，不在本族，
@@ -620,10 +625,10 @@ class PhysicalAssembler:
                     raise ValueError(
                         f"ADR-055 D3 互校失败：iq={iq_name} 实算行数 {emitted_rows} != "
                         f"构造预测 L_q=iq_II·R_q+2={L_q_pred}")
-                if emitted_rows > 128:
+                if emitted_rows > SMI_IQ_INSTQ_DEPTH:
                     raise ValueError(
                         f"[STATIC_ADMISSION_REJECTED/G-cap] ADR-055 D3 容量拒绝："
-                        f"iq={iq_name} 实算行数 {emitted_rows} > 128 "
+                        f"iq={iq_name} 实算行数 {emitted_rows} > {SMI_IQ_INSTQ_DEPTH} "
                         f"（IQ 容量墙 smi_top.v:22 SMI_IQ_INSTQ_DEPTH）——DEBT-055-CAPACITY，"
                         f"A2 分段前置")
                 self.branch_report[iq_name] = "unroll"

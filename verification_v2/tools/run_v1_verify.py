@@ -75,6 +75,8 @@ from verification_v2.infra import protocol_registry as pr_mod                # n
 import emit_expected_fire_sequence as emit_fx                                # noqa: E402
 import arbitrate_probe_logs as arb                                           # noqa: E402
 from package_vcs_case import package as package_case                         # noqa: E402
+from package_vcs_case import package_multi as package_case_multi             # noqa: E402
+import check_stage_manifest as manifest_ck                                   # noqa: E402
 
 F32 = np.float32
 
@@ -288,6 +290,12 @@ class SizeContext:
         self.failure: Optional[Dict[str, Any]] = None
         self.unverified: Optional[Dict[str, Any]] = None
         self.vcs_logs: Optional[Dict[str, str]] = None
+        # ADR-057：多段计划（单段为 None）。compile_admit 从 runner ctx 取回，
+        # 其后的审计/打包/仲裁据此走逐段路径。
+        self.stage_plan: Optional[Dict[str, Any]] = None
+        # ADR-057 errata-2026-10-01 / evaluator N2：仲裁限制声明随 run 报告落账，
+        # 顶层 verdict 载体自含（不逆转 outcome，但不得只在 stdout 出现）。
+        self.arb_limitations: List[str] = []
 
     def ev(self, name: str) -> Path:
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -631,7 +639,8 @@ class Orchestrator:
                                      show_review=False, show_model=False)
         try:
             ctx = sctx.runner.run_full_stack(
-                op, sctx.input_data, op_name=self.cfg.op_name, external_input=False)
+                op, sctx.input_data, op_name=self.cfg.op_name, external_input=False,
+                allow_stage_partition=True)   # ADR-057：分段拦截仅此入口选择加入
         except SynthesisRejected as e:
             raise StageFailure(
                 [e.failure_code],
@@ -662,6 +671,8 @@ class Orchestrator:
         # 产物快照即刻入 run 目录（其后所有审计/打包只读本副本）
         sctx.build_copy = sctx.dir / "build"
         shutil.copytree(build_dir, sctx.build_copy)
+        # ADR-057：多段计划挂到规模上下文（单段 None，后续阶段零分支）
+        sctx.stage_plan = ctx.get("stage_plan")
 
     def _stage_independent_reference(self, sctx: SizeContext) -> None:
         """§C.3：以独立参考为打包 golden 源——逐位比 golden_data.npz，重写 output_bank 输出区。
@@ -722,40 +733,94 @@ class Orchestrator:
                 f"after={hashlib.sha256(new_bytes).hexdigest()[:16]}）")
 
     def _stage_artifact_audit(self, sctx: SizeContext) -> None:
-        """产物审计：Auditor 三门 + 期望事件仿真前落盘（重建侧违例自行拒盘）。"""
+        """产物审计：Auditor 三门 + 期望事件仿真前落盘（重建侧违例自行拒盘）。
+
+        ADR-057：多段构建先行 D3 manifest 独立检查（封印 + 计划/地址/行数重算
+        对照），再逐段 headers + 逐段期望事件（段起始偏移进地址公式）；
+        truth/firmware 两门以全迭代数在顶层快照跑一次（链式 sim 日志覆盖全程）。
+        """
         ctx, bc = sctx.ctx, sctx.build_copy
         sim_log = str(bc / f"{self.cfg.op_name}_sim.log")   # 快照副本内的仿真日志
-        auditor = Auditor(str(bc), sctx.runner.spec, show_review=False, show_model=False)
-        if not auditor.audit_physical_headers():
-            raise StageFailure(["PACKAGE_OR_EMISSION_ERROR"],
-                               "audit_physical_headers RED（发射头部违例）",
-                               logs={"sim_log": sim_log})
+        auditor_top = Auditor(str(bc), sctx.runner.spec, show_review=False,
+                              show_model=False)
+
+        if sctx.stage_plan:
+            findings = manifest_ck.check_manifest(
+                bc, REPO_ROOT / "verification_v2" / "ops")
+            if findings:
+                raise StageFailure(
+                    ["PACKAGE_OR_EMISSION_ERROR"],
+                    f"ADR-057 D3 manifest 独立检查 RED（{len(findings)} 项）: "
+                    + " ; ".join(f"[{c}] {m}" for c, m in findings[:6]),
+                    logs={"stage_manifest": str(bc / "stage_manifest.json")})
+            for st in sctx.stage_plan["stages"]:
+                k = st["stage_id"]
+                auditor_k = Auditor(str(bc / "stages" / f"stage_{k}"),
+                                    sctx.runner.spec, show_review=False,
+                                    show_model=False)
+                if not auditor_k.audit_physical_headers():
+                    raise StageFailure(["PACKAGE_OR_EMISSION_ERROR"],
+                                       f"stage_{k} audit_physical_headers RED"
+                                       f"（发射头部违例）", logs={"sim_log": sim_log})
+        else:
+            if not auditor_top.audit_physical_headers():
+                raise StageFailure(["PACKAGE_OR_EMISSION_ERROR"],
+                                   "audit_physical_headers RED（发射头部违例）",
+                                   logs={"sim_log": sim_log})
+
         effective = ctx.get("input_data", sctx.input_data)
         auditor_inputs = {k: (v[0] if hasattr(v, "ndim") and v.ndim == 2 else v)
                           for k, v in effective.items()}
-        if not auditor.audit_truth_alignment(sim_log,
+        if not auditor_top.audit_truth_alignment(sim_log,
                 num_iterations=ctx["num_iterations"], ops=ctx.get("ops"),
                 input_data=auditor_inputs):
             raise StageFailure(["NUMERIC_MISMATCH"],
                                "audit_truth_alignment RED（sim 终态与独立期望不符）",
                                logs={"sim_log": sim_log})
-        if not auditor.audit_firmware_integrity(sim_log, ops=ctx.get("ops")):
+        if not auditor_top.audit_firmware_integrity(sim_log, ops=ctx.get("ops")):
             raise StageFailure(["PACKAGE_OR_EMISSION_ERROR"],
                                "audit_firmware_integrity RED（固件覆盖缺口）")
-        ev_path = sctx.ev("expected_events.json")
-        bad = emit_fx.audit(bc, ctx["num_iterations"], hw_config=self.cfg.hw_config,
-                            require_unroll=True, emit_events_path=ev_path)
-        if bad:
-            raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
-                               f"发射行独立重建/比对违例 {len(bad)} 条: "
-                               + " ; ".join(str(b) for b in bad[:8]),
-                               logs={"audit_log": str(ev_path)})
+
+        if sctx.stage_plan:
+            for st in sctx.stage_plan["stages"]:
+                k = st["stage_id"]
+                ev_k = sctx.ev(f"expected_events_stage_{k}.json")
+                bad = emit_fx.audit(bc / "stages" / f"stage_{k}", st["m"],
+                                    hw_config=self.cfg.hw_config,
+                                    require_unroll=True, emit_events_path=ev_k,
+                                    stage_start=st["start"],
+                                    stage={"stage_id": k, "start": st["start"],
+                                           "m": st["m"]})
+                if bad:
+                    raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
+                                       f"stage_{k} 发射行独立重建/比对违例 "
+                                       f"{len(bad)} 条: "
+                                       + " ; ".join(str(b) for b in bad[:8]),
+                                       logs={"audit_log": str(ev_k)})
+        else:
+            ev_path = sctx.ev("expected_events.json")
+            bad = emit_fx.audit(bc, ctx["num_iterations"], hw_config=self.cfg.hw_config,
+                                require_unroll=True, emit_events_path=ev_path)
+            if bad:
+                raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
+                                   f"发射行独立重建/比对违例 {len(bad)} 条: "
+                                   + " ; ".join(str(b) for b in bad[:8]),
+                                   logs={"audit_log": str(ev_path)})
 
     def _stage_package(self, sctx: SizeContext) -> None:
-        """打包 VCS case（clean=True 抹除旧 case 全目录——旧探针日志不可串用）。"""
+        """打包 VCS case（clean=True 抹除旧 case 全目录——旧探针日志不可串用）。
+
+        ADR-057 D5：多段构建走 package_multi（段号连续校验 + clean 只清一次 +
+        ur_data 取 stage_0 / golden 取顶层链式终态），段产物缺失即拒绝打包。
+        """
         try:
-            case = package_case(sctx.build_copy, self.cfg.suite, sctx.case_name,
-                                self.cfg.sandbox, clean=True)
+            if sctx.stage_plan:
+                case = package_case_multi(sctx.build_copy, self.cfg.suite,
+                                          sctx.case_name, self.cfg.sandbox,
+                                          clean=True)
+            else:
+                case = package_case(sctx.build_copy, self.cfg.suite, sctx.case_name,
+                                    self.cfg.sandbox, clean=True)
         except SystemExit as e:
             raise StageFailure(["PACKAGE_OR_EMISSION_ERROR"], f"打包器拒绝: {e}") from e
         except Exception as e:  # noqa: BLE001
@@ -837,10 +902,22 @@ class Orchestrator:
     def _stage_three_zone(self, sctx: SizeContext) -> None:
         tz_py = REPO_ROOT / "verification_v2" / "tools" / "three_zone_compare.py"
         out_path = sctx.ev(f"n{sctx.n}_three_zone.json")
+        # ADR-057：多段时逐段 physical_instructions.json 全部传入（工具内计数求和；
+        # 三区定义本身与分段无关——golden/init/终态 dump 都是全范围文件）。
+        if sctx.stage_plan:
+            instr_args: List[str] = []
+            for st in sctx.stage_plan["stages"]:
+                instr_args += ["--instructions",
+                               str(sctx.build_copy / "stages"
+                                   / f"stage_{st['stage_id']}"
+                                   / "physical_instructions.json")]
+        else:
+            instr_args = ["--instructions",
+                          str(sctx.build_copy / "physical_instructions.json")]
         proc = subprocess.run(
             [sys.executable, str(tz_py), str(sctx.case_root / "smc_0"),
              "--label", f"n{sctx.n}",
-             "--instructions", str(sctx.build_copy / "physical_instructions.json"),
+             *instr_args,
              "--write-queue", "vout0"],
             capture_output=True, text=True)
         out_path.write_text(proc.stdout + proc.stderr, encoding="utf-8")
@@ -855,15 +932,37 @@ class Orchestrator:
                                exit_code=proc.returncode)
 
     def _stage_arbitrate(self, sctx: SizeContext) -> None:
-        ev_path = sctx.evidence_dir / "expected_events.json"
-        expected = json.loads(ev_path.read_text(encoding="utf-8"))
-        try:
-            report = arb.arbitrate(sctx.case_root, expected)
-        except Exception as e:  # noqa: BLE001
-            raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
-                               f"仲裁器异常（探针日志坏/缺失）: {type(e).__name__}: {e}") from e
+        if sctx.stage_plan:
+            # ADR-057 D4：逐段期望（仿真前冻结）+ sim.log 段标记 → 多段仲裁
+            # （按 TB 标记切窗、段内复用单段裁决、段间 C1/C2/C3）。
+            expected_stages = []
+            for st in sctx.stage_plan["stages"]:
+                p = sctx.evidence_dir / f"expected_events_stage_{st['stage_id']}.json"
+                expected_stages.append(json.loads(p.read_text(encoding="utf-8")))
+            sim_log = sctx.evidence_dir / f"n{sctx.n}_sim_log.log"
+            try:
+                report = arb.arbitrate_multi(sctx.case_root, expected_stages, sim_log)
+            except Exception as e:  # noqa: BLE001
+                raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
+                                   f"多段仲裁器异常（探针日志/段标记坏）: "
+                                   f"{type(e).__name__}: {e}") from e
+            # 多段报告必带 limitations 键——缺键即仲裁器重构事故，宁 KeyError 不静默
+            # （evaluator N4）。
+            sctx.arb_limitations = list(report["limitations"])
+        else:
+            ev_path = sctx.evidence_dir / "expected_events.json"
+            expected = json.loads(ev_path.read_text(encoding="utf-8"))
+            try:
+                report = arb.arbitrate(sctx.case_root, expected)
+            except Exception as e:  # noqa: BLE001
+                raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
+                                   f"仲裁器异常（探针日志坏/缺失）: {type(e).__name__}: {e}") from e
+            sctx.arb_limitations = []   # 单段报告（ADR-056 形态）无此键，显式置空
         (sctx.ev(f"n{sctx.n}_arbitrate_report.json")).write_text(
             json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        for lim in sctx.arb_limitations:
+            # 限制声明不逆转 verdict，但必须上日志——不许静默放过（ADR-057 errata-2026-10-01）
+            print(f"[ARBITRATE-LIMITATION] {lim}")
         if report.get("verdict") != "GREEN":
             raise StageFailure(["PER_BEAT_PROTOCOL_MISMATCH"],
                                f"逐拍仲裁 RED（{len(report.get('violations', []))} 违例）: "
@@ -881,6 +980,9 @@ class Orchestrator:
             "case_name": sctx.case_name,
             "evidence_dir": sctx.rel(sctx.evidence_dir),
         }
+        if sctx.arb_limitations:
+            # evaluator N2：限制声明随报告落账（GREEN 也带），顶层载体自含
+            frag["arbitrate_limitations"] = list(sctx.arb_limitations)
         if sctx.failure:
             frag["failure"] = sctx.failure
         if sctx.unverified:

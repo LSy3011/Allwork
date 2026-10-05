@@ -232,7 +232,8 @@ class _OkRunner:
     def __init__(self, **kw):
         self.kw = kw
 
-    def run_full_stack(self, op, input_data, op_name=None, external_input=False):
+    def run_full_stack(self, op, input_data, op_name=None, external_input=False,
+                       **_kw):   # 吸收 allow_stage_partition 等前向兼容 kwarg
         build_dir = rv.REPO_ROOT / "build" / "verification_v2" / op_name
         build_dir.mkdir(parents=True, exist_ok=True)
         (build_dir / self.MARKER).write_text("fresh", encoding="utf-8")

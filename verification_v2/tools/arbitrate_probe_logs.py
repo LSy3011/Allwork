@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
@@ -53,6 +54,8 @@ from verification_v2.infra.rtl_probe_plan import (  # noqa: E402
     STUB_IDS, monitored_ids, rtl_id_for_queue, ProbePlanError)
 
 FETCH_SCHEMA = "adr056_d4_expected_events_v1"
+# ADR-057 D4：分段程序的期望事件 schema（带段身份块；段内事件仍为队列局部 rel 拍）
+STAGE_SCHEMA = "adr057_d4_expected_events_v1"
 
 
 class ArbiterError(ValueError):
@@ -128,6 +131,7 @@ def load_write_log(path: Path) -> List[Tuple[int, int, int, int, int, str]]:
 
 
 def arbitrate(case_root: Path, expected: Dict[str, Any]) -> Dict[str, Any]:
+    """单段仲裁（ADR-056 步④-2 原始入口，行为保持不变）。"""
     bad: List[str] = []
     if expected.get("schema") != FETCH_SCHEMA:
         bad.append(f"期望文件 schema={expected.get('schema')!r} != {FETCH_SCHEMA!r}")
@@ -146,6 +150,22 @@ def arbitrate(case_root: Path, expected: Dict[str, Any]) -> Dict[str, Any]:
     issue_evs = load_issue_log(issue_path)
     write_rows = load_write_log(write_path)
 
+    report, _aux = _arbitrate_core(fetch_evs, issue_evs, write_rows, expected)
+    report["case_root"] = str(case_root)
+    return report
+
+
+def _arbitrate_core(fetch_evs: Dict[int, List[Tuple[int, int, Any]]],
+                    issue_evs: Dict[int, List[Tuple[int, Any]]],
+                    write_rows: List[Tuple[int, int, int, int, int, str]],
+                    expected: Dict[str, Any],
+                    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """事件级仲裁核心（G1–G5）。输入为已装载（多段时：已按窗过滤）的事件。
+
+    返回 (report, aux)：report 即单段报告体（键集不变）；aux 携带结构化中间量
+    （exp_pairs / smc0_seen）供多段封装的段间裁决（C3）复用，不进 JSON。
+    """
+    bad: List[str] = []
     probes = set(monitored_ids())
     stub = set(STUB_IDS)
 
@@ -154,14 +174,16 @@ def arbitrate(case_root: Path, expected: Dict[str, Any]) -> Dict[str, Any]:
     try:
         union_ids = {rtl_id_for_queue(q) for q in union_qs}
     except ProbePlanError as exc:
-        return {"violations": [f"并集映射断裂: {exc}"], "verdict": "RED"}
+        return ({"violations": [f"并集映射断裂: {exc}"], "verdict": "RED"},
+                {"exp_pairs": Counter(), "smc0_seen": set()})
     q_by_id: Dict[int, str] = {}  # iq -> 队列名（留给 (G1) 之后排错信息用）
     for q in union_qs:
         iq_q = rtl_id_for_queue(q)
         q_by_id[iq_q] = q
         if iq_q not in probes:
-            return {"violations": [f"{q}: 映射到未铺针/插槽（probe plan 断裂）"],
-                    "verdict": "RED"}
+            return ({"violations": [f"{q}: 映射到未铺针/插槽（probe plan 断裂）"],
+                     "verdict": "RED"},
+                    {"exp_pairs": Counter(), "smc0_seen": set()})
 
     for iq, evs in sorted(fetch_evs.items()):
         if iq not in probes:
@@ -276,7 +298,6 @@ def arbitrate(case_root: Path, expected: Dict[str, Any]) -> Dict[str, Any]:
         bad.append(f"(G4) 漏写合计 {len(missing)} 对（仅列前 20）")
 
     report = {
-        "case_root": str(case_root),
         "registry_digest": (expected.get("registry") or {}).get("records_sha256"),
         "c0_by_queue": per_q,
         "cross_queue": {
@@ -298,20 +319,287 @@ def arbitrate(case_root: Path, expected: Dict[str, Any]) -> Dict[str, Any]:
         "violations": bad,
         "verdict": "RED" if bad else "GREEN",
     }
-    return report
+    aux = {"exp_pairs": exp_pairs, "smc0_seen": smc0_seen}
+    return report, aux
+
+
+# ----------------------------------------------------------------------
+# ADR-057 D4：多段仲裁——按 TB 标记切窗，逐段复用单段核心，段间 C1/C2/C3 正式化
+# ----------------------------------------------------------------------
+
+# TB 标记文法（tb_aiacc_top_v04_f_multi_stage.v :2386/:2393/:959 的 $display 原文；
+# BEGIN 行第二数是 tb_stage_count-1 = 最大段号）。
+_MARK_BEGIN = re.compile(
+    r"\[TB_MULTI_STAGE\] ===== stage_(\d+)/(\d+) BEGIN ===== "
+    r"@time (\d+) @probe_cycle (\d+)")
+_MARK_DONE = re.compile(
+    r"\[TB_MULTI_STAGE\] stage_(\d+) done \(intr cleared\) "
+    r"@time (\d+) @probe_cycle (\d+)")
+_MARK_COMPLETE = re.compile(
+    r"\[TB_MULTI_STAGE\] all stages complete.*?@probe_cycle (\d+)")
+
+
+def parse_stage_markers(sim_log_path: Path) -> Dict[str, Any]:
+    """从 VCS sim.log 解析段标记 → {begins: {sid: cyc}, acks: {sid: cyc},
+    complete: cyc|None, max_idx: int|None}。重复标记即抛 ArbiterError（TB 断裂）。"""
+    begins: Dict[int, int] = {}
+    acks: Dict[int, int] = {}
+    complete: Optional[int] = None
+    max_idx: Optional[int] = None
+    text = Path(sim_log_path).read_text(errors="replace")
+    for ln in text.splitlines():
+        m = _MARK_BEGIN.search(ln)
+        if m:
+            sid, mx, _t, cyc = int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4))
+            if sid in begins:
+                raise ArbiterError(f"stage_{sid} BEGIN 标记重复（TB 断裂）: {ln.strip()}")
+            begins[sid] = cyc
+            max_idx = mx if max_idx is None else max_idx
+            if mx != max_idx:
+                raise ArbiterError(f"BEGIN 标记总数字段不一致: {ln.strip()}")
+            continue
+        m = _MARK_DONE.search(ln)
+        if m:
+            sid, cyc = int(m.group(1)), int(m.group(3))
+            if sid in acks:
+                raise ArbiterError(f"stage_{sid} done 标记重复（TB 断裂）: {ln.strip()}")
+            acks[sid] = cyc
+            continue
+        m = _MARK_COMPLETE.search(ln)
+        if m:
+            complete = int(m.group(1))
+    return {"begins": begins, "acks": acks, "complete": complete,
+            "max_idx": max_idx}
+
+
+def _window_filter(fetch_evs, issue_evs, write_rows,
+                   lo: int, hi: Optional[int]):
+    """半开窗 [lo, hi)（hi=None → ∞）过滤三类事件。"""
+    def _in(c: int) -> bool:
+        return lo <= c and (hi is None or c < hi)
+    f = {iq: [e for e in evs if _in(e[0])] for iq, evs in fetch_evs.items()}
+    f = {iq: evs for iq, evs in f.items() if evs}
+    i = {iq: [e for e in evs if _in(e[0])] for iq, evs in issue_evs.items()}
+    i = {iq: evs for iq, evs in i.items() if evs}
+    w = [r for r in write_rows if _in(r[0])]
+    return f, i, w
+
+
+def arbitrate_multi(case_root: Path, expected_stages: List[Dict[str, Any]],
+                    sim_log_path: Path) -> Dict[str, Any]:
+    """ADR-057 D4 多段仲裁。
+
+    段间裁决（在公共 iq_probe_cycle 轴上，以 TB 标记为唯一段界来源）：
+      C1 次序：BEGIN_0 < … < BEGIN_{K-1}；段 k 的完成应答 ack_k ∈ (BEGIN_k,
+         BEGIN_{k+1}]；段 k 全部写回均早于 ack_k（写回未完成即应答 = 契约破坏）。
+      C2 无残留写：段间静默窗 [ack_k, BEGIN_{k+1}) 内**零写回**；末段 ack 之后
+         同样零写回。**应答≡BEGIN 同拍（空窗）不称排干证明**——空窗记入
+         `limitations`（ADR-057 复核注记 + errata-2026-10-01：现役 TB 段间
+         零延迟顺序推进，tb_aiacc_top_v04_f_multi_stage.v:2382-2394 同一
+         $time 打印 done_k 与 BEGIN_{k+1}，空窗是 testbench 构造性产物而非
+         硬件时序事实；残留写之排除改由 C1 次序 + C3 期望写集不相交前提下的
+         全时线写归因正向支撑，不依赖该窗）。空窗不单独致 RED，但也绝不
+         据此声称独立排干证明。
+         （gap 内的 FETCH/ISSUE 残尾计为观察量：G5 残尾语义的上界未冻结，
+         侦察未取证，不为它发明硬闸。）
+      C3 地址接续：各段期望写集（段内期望文件 payload 的 (BANK,ADDR)）两两
+         不相交（相交 = 段间归属不可判定，超 ADR-057 当前范围 → RED）；
+         各段 SMC0 观察写集 == 本段期望写集（段内 G4 已隐含，此处显式复核）；
+         全体段期望写集按段号链式连续（max_k + 1 == min_{k+1}，同 bank）。
+
+    已知盲点（evaluator N3 披露，继承自 ADR-056 集合语义，非 ADR-057 引入）：
+      G4/C3 均为集合语义——段窗内、应答前、对本段期望地址的**重复写**不做
+      多重性仲裁（exp_pairs 的多重数记入报告但从不断言）。部分后挡：G3 发射
+      计数抓真重复发射；golden 终值比对抓数据不同的覆盖写。「单 ISSUE 双写
+      strobe 且数据相同」在仲裁层与数值层均不可见。是否收口（段窗内核对
+      观察写多重数 == 期望多重数，数据已在手）留待专项决定，不在本 ADR 范围。
+    """
+    bad: List[str] = []
+    limits: List[str] = []   # 限制声明：在场即记录、不单独致 RED（ADR-057 errata-2026-10-01）
+    K = len(expected_stages)
+
+    # ---- 期望侧自洽：schema + 段身份块 + 区间链式覆盖 ----
+    stages_meta: List[Dict[str, Any]] = []
+    for k, exp in enumerate(expected_stages):
+        if exp.get("schema") != STAGE_SCHEMA:
+            bad.append(f"[stage_?] 期望 schema={exp.get('schema')!r} != {STAGE_SCHEMA!r}")
+            continue
+        st = exp.get("stage") or {}
+        if st.get("stage_id") != k:
+            bad.append(f"[stage_{k}] 期望段号乱序/缺失: stage.stage_id={st.get('stage_id')!r}")
+        lo_hi = st.get("iter_range")
+        if not (isinstance(lo_hi, list) and len(lo_hi) == 2
+                and lo_hi[0] == st.get("stage_start")
+                and lo_hi[1] == st.get("stage_start", 0) + st.get("m", -1)):
+            bad.append(f"[stage_{k}] 段身份块 iter_range={lo_hi} 与 "
+                       f"stage_start/m={st.get('stage_start')}/{st.get('m')} 不符")
+        stages_meta.append(st)
+    if stages_meta and stages_meta[0].get("stage_start") != 0:
+        bad.append("首段 stage_start != 0——覆盖链不从 0 起")
+    for k in range(len(stages_meta) - 1):
+        hi_k = stages_meta[k].get("stage_start", 0) + stages_meta[k].get("m", 0)
+        if stages_meta[k + 1].get("stage_start") != hi_k:
+            bad.append(f"段间覆盖断裂: stage_{k} end={hi_k} != "
+                       f"stage_{k+1} start={stages_meta[k + 1].get('stage_start')}")
+    if bad:
+        return {"mode": "multi_stage", "violations": bad, "limitations": [],
+            "verdict": "RED"}
+
+    # ---- 日志装载（三探针 + sim.log 标记） ----
+    fetch_path = case_root / "iq_probe_trace.log"
+    issue_path = case_root / "iq_issue_trace.log"
+    write_path = case_root / "ur_write_trace.log"
+    for p in (fetch_path, issue_path, write_path, sim_log_path):
+        if not Path(p).is_file():
+            bad.append(f"日志缺失: {p}（TB 探针/标记断裂，不得静默降级）")
+    if bad:
+        return {"mode": "multi_stage", "violations": bad, "limitations": [],
+            "verdict": "RED"}
+    fetch_evs = load_fetch_log(fetch_path)
+    issue_evs = load_issue_log(issue_path)
+    write_rows = load_write_log(write_path)
+    marks = parse_stage_markers(sim_log_path)
+    begins, acks = marks["begins"], marks["acks"]
+    if sorted(begins) != list(range(K)) or sorted(acks) != list(range(K)):
+        bad.append(f"TB 段标记不齐: begins={sorted(begins)} acks={sorted(acks)} "
+                   f"!= 期望段集 0..{K - 1}")
+        return {"mode": "multi_stage", "violations": bad, "limitations": [],
+            "verdict": "RED"}
+    if marks["max_idx"] is not None and marks["max_idx"] != K - 1:
+        bad.append(f"TB 侧段数上界 {marks['max_idx']} != 期望段数-1 {K - 1}")
+    if marks["complete"] is None:
+        bad.append("缺 'all stages complete' 标记——TB 未走完段序列")
+    for k in range(K - 1):
+        if begins[k + 1] <= begins[k]:
+            bad.append(f"(C1) BEGIN 乱序: stage_{k}@{begins[k]} 不早于 "
+                       f"stage_{k + 1}@{begins[k + 1]}")
+
+    # ---- 逐段窗口 + 复用单段核心（c0 逐段重锚） ----
+    per_stage_reports: List[Dict[str, Any]] = []
+    per_stage_aux: List[Dict[str, Any]] = []
+    for k in range(K):
+        lo = begins[k]
+        hi = begins[k + 1] if k + 1 < K else None
+        f_w, i_w, w_w = _window_filter(fetch_evs, issue_evs, write_rows, lo, hi)
+        rep_k, aux_k = _arbitrate_core(f_w, i_w, w_w, expected_stages[k])
+        rep_k["stage"] = dict(stages_meta[k])
+        rep_k["window"] = {"begin": lo, "end": hi}
+        rep_k["violations"] = [f"[stage_{k}] {v}" for v in rep_k["violations"]]
+        per_stage_reports.append(rep_k)
+        per_stage_aux.append(aux_k)
+        bad.extend(rep_k["violations"])
+
+    # ---- C1 次序/应答窗 + C2 静默窗 + C3 地址接续 ----
+    c1: Dict[str, Any] = {"per_stage": []}
+    for k in range(K):
+        ack_k = acks[k]
+        hi = begins[k + 1] if k + 1 < K else None
+        in_window = ack_k > begins[k] and (hi is None or ack_k <= hi)
+        w_cycles = [c for (c, _s, _b, _a, _we, _wd)
+                    in _window_filter(fetch_evs, issue_evs, write_rows,
+                                      begins[k], hi)[2]]
+        last_w = max(w_cycles, default=None)
+        if not in_window:
+            bad.append(f"(C1) stage_{k} 应答 @{ack_k} 不在窗口 ({begins[k]}, "
+                       f"{hi if hi is not None else '∞'}] 内")
+        if last_w is not None and last_w >= ack_k:
+            bad.append(f"(C1) stage_{k} 末笔写 @{last_w} 不早于应答 @{ack_k}"
+                       f"——写回未完成即应答")
+        c1["per_stage"].append({"stage_id": k, "begin": begins[k], "ack": ack_k,
+                                "last_write": last_w, "order_ok": in_window})
+    c2: Dict[str, Any] = {"gaps": []}
+    pre = [r for r in write_rows if r[0] < begins[0]]
+    if pre:
+        bad.append(f"(C2) 首段 BEGIN 之前存在写回 ×{len(pre)}（窗口外残留）")
+    for k in range(K):
+        ack_k = acks[k]
+        hi = begins[k + 1] if k + 1 < K else None
+        resid = [r for r in write_rows if ack_k <= r[0] and (hi is None or r[0] < hi)]
+        gap = {"stage_id": k, "ack": ack_k, "next_begin": hi,
+               "residual_writes": len(resid)}
+        if hi is not None and ack_k == hi:
+            gap["vacuous_window"] = True
+            limits.append(
+                f"(C2) stage_{k} 应答与 stage_{k + 1} BEGIN 同拍 @{ack_k}"
+                f"——空窗不称排干证明（ADR-057 复核注记/errata-2026-10-01："
+                f"现役 TB 段间零延迟顺序推进，同一 $time 打印两标记，空窗系"
+                f"testbench 构造性产物；残留写排除由 C1 次序 + C3 写集不相交"
+                f"前提下的全时线写归因正向支撑，不依赖本窗）")
+        if resid:
+            bad.append(f"(C2) stage_{k} 应答后静默窗内残留写 ×{len(resid)}"
+                       f"（首笔 cycle={resid[0][0]} bank={resid[0][2]} addr={resid[0][3]}）")
+        c2["gaps"].append(gap)
+
+    c3: Dict[str, Any] = {"per_stage_pairs": []}
+    exp_sets = [set(aux["exp_pairs"]) for aux in per_stage_aux]
+    for k in range(K):
+        obs_k = {(b, a) for (b, a) in per_stage_aux[k]["smc0_seen"]}
+        eq = obs_k == exp_sets[k]
+        c3["per_stage_pairs"].append({
+            "stage_id": k, "expected": len(exp_sets[k]), "observed": len(obs_k),
+            "set_equal": eq})
+        if not eq:
+            bad.append(f"(C3) stage_{k} 观察写集({len(obs_k)}) != 期望写集"
+                       f"({len(exp_sets[k])})——对称差 {len(obs_k ^ exp_sets[k])} 对")
+    for k in range(K - 1):
+        inter = exp_sets[k] & exp_sets[k + 1]
+        if inter:
+            bad.append(f"(C3) stage_{k} 与 stage_{k + 1} 期望写集相交 ×{len(inter)}"
+                       f"——段间归属不可判定（超 ADR-057 范围）")
+        bk = {b for (b, _a) in exp_sets[k]}
+        bk1 = {b for (b, _a) in exp_sets[k + 1]}
+        if len(bk) == 1 and bk == bk1:
+            b0 = next(iter(bk))
+            a_max = max(a for (b, a) in exp_sets[k] if b == b0)
+            a_min = min(a for (b, a) in exp_sets[k + 1] if b == b0)
+            if a_min != a_max + 1:
+                bad.append(f"(C3) 地址接续断裂: bank{b0} stage_{k} max={a_max}，"
+                           f"stage_{k + 1} min={a_min}（期望 {a_max + 1}）")
+        elif bk or bk1:
+            bad.append(f"(C3) stage_{k}/stage_{k + 1} 写集跨 bank {sorted(bk | bk1)}"
+                       f"——连续性判据不适用（超 ADR-057 范围）")
+
+    inter_stage = {"C1_stage_order": c1, "C2_no_residual_write": c2,
+                   "C3_addr_continuity": c3}
+    return {
+        "mode": "multi_stage",
+        "case_root": str(case_root),
+        "stage_count": K,
+        "markers": {"begins": begins, "acks": acks,
+                    "complete": marks["complete"], "max_idx": marks["max_idx"]},
+        "stages": per_stage_reports,
+        "inter_stage": inter_stage,
+        "violations": bad,
+        "limitations": limits,
+        "verdict": "RED" if bad else "GREEN",
+    }
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="ADR-056 步④-2 三日志 × 期望事件全局仲裁")
+    ap = argparse.ArgumentParser(description="ADR-056 步④-2 / ADR-057 D4 三日志 × 期望事件全局仲裁")
     ap.add_argument("--case-root", type=Path, required=True,
                     help="case 根（含 iq_probe_trace/iq_issue_trace/ur_write_trace 三日志）")
-    ap.add_argument("--expected", type=Path, required=True,
-                    help="adr056_d4_expected_events_v1（仿真前冻结）")
+    ap.add_argument("--expected", type=Path, default=None,
+                    help="单段：adr056_d4_expected_events_v1（仿真前冻结）")
+    ap.add_argument("--expected-stage", type=Path, action="append", default=None,
+                    help="多段（ADR-057 D4）：逐段 adr057_d4_expected_events_v1，"
+                         "按段号顺序重复传入")
+    ap.add_argument("--sim-log", type=Path, default=None,
+                    help="多段必给：VCS sim.log（TB_MULTI_STAGE 标记来源，段界唯一依据）")
     ap.add_argument("--report", type=Path, default=None, help="JSON 报告落盘路径")
     args = ap.parse_args()
 
-    expected = json.loads(args.expected.read_text(encoding="utf-8"))
-    report = arbitrate(args.case_root, expected)
+    if args.expected_stage:
+        if not args.sim_log:
+            ap.error("多段模式须给 --sim-log（段界标记来源）")
+        expected_stages = [json.loads(p.read_text(encoding="utf-8"))
+                           for p in args.expected_stage]
+        report = arbitrate_multi(args.case_root, expected_stages, args.sim_log)
+    elif args.expected:
+        expected = json.loads(args.expected.read_text(encoding="utf-8"))
+        report = arbitrate(args.case_root, expected)
+    else:
+        ap.error("须给 --expected（单段）或 --expected-stage ×K（多段）")
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

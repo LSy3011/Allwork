@@ -69,6 +69,9 @@ from verification_v2.infra.protocol_registry import (  # noqa: E402
 # 注册表模块级单例（derive_queue_rows/audit 缺省共用；测试可显式注入 reg 隔离）
 _REG_SINGLETON: Optional[ProtocolRegistry] = None
 
+# ADR-057 D5：分段程序的期望事件 schema（携带段身份；单段仍用 adr056_d4_expected_events_v1）
+STAGE_SCHEMA = "adr057_d4_expected_events_v1"
+
 
 def _registry(reg: Optional[ProtocolRegistry]) -> ProtocolRegistry:
     global _REG_SINGLETON
@@ -127,7 +130,8 @@ def _queue_meta(ii: int, ops_of_iq: List[Dict[str, Any]], num_iterations: int,
 
 def derive_queue_rows(ii: int, ops_of_iq: List[Dict[str, Any]], num_iterations: int,
                       layout: Any, iq_name: str,
-                      reg: Optional[ProtocolRegistry] = None) -> List[Dict[str, Any]]:
+                      reg: Optional[ProtocolRegistry] = None,
+                      stage_start: int = 0) -> List[Dict[str, Any]]:
     """独立重建单队列的全部待发射行（顺序 = 发射序）。
 
     §D.3 铁律：INIT 垫拍 / TERM 相位常数**只**经注册表 `evaluate` 求得
@@ -174,8 +178,11 @@ def derive_queue_rows(ii: int, ops_of_iq: List[Dict[str, Any]], num_iterations: 
                 # ⚠ 与 assembler 的 `A_k + stride_k·j` 刻意不同式（见模块 docstring）：
                 #   逻辑数据迭代号 i = j − r_k，地址 = 起点 + stride·i（负值由 Python % 归一到
                 #   [0, bank_depth) —— 即 RTL `w_operate_micro_addr` 的 bank 内环绕语义）。
+                # ADR-057 D2：分段时全局迭代 = stage_start + j，地址随段偏移
+                #   （与 assembler :593-594 的 stage_start 项严格同式）。
                 payload = {"BANK": int(bank),
-                           "ADDR": int((orig_offset + stride * (j - r_k)) % layout.bank_depth)}
+                           "ADDR": int((orig_offset + stride * (stage_start + j - r_k))
+                                       % layout.bank_depth)}
             rows.append({
                 "iq_name": iq_name, "stage": "BODY", "abs_t": abs_t,
                 "trace_id": str(op["trace_id"]),
@@ -228,7 +235,8 @@ def compare_rows(actual: List[Dict[str, Any]], expected: List[Dict[str, Any]],
 
 def _rebuild_all(sch: Dict[str, Any], branches: Dict[str, str],
                  extra_q_keys: List[str], num_iterations: int, layout: Any,
-                 reg: ProtocolRegistry, require_unroll: bool):
+                 reg: ProtocolRegistry, require_unroll: bool,
+                 stage_start: int = 0):
     """重建侧（不触产物）：分支/桶断裂与独立重建违例子集，天秤原语返回 expected rows。
 
     循环集合 = branches ∪ extra_q_keys（产物侧键名，供「产物多出的队列」断裂诊断）∪
@@ -258,7 +266,7 @@ def _rebuild_all(sch: Dict[str, Any], branches: Dict[str, str],
         try:
             metas[q] = _queue_meta(ii, ops_by_q[q], num_iterations, q, reg)
             expected[q] = derive_queue_rows(ii, ops_by_q[q], num_iterations, layout, q,
-                                            reg=reg)
+                                            reg=reg, stage_start=stage_start)
         except ValueError as exc:
             metas.pop(q, None)
             bad.append(f"{q}: 独立重建失败——{exc}")
@@ -338,10 +346,45 @@ def build_events_payload(build_root: Path, sch: Dict[str, Any],
                          expected: Dict[str, List[Dict[str, Any]]],
                          metas: Dict[str, Dict[str, int]],
                          num_iterations: int, ii: int,
-                         reg: ProtocolRegistry) -> Dict[str, Any]:
-    """§D.3「期望事件在仿真前生成」落盘体（schema adr056_d4_expected_events_v1）。"""
+                         reg: ProtocolRegistry,
+                         stage: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """§D.3「期望事件在仿真前生成」落盘体（schema adr056_d4_expected_events_v1）。
+
+    ADR-057 D5：分段程序按 stage 分别生成（stage={"stage_id","start","m"}），
+    schema 升为 ``adr057_d4_expected_events_v1`` 并携带段身份——段内 cycle 仍是
+    队列局部 rel_cycle（段锚 c0 逐段独立，见 arbitrate_probe_logs 多段封装）；
+    stage=None → 单段 v1 schema 逐字节不变。
+    """
     queues = {q: _rows_to_events(q, expected[q], ii, metas[q], reg=reg)
               for q in sorted(expected)}
+    if stage is not None:
+        return {
+            "schema": STAGE_SCHEMA,
+            "stage": {"stage_id": int(stage["stage_id"]),
+                      "stage_start": int(stage["start"]), "m": int(stage["m"]),
+                      "iter_range": [int(stage["start"]), int(stage["start"] + stage["m"])],
+                      "kind": "COMPUTE"},
+            "generated_by": "verification_v2/tools/emit_expected_fire_sequence.py --emit-events",
+            "frozen_rule": ("ADR-056 §D.3 用户修约③：本文件由「调度 + 注册表延迟模型」在仿真前生成；"
+                            "trace 与本文件不符 → PER_BEAT_PROTOCOL_MISMATCH，"
+                            "禁止回改注册表常数或 schedule 侧输入拟合"),
+            "registry": {"path": str(reg.path), "version": reg.version,
+                         "records_sha256": reg.records_digest},
+            "build": str(build_root),
+            "num_iterations": int(num_iterations),
+            "II": int(ii),
+            "semantics": {
+                "cycle_base": ("队列局部 rel_cycle（段内 INIT FETCH = 0）；段间以 TB stage 标记的"
+                               "公共 probe cycle 切窗，每段各自锚 c0（每段 = 一次独立程序装载，"
+                               "ADR-057 D4）"),
+                "fetch": ("INIT 1 次(rel 0) + BODY（有效/气泡）各 1 次严格连续(rel=abs_t) + "
+                          "TERM 1 次；行数 = L_q；TERM/JUMP 后残尾取指不计违例"),
+                "issue": ("同 v1 语义：INIT 回放 l_init+1 拍；每展开行 1 拍(cycle=abs_t+1)；"
+                          "TERM 经 embed-0 路径产 1 拍；总拍数 = ISSUE_TOTAL_FORMULA"),
+            },
+            "queues": queues,
+            "union_queues": sorted(expected),
+        }
     return {
         "schema": "adr056_d4_expected_events_v1",
         "generated_by": "verification_v2/tools/emit_expected_fire_sequence.py --emit-events",
@@ -376,12 +419,17 @@ def build_events_payload(build_root: Path, sch: Dict[str, Any],
 
 def audit(build_root: Path, num_iterations: int, hw_config: str = "hw_config",
           require_unroll: bool = True,
-          emit_events_path: Optional[Path] = None) -> List[str]:
+          emit_events_path: Optional[Path] = None,
+          stage_start: int = 0,
+          stage: Optional[Dict[str, int]] = None) -> List[str]:
     """返回违例字符串列表（空 = 全绿）。build_root = `build/verification_v2/<op>/`。
 
     emit_events_path 给出时先落盘 §D.4 期望事件 JSON（重建侧有违例则拒绝落盘——
     假期望不得入库）；产物 compare 违例不阻断落盘（发射器审计与仿真期望各自携带
     独立判决，统一入口按任一非空熔断）。
+
+    ADR-057：``stage_start`` = 段起始全局迭代（地址期望随段偏移，默认 0 逐字节
+    不变）；``stage`` 给出时落盘 schema 升为 adr057_d4_expected_events_v1。
     """
     from src.api.hw_spec import HardwareSpec
     from src.core.memory_layout import PhysicalMemoryLayout
@@ -404,14 +452,15 @@ def audit(build_root: Path, num_iterations: int, hw_config: str = "hw_config",
 
     layout = PhysicalMemoryLayout.from_spec(HardwareSpec.load(_resolve_hw_config(hw_config)))
     ii, expected, metas, bad = _rebuild_all(
-        sch, branches, list(per_q), num_iterations, layout, reg, require_unroll)
+        sch, branches, list(per_q), num_iterations, layout, reg, require_unroll,
+        stage_start=stage_start)
 
     if emit_events_path is not None:
         if bad:
             bad.append("[emit-events] 独立重建存在违例，期望事件拒绝落盘（假期望禁入库）")
         else:
             payload = build_events_payload(build_root, sch, expected, metas,
-                                           num_iterations, ii, reg)
+                                           num_iterations, ii, reg, stage=stage)
             out = Path(emit_events_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(payload, indent=2, sort_keys=True,
@@ -442,11 +491,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--emit-events", default=None, metavar="PATH",
                     help="§D.3 期望先行：仿真前落盘 FETCH/ISSUE 期望事件 JSON"
                          "（重建侧有违例则拒绝落盘）")
+    ap.add_argument("--stage-start", type=int, default=0,
+                    help="ADR-057：段起始全局迭代（默认 0 = 单段，逐字节不变）")
+    ap.add_argument("--stage-id", type=int, default=None,
+                    help="ADR-057：段号；给出时期望文件 schema 升为 adr057_d4")
     args = ap.parse_args(argv)
 
+    stage = ({"stage_id": args.stage_id, "start": args.stage_start,
+              "m": args.num_iterations} if args.stage_id is not None else None)
     bad = audit(args.build, args.num_iterations, args.hw_config,
                 require_unroll=not args.allow_non_unroll,
-                emit_events_path=Path(args.emit_events) if args.emit_events else None)
+                emit_events_path=Path(args.emit_events) if args.emit_events else None,
+                stage_start=args.stage_start, stage=stage)
     if bad:
         print(f"[FAIL] 独立事件检查：{len(bad)} 条违例")
         for b in bad:
