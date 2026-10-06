@@ -134,3 +134,60 @@
   互校缺席（失效姿态响亮——引入第二地址源时升级为阻断项）。
 - 关闭说明：`artifacts/adr057_closure_20261005/CLOSURE.md`。下一步主线 = M3-lite 三道门
   （单 SMC/单 chunk/安全规模/顺序执行；STB 2-3 工作日阻断熔断）+ A2b 半天预检小预算。
+
+## 2026-10-05 M3-lite 启动（用户指令：阶段状态 = V1 已完成，A2a 已收口，M3-lite 开始）
+
+- **收口证据口径（用户明示，逐字纪律）**：ADR-057 收口证据 = 414 项回归 + 已发布包复检查
+  （IQ-HEX 新层对 n244_r2/n480 build 快照复跑双 GREEN）+ 限制登记（L1-L6）**三件套共同构成，
+  不得只引用测试数量**。用户本轮未独立复验。
+- **三道门（按序推进，用户已批准，无需再等启动批准）**：
+  1. **STB 独验**：预置 UR，编译器生成 STB/STBAXI → 外部写出数据/地址/数量正确；
+     非目标区保持预期；完成通知不早于所需写事务完成。
+  2. **LDB 复核**：外部存储装载已知数据 → UR 落位正确；长度/burst 尾部/完成时序有证据。
+  3. **完整组合**：自动生成 `LOAD → COMPUTE_0… → STORE`；输入仅放外部存储，最终外部输出
+     与独立公式参考 bit-exact；统一入口全部检查通过后发布。
+- **范围纪律（逐字）**：单 SMC、单 chunk、安全规模、顺序执行；不引入多 SMC、host chunk、
+  搬运重叠或性能优化。**不将计算队列的 ISSUE 模型直接套到 LSU**（LSU IQ 24-27 走
+  信用门控发射变体，ADR-050 实证）。
+- **熔断线**：STB 投入 2-3 个工作日仍遇重大阻断 → 提交证据与原因，重新分配预算，不无限延长。
+- **并行小预算**：A2b 保留半天预检（仅产出候选公式的 II、槽结构与容量预测）；
+  论文同步写入已闭合的 V1 与 A2a 成果。
+- **现状盘点（第一个动作）已完成（2026-10-05）**：ADR-050/052 回源 + 双路只读侦察 +
+  关键取证（smc_id_en 显式 0 不被 payload_factory 回填，:95-97 证实）。报告：
+  `verification_v2/artifacts/m3lite_recon_20261005/RECON.md`。
+  - 现成不重建：STB 发射层（ADR-052 golden 整数全等）、TB 对 STB-only 单段结构合法、
+    UR 预置、HBM dump（hbm_result_smc_i.hex）、完成通知链路（crd+outstanding→INT）、
+    单-SMC case 骨架（compiler_add_n4）。
+  - 门①需新建：**HBM 窗口自动比对**（全沙箱零消费方，手写 case 当年靠人工抽查）+
+    参数化 STB case 生成器。
+  - 决定性陷阱七条落账（RECON §2）：末段超时仅 WARN 的假绿通道、compare 脚本 SKIP 假绿、
+    smc_id_en 阈值门控（缺省 7 = 8 SMC 全使能 → 首证必须显式 0）、HBM_INIT_DIR 全局共享
+    污染、brst=0 禁区、tid=2 照抄、X→0 dump 语义。
+  - 留给门③：STB/LDB DFG 节点（STB 零先例）、LOAD/STORE 段 kind（stage_partition/
+    stage_manifest/sim_config/run_v1_verify 四处 + compile_admit 分支闸适配）；
+    python sim LSU 建模按 ADR-050 先例不建（VCS 为准）。
+- **设计草案已产出（待用户定夺，未实施）**：[ADR-058](adr/ADR-058-m3lite-gate1-stb-solo-verification.md)
+  （DRAFT）——发射层生成器 + HBM 窗口比对六项断言 + 用例 S1(16 行单 burst)/S2(32 行镜像
+  golden row5)/S3(24 行尾 burst) + 负向断言 N1/N2；三个待裁决点：Q1「编译器生成」口径
+  （发射层 vs DFG）、Q2 TB 时序观测块（默认不动）、Q3 S2/S3 是否纳入门①充要条件。
+
+## 2026-10-06 M3-lite 门① STB 独验 GREEN（ADR-058 draft→proposed）
+
+- **三用例 VCS + 六项断言比对全过**（S1 16行单burst / S2 32行 loops=1 镜像 golden row5 /
+  S3 双描述符 16+8 尾burst），证据归档 `verification_v2/artifacts/m3lite_gate1_20261006/`
+  （HBM 大 dump 以 sha256 冻结+沙箱留存，case/快照确定性可重建）。判据逐字对照：
+  数据/地址/数量=A1-A3 bit-exact；非目标区=A4 三剖面（预载区全域/X 区/其余 7 颗 en 泄漏）；
+  完成时序=结构层 outstanding 排空 + 观测层 dump 晚于 intr（L2 缺口挂账）。
+- **证据等级 = VCS RTL 级**（非上板；L2/L3/L4 挂账不变）。L1 核销：smc_1..7 空目录方案
+  使 A4c 成为逐颗实证（8 颗全 dump、1..7 未被写）。
+- 完成路径两通道均实测：S1/S2 走 batch interrupt（TB:810），S3 走 smi_iq_done（TB:816
+  @cycle 20）——比对器 A5a 设计即接受双标记。
+- 过程中两修补：生成器 STB 侧 LOOPS 恒 0（golden row5 字段级对照抓获，回归钉
+  test_s2_loops_form）；预跑核查发现 TB dump 受 case_smc_max_idx 门控 → 补 smc_1..7
+  空目录（否则 A4c 永缺证据）。
+- **A2b 预检完成**：`artifacts/a2b_preflight_20261006/preflight.md`，20 候选 II 4..12
+  全解出；**n_max 列 = 未校准估计不得用于准入**（用户裁定：scale_sum 实测 240 vs
+  估计 63，一次偏保守≠恒保守，疑单位混用；正确口径 = 统一单位后逐队列 II_q·R_q+2，待实现）。
+- 环境备注：权限分类器（glm-5.3）间歇故障，执行经沙箱外通道+用户终端混合完成；
+  GREEN 判定均以重读产物为准。
+- **下一步 = 门② LDB 复核**（从外部存储装载已知数据 → UR 落位/长度/burst 尾部/完成时序）。
