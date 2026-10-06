@@ -263,3 +263,24 @@ outstanding 排空）+ 观测层（dump 晚于 intr cleared，L2 挂账残余缺
 - 环境备注：本次执行经历权限分类器（glm-5.3）间歇故障，最终经沙箱外执行通道 +
   用户终端混合完成；全部 GREEN 判定以重读产物（sim.log 标记、dump 边界抽审、
   比对器 exit=0）为准，非凭终端转贴。
+
+## Errata 2026-10-06（门②实测发现回溯，用户裁决 J3 批准补录）
+
+门②（ADR-059 v2.1）L1/L2 实跑经精确锚点探针实测：**LSU 批完成中断不保证数据
+落位**——`smi_iq_lsu_complete` 的 WAIT_DRAIN 在 inst_queen dispatch-done 与
+dly_queen 执行计数递增之间的流水线空窗采到 `outstanding==0`，提前放出
+rdi_done（L1：RDI_DONE@150 时 outstanding=1，UR 写 166..181，真实信用
+CRD_LDB@183）。intid 自增来源经取证探针证实为 batch_done（非 ir_err）。
+
+对门①的影响：
+
+- **A5 完成时序的证据措辞降级**：原「结构层（smi_iq_lsu_complete outstanding
+  排空）+ 观测层（dump 晚于 intr）」中的**结构层前提被证伪**——outstanding
+  排空门存在采样竞态，不构成「写先于通知」的机制保证。A5 的有效证据降级为
+  观测层单腿：通知到达（无双通道超时）+ dump 时刻晚于通知且数据正确。
+- **A1-A4 数据断言不受影响**：均为 dump 级实测，dump 时刻（intr+ack+扫尾数十拍
+  之后）远在写事务完成之后；S1-S3 的 HBM 窗口/非目标区结论维持有效。
+- 原 L2 挂账（观测层间接证据）由「缺口」升级为「已定性」：通知相对写事务可提前
+  （LDB 侧实测提前 16-31 拍；STB 侧同构路径未逐拍复测，按同机制对待）。
+- 门③ 及以后任何消费批完成中断的流程须自带落位屏障（ADR-059 R6；
+  屏障约束见 ADR-060 草稿）。

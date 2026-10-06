@@ -191,3 +191,68 @@
 - 环境备注：权限分类器（glm-5.3）间歇故障，执行经沙箱外通道+用户终端混合完成；
   GREEN 判定均以重读产物为准。
 - **下一步 = 门② LDB 复核**（从外部存储装载已知数据 → UR 落位/长度/burst 尾部/完成时序）。
+
+## 2026-10-06 M3-lite 门② LDB 复核（ADR-059 v2，实施中）
+
+- **ADR-059 按用户三处契约修正重写为 v2**（修正对照表在文末）：
+  - 修正① ur_wr_line_cnt>1 前科正面取证：前科 = ADR-050 :146（DEBT-050-LDB-STREAM-REBASE
+    chunk1 提前 DONE/落位错）+ :147（1:N 配对旧 RTL 证伪）；**当前沙箱 RTL 已变**
+    （ldb_ur_axi_conv.v 2026-07-21 版，brst=0 守卫已修 :833-835、residue 块改写）→
+    旧证伪不自动适用；**w033 golden 同形态（CNT=33、1:3 配对）2026-09-07 运行产物
+    8/8 SMC per-SMC golden 全 match**（本轮重读比对，非存档报告），落位 == HBM 源
+    逐行 bit-exact。残留风险 = 改编变量（en 7→0 / intlv→0 / 单 stage）→ L1 为首证，
+    失败备选逐行写。
+  - 修正② B4c 独立初值：生成器为 smc_1..7 显式写 sentinel′（GEN ur_only + TB
+    $readmemh 装载机制取证），期望先验钉死，禁止首跑 dump 反钉；装载生效与无泄漏同证。
+  - 修正③ B5 完成时序实证：复用既有 ur_write_trace.log（commit 级，常开）+ sim.log
+    `stage_0 done (intr cleared) @probe_cycle P` 锚点（TB :2393，双通道通用，零 TB 改动）；
+    B5b 实际写次数独立于终态行数；B5c max写 < P−MARGIN(1000) 且通知后零残留，
+    gap ≤ MARGIN → RED「时序不可区分」（不确定窗转响亮失败）。
+  - 口径 a：K16 改「当前可访问归档中未找到，不计入已验证覆盖」；
+    口径 b：HBM_INIT_DIR 串行+备份 sha256+trap EXIT 恢复（m3lite_gate2_run.sh）。
+- **工具落地**：`ldb_review_case_gen.py`（守卫 11 条）+ `ur_window_compare.py`
+  （B1-B6 含 B5 三子项）+ `m3lite_gate2_run.sh`；单测 36/36（含 15 项 RED 注入全按
+  预期翻转；B5c 边界 gap==MARGIN 语义对齐为严格不等——ADR 文「gap ≤ MARGIN → RED」）。
+  全量 pytest 478（基线 442+36，只增不减）。
+- ~~待做：L1/L2 VCS 实跑 → 归档 → 门③ LOAD 参数草稿（Q2 已批，不宣称集成通过）；
+  L3 loops 形态为探索项（Q1 已批）。~~（见下节实跑结果）
+
+## 2026-10-06 M3-lite 门② L1/L2 实跑：数据面全绿，完成时序 RED（重大实测发现）
+
+- **过程三熔断全部按设计触发并处置**：① 首跑 B5b/B5c RED = 探针挂错通道
+  （ur_write_trace 原探针只覆盖 CRU 写口 r_we_pipe；LDB 走 URA 独立通道，
+  SMC_ALL.sv:990-992 → user_register i_ura_*）→ TB 补 URA 探针支路；
+  ② 复跑 B5c RED「时序不可区分」（max写@181 距轮询锚点 gap=29 < MARGIN=1000）
+  → 按 R5 预案改 TB 精确锚点（intr_ro 上升沿，smi_ctrl_regs.v:121，双完成通道
+  同源），断言收紧为严格不等；③ 精确锚点首证即 RED：**通知沿@150 早于首条
+  UR 写@166**——不是锚点误差，是真实现象。
+- **发现（逐环取证，非推测）：LSU 批完成中断不保证数据落位。** 取证探针
+  （batch_done/ir_err/dispatch_done/rdi_done/credit 六路）证实：intid 自增来自
+  batch_done（非错误事件）；smi_iq_lsu_complete 的 WAIT_DRAIN 在 inst_queen
+  dispatch-done 与 dly_queen 执行计数递增之间的流水线空窗采到 outstanding==0，
+  提前放出 rdi_done（L1：RDI_DONE26/27@150 时 outstanding=1）。真实完成
+  （单元信用返回）：L1 CRD_LDB@183、L2 CRD_LDB@272——均晚于通知沿
+  （L1@150 / L2@270）。L2 因 LDBAXI 三描述符撑过空窗，通知推迟到末写同拍，
+  但 LDB 队列（26）仍提前（@202，outstanding=1），语义下限不变。
+- **与 ADR-050 前科的关系**：修正①证伪的是旧 RTL residue re-baseline 机制；
+  「提前 done」行为类别在当前 RTL（2026-07-21 版）经 **lsu_complete 采样竞态**
+  依然存在——前科的方向性直觉被新机制证实。
+- **对门①的回溯影响（待用户裁决是否落 ADR-058 errata）**：门① A5 完成时序的
+  「结构层 outstanding 排空」前提被此机制证伪；A1-A4 数据断言不受影响
+  （dump 时刻远在写完后）。
+- **裁决记录**：B5c 按修正③原文判 RED，未放宽判据、未按输出调期望。
+  L1/L2 数据面（B1-B4c/B5a/B5b/B6）全绿。门②收口口径、门③屏障约束、
+  门① errata 三项待用户裁决（ADR-059「待裁决」J1/J2/J3）。
+- 证据归档 `verification_v2/artifacts/m3lite_gate2_20261006/`（含四轮 L1 现场
+  关键产物、TB 探针原文与哈希、比对器可复跑 verdict）。TB 三处 additive 纯观测
+  改动已透明呈报（ADR-059 Context）。全量 pytest **480 passed**（478+2，
+  B5c 精确锚点化净增 2 个 RED 注入测试）。
+- ~~**门③ LOAD 参数草稿未启动**（Q2 授权前提为「L1/L2 通过」，当前未完成时序项，
+  待裁决后再动）。L3 loops 探索项同理搁置。~~
+- **用户裁决（2026-10-06，四项）**：J1 门②按实测收口（判据原文「完成时序有证据」
+  以否定性实测满足；数据面 GREEN + 否定结论收口；B5c 严格判据不改，其 RED 签名
+  即基线）→ ADR-059 升 proposed；J2 门③携带显式落位屏障约束（初值 ≥ total+48 拍，
+  实施时复测收紧）；J3 门① ADR-058 补 errata（A5 结构层前提证伪、措辞降级，
+  数据结论不变）；当前状态 commit develop 不推送。
+- **门②收口 = proposed**；门③ LOAD 参数草稿已出（[ADR-060](adr/ADR-060-m3lite-gate3-load-segment-params.md)，
+  DRAFT）：L1/L2 实测参数表 + 屏障约束 + 证据指针；明确未做集成/DFG/L3。
