@@ -2,18 +2,27 @@
 adr_id: ADR-060
 title: M3-lite 门③ LOAD 段参数与证据草稿（含落位屏障约束；非集成声明）
 decided: 2026-10-06（DRAFT——Q2/J2 授权范围内的参数整理，未授权门③集成通过）
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 still_holds: draft
 builds_on: ADR-058, ADR-059
 user_decision: user 2026-10-05 门② Q2（L1/L2 后整理门③ LOAD 参数草稿，不宣称集成通过）
   + user 2026-10-06 J2（门③须携带落位屏障约束）
+  + user 2026-10-06 门③四步序授权（①机制核查→②修订本 ADR→③最小 LOAD→COMPUTE
+    实验→④STORE 末写核查）；裁决 1：total+48 不批作正式屏障；裁决 3：STB 完成
+    保证重核；裁决 4：同步方案 1-2 日预算与三分支处置
 ---
 
 # ADR-060 · M3-lite 门③ LOAD 段参数与证据草稿
 
-> **授权边界（逐字纪律）**：本文只整理门③ LOAD 段的参数与证据并登记屏障约束；
-> **不建 DFG 节点、不改 stage_partition/stage_manifest/sim_config/run_v1_verify、
-> 不宣称门③集成通过**。门③本身的立项与验收另待用户指令。
+> **授权边界（2026-10-06 用户新指令更新）**：门③**设计核查与最小实验已获授权**
+> （四步序：① 完成机制核查 → ② 修订本 ADR → ③ 最小 LOAD→COMPUTE 实验 →
+> ④ 加入 STORE）。仍然**不宣称门③集成通过、不发布**；集成改动面扩大需另待指令。
+>
+> **⚠ 用户 2026-10-06 裁决 1 落实**：`total+48` 固定等待**未获批准**作正式
+> 完成屏障（两点候选值无上界证明，仅限明确标注的实验侦察）。步骤①机制核查
+> 已完成（RECON.md），§2 已按裁决修订为屏障类型定界 + 实验屏障契约：
+> 实验采用 **TB 辅助信用屏障**（crd_ldb/ldbaxi，结构性末写之后），标注仿真限定；
+> 正式闭环需 F6 RTL 修复报批或用户接受仿真限定口径。
 
 ## 1. LOAD 段发射参数（门② L1/L2 VCS 实测形态）
 
@@ -34,25 +43,47 @@ user_decision: user 2026-10-05 门② Q2（L1/L2 后整理门③ LOAD 参数草�
   描述符≤8 / en=0 / 16B 对齐 / 窗口越预载区。
 - 照抄 golden 未独立理解的字段（风险延续 ADR-059 R3/R4）：LINE_BYTE_CNT=15、TID=0。
 
-## 2. 落位屏障约束（J2，门③契约必须携带）
+## 2. 落位屏障：机制核查结论与方案定界（2026-10-06 步骤①②修订）
 
-**事实（ADR-059 v2.1 实测）**：LSU 批完成中断不保证 UR 落位——
-`smi_iq_lsu_complete` 采样竞态使通知先于数据落位。实测时序（probe_cycle）：
+> 机制核查全文：`verification_v2/artifacts/m3lite_gate3_sync_recon_20261006/RECON.md`
+> （软件可观察信号穷举 / 指令级机制 / RTL 内部信号 / 修复选项 / 方案比较 F1-F7）。
 
-| 用例 | dispatch | 通知(INTR_ASSERT) | UR 写区间 | LDB 信用返回 | 通知→末写滞后 |
-|---|---|---|---|---|---|
-| L1（16 行） | 145-148 | **150** | 166..181 | 183 | **+31 拍** |
-| L2（33 行） | 199-202 | **270** | 176..270 | 272 | +0 拍（同拍） |
+**实测背景（ADR-059 v2.1）**：LSU 批完成中断不保证 UR 落位——
+`smi_iq_lsu_complete` WAIT_DRAIN 在 dispatch→execute 空窗采到 outstanding==0
+提前放行。实测（probe_cycle）：L1 通知@150 ≺ 写 166..181 ≺ CRD_LDB@183；
+L2 通知@270 = 末写@270 ≺ CRD_LDB@272。滞后量随形态波动（+31 / +0），不可依赖。
 
-- L2 通知被 LDBAXI 三描述符推迟（该队列恰好撑过竞态空窗），但 LDB 队列的
-  rdi_done 依旧提前（@202，outstanding=1）——**滞后量随形态波动，不可依赖**。
-- 两数据点的经验标定（**外推未验证，仅作屏障初值**）：通知 ≈ dispatch+5（竞态
-  路径）；末写 ≈ dispatch+21+total → 滞后 ≈ total+16。屏障等待 ≥ total+16+裕量。
-- **约束**：门③ LOAD 段通知后、首个依赖 UR 的 COMPUTE 段发射前，TB/流程须插入
-  显式固定等待（初值 ≥ total+48 拍，即实测滞后 + 32 拍裕量；门③实施时须以
-  当次用例的 ur_write_trace 复测末写时刻并收紧/确认，禁止直接信任通知）。
-- 信用返回（真实完成）无 CSR 可观测通道，轮询屏障不可行；固定等待是唯一可行
-  屏障（限制，随 RTL 修复可解除）。
+### 2.1 屏障类型（机制核查判定）
+
+| 类型 | 代表 | 状态 | 适用范围 |
+|---|---|---|---|
+| **正式 host 可执行** | batch_done（0x004/0x024 双皮同源） | ❌ 已证伪提前 | 不可单独用作 LOAD→COMPUTE 依赖 |
+| 正式 host 可执行 | UR 读回校验 | ❌ 死路 | BRAM_PORTA 顶层绑死（aiacc_top_f.v:1921-1925），无硬件路径 |
+| 指令级 | COND / DLY | ❌ 死路 | COND 双死（EN_COND=0 + ir_ready_bus LSU 位未驱动），语义为就绪撮合；DLY ≤7 拍无界 |
+| 编排级 | START 队列自动链接 | ❌ 反向 | 把竞态直接当段间依赖（smi_ctrl_regs.v:304-311） |
+| **TB 辅助实验** | 层级观测 `crd_ldb_o`/`crd_ldbaxi_o` 信用齐（结构性末写之后）再放行依赖段 | ✅ **实验屏障（采用）** | **仅限 VCS 仿真**；必须标注 TB 辅助，不得冒充 host 协议；非上板语义 |
+| RTL 修复 | lsu_complete seen-nonzero / 信用对账（RECON §4 A/B） | ⏸ 单独报批 | 改动/版本/回归影响按用户裁决 4 分支 2 单独呈报后决定 |
+| 固定等待 | total+48 等 | ⚠ 降级 | 用户裁决：无上界证明，仅限**明确标注的实验侦察**，不作正式屏障 |
+
+### 2.2 屏障契约（步骤③④实验遵守）
+
+1. **LOAD→COMPUTE**：LOAD 段发射后，TB 等 `crd_ldb_o` 与 `crd_ldbaxi_o` 的
+   done 计数达到当段发射指令数（双通道齐），才写 COMPUTE 段 START；
+   断言 COMPUTE 对 UR 窗口的首次有效读 cycle **严格大于** URA 末写 cycle。
+2. **STORE→比对**：以 TB HBM SRAM 模型写口为外部写完成锚点，末次窗口写
+   先于任何比对/发布动作；`crd_stbaxi_o` 仅证明 AXI 受理，不作终局证据。
+3. **超时**：每道屏障带拍数上界（初值 5000 拍，实施时按实测收紧），
+   超时即 RED 响亮失败，不允许静默放行、不允许以调大上界消红。
+4. **未验证即拒发**：屏障未实际生效（探针缺失/计数不符/锚点缺席）的 run
+   一律不得进入比对与发布；门③的发布级闭环在 F6 落地并回归、或用户明示
+   接受「仿真限定闭环 + 限制落账」之前**不宣布**。
+
+### 2.3 撤回记录
+
+v1 草案的「信用无 CSR 可观测 → 固定等待唯一可行」论断被用户驳回为过早
+排除其他路径；经步骤①核查修正为：CSR 面确无信用出口（§2.1 表），但
+指令级/编排级/修复路径须一并排除或呈报后才得下结论——现已完成排除
+（RECON §5）。
 
 ## 3. 证据指针
 
@@ -65,7 +96,256 @@ user_decision: user 2026-10-05 门② Q2（L1/L2 后整理门③ LOAD 参数草�
 
 ## 4. 明确未做（授权边界外，全部不宣称）
 
-- 门③集成（LOAD→COMPUTE→STORE 自动组合、stage 编排改造、DFG 节点）。
-- L3 loops 形态 LDB（探索项，Q1 已批降级，未做）。
+- 门③**集成**（LOAD→COMPUTE→STORE 自动组合、stage_partition/stage_manifest/
+  sim_config/run_v1_verify 改造、DFG 节点）——四步序授权的是**设计核查与最小
+  实验**，不是集成；集成改动面扩大另待指令（用户：「当前最优先的工作是建立
+  可靠的段间依赖，而不是先扩大集成改动面」）。
+- L3 loops 形态 LDB（探索项，未做）。
 - COMPUTE 段与 STORE 段的门③参数化（STORE 侧可镜像 ADR-058 S1-S3 参数）。
-- 屏障机制的 TB/流程实现（仅登记约束与初值标定）。
+- F6 RTL 修复（须单独呈报改动/版本/回归影响，用户裁决 4 分支 2）。
+- 上板语义：TB 辅助屏障仅存在于仿真，任何上板声明另行立项。
+
+## 5. 步骤③④实验设计要点（已获授权，实施前以此为准）
+
+- **③ 最小 LOAD→COMPUTE**：输入仅外部存储；UR 预置与源图案互异的 sentinel
+  （沿用门② B4c 纪律，期望先验钉死）；TB 辅助信用屏障（§2.2-1）放行
+  COMPUTE；新增 CRU 读口窗口探针断言「COMPUTE 首读 > LOAD 末写」；
+  数据终值比对沿用门①②比对器。
+- **④ STORE**：COMPUTE 结果经 STB 写出；以 TB HBM SRAM 写口锚点独立核查
+  最后外部写事务完成（§2.2-2），其后才允许比对与（不）发布判定。
+  **（已按用户 2026-10-07 五条要求细化并实施于 §6。）**
+- 负向断言：屏障被旁路（探针强制提前放行）时，COMPUTE 首读断言必须 RED——
+  证明屏障与断言都活着。
+- 超时与拒发纪律见 §2.2-3/4。
+
+## 6. 步骤④ STORE 设计（2026-10-07 设计冻结——实施前以此为准）
+
+> 用户 2026-10-07 五条硬性要求逐条落地。全部 TB 机制 additive、默认关、
+> `[GATE4]` 标记、TB 辅助标注（非 host 可执行协议、非上板语义）。
+
+### 6.1 用户五条要求 → 机制映射
+
+| 用户要求（逐字意译） | 机制 |
+|---|---|
+| ① 区分指令发出/信用返回/HBM 模型实际写入/写响应；禁复用已被证伪的 batch interrupt | 四事件各自独立 TB 锚点（§6.4 表）；完成判据只认 ③+④，信用仅记录不门控 |
+| ② 精确写账（地址/数据/字节使能/数量/重复/遗漏/非目标写） | `hbm_write_trace.log`（RAM 写口落实级，8 SMC 全探）+ 比对器 C6 七子断言 |
+| ③ 结束顺序：所需写事务全部完成后才允许 dump/比对/结束 | S4 屏障门控 `do_ur_hbm_dump`（§6.3-3）；超时 `$fatal` 响亮失败 |
+| ④ 完整链路逐位比对（外部输入→LOAD→COMPUTE→STORE→外部输出 vs 独立公式参考） | 3-stage case（v3 stage_2 物化）+ C8（HBM 输出窗 == 独立 fp32 struct 参考） |
+| ⑤ 保持力测试（延迟/反压使屏障实际等待）+ 超时会失败退出 + 故障注入与正向分别归档 | WBARRIER/S4 正向自然等待实测 + `+G3_AXI_BP_W` 反压注入 + 两段超时注入（fatal_expected 比对模式）；`round6_positive` / `round6_faultinjection` 分目录归档 |
+
+### 6.2 STORE 侧信用不对称（RTL 实证，B5c 危害类的 store 侧扩展）
+
+- **STB(q24)** done 在 **AXI-Stream 末拍交给 DS 时**即发
+  （`stb_ur_axi_conv.v:558-561` → done `:775-782`）——早于一切 AXI 活动。
+- **STBAXI(q25)** done 在 **DW_axi_gm 写缓冲接受末拍**即发
+  （`:1023-1043`；done 仅 `if(i_saccept)` `:1139-1148`）——严格先于 W 握手、
+  无条件先于 B 响应；B 仅用于 err 捕获（`:1262-1272`，进 `crd_stbaxi_o[6]`）。
+- 对照 LDB：信用结构性在末笔 UR 写之后（`ldb_ur_axi_conv.v:1385/:1461-1467`）。
+- **结论：STORE 完成判据 = HBM 模型 RAM 写口落实 + B 响应计数；信用只记录、
+  不门控。** §2.2-2「`crd_stbaxi_o` 仅证 AXI 受理」实测还要更弱（写缓冲接受即
+  信用，未达 AXI 受理）。
+- LSU 完成模块 `smi_iq_lsu_complete` 对 q24/25 与 q26/27/92 同构
+  （`smi_top.v:592-621`，同一 WAIT_DRAIN 采样结构）⇒ stage_2 的 intr 同样
+  不可作完成依据（B5c 类）。
+
+### 6.3 三道闸与挂点（compute 侧「通知早于落位」实测驱动）
+
+- round5 pos 实物 trace：bank2 窗口写恰 16 笔（addr 0..15 各 1 次），
+  **末写 @958** ≻ stage_1 `BATCH_DONE @953` / `INTR_ASSERT @954`（+4/+5 拍，
+  intr 断言时 addr 11..15 五行乘积尚未落位）⇒ stage_1→2 门控禁用 intr。
+- **闸① stage_0→1：信用屏障**（既有 `+G3_BARRIER`，原位不动——步骤③已验证
+  流程零改动）。
+- **闸② stage_1→2：+G3_WBARRIER 写落位屏障**——CRU 管道目标 bank 窗口写
+  **位掩码**（`reg [255:0]`，重复写不膨胀）达期望数才放行；挂点 = 该段 trigger
+  后、`smi_wait_and_clear_intr` **前**（仅该槽位前移）。正向即实测 waited>0
+  （预计 ~31 拍 = 「intr 会提前多少」的动态刻度）。
+- **闸③ stage_2→dump：+G3_S4_BARRIER STORE 完成闸**——SMC0 HBM 窗口 RAM
+  落实位掩码达期望数 **且** ds2 B 响应计数达期望数，才允许 `do_ur_hbm_dump`；
+  CRD_STB/STBAXI 计数仅入标记行记录、不参与门控。挂点 = 主循环末段
+  `do_ur_hbm_dump` 前；其后打印 `[GATE4][DUMP] begin @cycle` 标记（仅 S4 开）。
+
+### 6.4 四事件 TB 观测点（全部 additive 探针，不改 DUT 任何信号）
+
+| 事件 | 锚点（层级路径） | 载体 |
+|---|---|---|
+| ① 指令发出 | 既有 `IQP_ISSUE_HOOK(24/25)` | `iq_issue_trace.log`（`cycle iq valid data`） |
+| ② 信用返回 | `dut.u_smi_top.i_crd_stb[6:0]` / `i_crd_stbaxi[6:0]`（[0]=vld [1]=done [5:2]=inst_id） | sim.log `[GATE4][CRD_STB/CRD_STBAXI]` 打印 + 沿计数（镜像既有 CRD_LDB 探针） |
+| ③ HBM 实际写入 | `GEN_SRAM[k].SMCk.u_sram.u_sram.gen_ram_1MB_dw_128.mem.{ena,wea[15:0],addra[19:0],dina[127:0]}`，落实=`ena && \|wea` @posedge（ram65536x128.v:25-39） | `hbm_write_trace.log` 8 SMC 全探（`cycle smc addra wea dina`），抓非目标写 |
+| ④ 写响应 | TB 顶线 `bmc_ds2_bvalid & bmc_ds2_bready`（SMC0↔ds2；模型 atcrambrg300.v:340-348 产生） | sim.log `[GATE4][HBM_BRESP]` 打印 + 计数 |
+
+- STORE 侧「读后写」时序：STB 读 UR 走 URA 读通道
+  （`dut.u_smc.stb_ur_re__to__ur_i_ura_re` / `stb_ur_addr__to__ur_i_ura_raddr`，
+  SMC_ALL.sv:527-528/:987-988），不在既有 ur_read_trace（仅 CRU ports0-3）
+  ⇒ 新增 `stb_ur_read_trace.log`（`# cycle ur_addr`）。
+
+### 6.5 故障注入设计（保持力 + 超时，全部明确标注）
+
+- **反压注入（现行 v2，B 通道 AW 前置武装，2026-10-07 用户批准改道）**
+  `+G3_AXI_BP_B=n`：独立 initial——`wait(rst_n)` → `@(posedge
+  bmc_ds2_awvalid)`（首个 ds2 AW 上升沿 = stage_2 STBAXI 写突发地址相；
+  本形态 stage_0 读走 AR 不产生 AW、host 走 us1）→ `force
+  bmc_ds2_bready = 1'b0` 持续 n 拍 → `release`；`[GATE4][BP]` 标记；
+  默认 0=关。TB-only（force/release TB 顶 wire，功能驱动方=DUT 主口
+  aiacc_top_f.v:126），AXI 合法停顿（master 可任意推迟 BREADY；桥模型
+  经响应 FIFO 保持 BVALID——atcrambrg300.v:344 采样 bready=0 时响应
+  入 FIFO、:346 非空即持 bvalid），RTL 零改动；**写数据路（AW/W 载荷）
+  完全不动**，全部 HBM 写按原时刻落实、仅 B 响应被推迟——直接
+  考验 S4 双条件的 bresp 半条件（writes 半条件的「不满足→不放行」由
+  超时注入段证明）。**武装点必须先于 BVALID 就位**：v1 以
+  `@(posedge bmc_ds2_bvalid)` 武装被实测结构性迟到——bvalid 上升沿
+  由时钟沿 NBA 产生，模型在产生沿已以 bready=1 采样并走空-FIFO 直通
+  （:344）视为交付，B 活窗仅 1 拍，force 永远迟到（实测：释放后
+  4600+ 拍零握手、writes 16/16 却 bresp 0/1）——详见 errata 6。
+  期望：S4 waited ∈ [bp_release−s4_enter−2, +50]
+  （精确一致性，证明 waited 确由注入造成）且 ≥ min_waited（=n−100，
+  100=注入点→S4 enter 重叠+模型重驱动余量上界），数据面全绿。
+  （drive-2/3 实测：该期望两轮未达成——B 在本 TB 不可延迟，「恢复」
+  形态环境不可达；本实验现行价值 = bresp 半条件持死形态证据，
+  见 errata 6 与 §6.7。）
+- **退役（2026-10-07 首轮实证）**：`+G3_AXI_BP_W`（首个 AW 握手后押
+  wready=0）——300 拍 W 反压使写路径**永久锁死**（release 后 4746+ 拍
+  零恢复、CRD_STBAXI 再未发、hbm_writes 恒 0）；机制嫌疑=桥模型内部
+  逻辑直接读自身 wready 输出线被 force 污染（atcrambrg300.v:442/:323/
+  :422-426）。详见 errata ⑤；该注入器已从 TB 移除，勿恢复。
+- **超时注入两段**：WBARRIER（`+G3_WBARRIER_TIMEOUT=1`）与 S4
+  （`+G3_S4_TIMEOUT=50 +G3_AXI_BP_B=400`）——期望 `$fatal` 非零退出、
+  `[GATE4][*][ERR] TIMEOUT` 标记存在且其后无 `[GATE4][DUMP]`（比对器
+  `--mode fatal_expected` 断言形态）。
+- plusarg 纪律：一律 `$value$plusargs("NAME=%d")`（`$test$plusargs` 前缀坑
+  实证，errata ③）；新名 G3_WBARRIER*/G3_S4_*/G3_AXI_BP_B 无相互前缀。
+
+### 6.6 断言清单（比对器扩展；无 store 键 = v1 步骤③模式兼容）
+
+- **C0 扩**：3-stage 计划 `[(0,2),(1,13),(2,2)]`、INTR 恰 3、G3 信用屏障
+  enter/release 恰各「段间转移数」（3 段=2 对：stage_0→1 真门 + stage_1→2
+  直穿；第 2+ 次必须 waited==0——信用计数跨段单调不清零）、`[GATE4]` 标记
+  成对（enter/release）；merged-3：`[(0,17)]`、INTR 恰 1、无任何 G3/GATE4
+  标记、无 stage_1/stage_2 目录（正面取证）。
+- **C3s（新）**：STB URA 首读拍 > bank2 末写拍 且 > WBARRIER release 拍。
+- **C5 修**：store 开启时 HBM 输出窗（byte 0x2000..0x20FF = addra 512..527）
+  豁免比对，窗外仍 == 冻结快照。
+- **C6 写账（新）**：hbm_write_trace 全 8 SMC 扫描——窗口址集恰 {512..527}、
+  每址恰 1 写、dina == 独立期望乘积行、wea==FFFF、非目标写（窗外 + SMC1-7）
+  为零；重复/遗漏/非目标三类单列明细。
+- **C7 结束顺序+四事件时间轴（新）**：issue(q24/25) / CRD_STB / CRD_STBAXI /
+  窗口首写 / 末写 / B 计数 / S4 release / DUMP 八列入报告；RED 条件：
+  release 或 DUMP 不严格晚于末写、DUMP 早于末 B、B 计数≠期望、信用缺失；
+  信用≺写落位 gap 记 note 不判 RED（结构性预期）。
+- **C8 完整链路（新）**：hbm_result 窗口 == 独立 fp32 struct 参考（128b 行
+  打包同 case_gen 输入窗打包法）。
+- 负控（merged-3）白名单扩 `("C3s","C6 ","C8 ")`；证活判据 = C3s/C6/C8 任一红。
+- **fatal_expected 模式（新）**：仅读 sim.log 断言超时标记 + 无 DUMP 其后。
+
+### 6.7 限制与边界（落账）
+
+- 三道闸全部 **TB 辅助实验**（§2.2 标注纪律延续），非 host 可执行协议、
+  非上板语义；VCS ≠ 硅证。
+- WBARRIER 只统计 CRU 管道目标 bank 写（本 case 乘积经 RTOVR→CRU 落位）；
+  若未来 case 改走 URA 写路径，屏障超时响亮失败（安全方向），届时再扩。
+- S4 的 B 计数为 ds2 全端口计数——本 case 唯 stage_2 产生写事务（stage_0
+  为读、host 下载走 us1），期望恰 1；形态变化时需重核。
+- W 通道反压实证锁死写路径并退役（errata ⑤）；B 通道反压实证响应
+  不可延迟（errata 6，三注入点一致）——**「DS/写路对反压的耐受」整体
+  成为开放发现**，根因（桥模型 vs DW_axi_gm 配置 vs glue）未分清，
+  波形物证已留档（round6_faultinjection/wedge_bstall_drive3_awarmed/
+  tb_aiacc_top_multi_inst_stage.fsdb），另行调查。
+- **S4「延迟→恢复→GREEN」保持力形态在本 TB 不可达**（B 不可延迟）；
+  S4 保持力由「持死→响亮超时」双形态（bresp 缺：drive-2/3；writes 缺：
+  drive-1 W-stall / to_s4）与 WBARRIER 自然 waited=30（正向硬断言）
+  联合承载。
+
+## Errata（2026-10-07，步骤③实施后实证）
+
+1. **§5 负向断言仪器更换（屏障旁路 → 并段单 trigger merged_single_stage）**。
+   原文「屏障被旁路（探针强制提前放行）时首读断言必须 RED」的仪器在实测中
+   **结构性失效**：+G3_BYPASS（裸 intr 沿放行）第 4 轮跑出全绿——裸沿 ~@300
+   反在末写@259 之后（B5c「通知早于落位」为单窗 L1 形态实测、提前 ~16-31 拍；
+   双窗 bulk 下批中断沿反在末写后 ~5 拍——**case 形态相关，不可泛化**）。
+   trace 定量（m3lite_g3_lc_w16 实物）：段间 IQ_EN 同步 ~588 拍恒在 trigger
+   之前，trigger→compute 首读仅 5 拍、trigger→LDB 首写 21 拍——任何「改放行
+   时机」的负控首读 ≥~700 拍，撞不上写窗（218..259）。**现行负控 =
+   merged_single_stage**（case_gen `--merge-stages`：LOAD+COMPUTE 并段同
+   trigger，零 TB plusarg，单段多队列系 TB 常规形态）：compute 首读 T+5 ≺
+   LDB 首写 T+21、末写 T+62，读恒先于写。第 5 轮实测：C1/C3/C4(乘积账) 红
+   （C3 gap=−57）、C2/C5 绿（LOAD 无恙、红纯因竞态）、stock compare 独立
+   FAIL 作第三意见、总判 **NEGATIVE-CONTROL LIVE**——断言链端到端证活。
+   §5 目的条款（证明断言活着）保留且首次真正达成；BYPASS 留档（比对器
+   双形态支持档案复现）。证据：`verification_v2/artifacts/
+   m3lite_gate3_round4_20261007/` + `m3lite_gate3_round5_20261007/`
+   （sha256 冻结清单随档）。
+2. **屏障「保持力」未动态压实（限制落账）**：正向三轮（3/4/5）屏障均
+   waited 0 拍——信用脉冲（@235/@261）先于轮询清断（@338）到达；且本形态
+   裸 intr（@264）亦晚于末写（@259）5 拍，自然时序本已安全。步骤③
+   「COMPUTE 首读 > LOAD 末写」结论由 **trace 直测承载**（931>259、三轮
+   确定性复现），不依赖屏障延迟了什么。屏障定位 = 显式协议检查点（计数
+   核验 2/2+2/2）+ case 形态变化时的防御纵深 + host 协议的仿真前导形态；
+   其 timeout $fatal 通道正向未触发（**未压实通道**，落账）。一般形态下的
+   强制保持力仍依赖 F6 RTL 修复（裁决 4 分支 2，单独报批）。
+3. **工具链落地事实登记**：compute 段 = 13 队列（rtovr-16 曾漏，装配器守卫
+   拦下后回源 mul_scalar_op.cpp:505-510 订正——「不按实际输出调期望」执行
+   例）；v3↔门② LOAD 发射**按值**互校（定宽前导零 vs 去零，XOR==0）；
+   `$test$plusargs` 前缀匹配坑实证（"G3_BARRIER" 误中 TIMEOUT）→ 一律
+   `$value$plusargs("NAME=%d")`；TB 现行指纹 6ef2bca9…285d8（第 3-5 轮执行
+   态 + 注释-only 差异，行为经重建复跑确认不变）；单测 15（门③）+ 全量
+   pytest 495 passed（480+15 恰符）。
+4. **步骤④首轮驱动实测（2026-10-07，TB 805a7969…1cbcc6）**：正向 3 段
+   全屏障 **GREEN（C0-C8）**——WBARRIER waited=30（enter@929/release@959，
+   landed 16/16；硬断言 waited>0 满足，屏障确实托住 intr 提前量）；S4 正向
+   waited=0（末写@1191+B@1191 先于 enter@1219 完成，S4 保持力不由正向
+   承载而由 B 反压段承载）；**信用不对称 store 侧实证**：CRD_STB@1184 /
+   CRD_STBAXI@1188 vs 窗口末写@1191 → gap_stb=−7 / gap_stbaxi=−3（负=信用
+   先于写落实，§6.2 静态结论的动态实测印证）；C7 四事件时间轴全序成立
+   （issue@1155 → CRD@1184/1188 → 末写/B@1191 → S4 release/DUMP@1219）；
+   C6 写账 16/16 址恰 1 写、dina==乘积、wea==FFFF、零非目标；C8 完整链路
+   HBM 窗==独立乘积。**比对器 spec bug 修正（非 DUT 问题）**：G3 信用屏障
+   按段间转移逐次触发（3 段计划→2 对 enter/release：@338 真门 waited=0 +
+   @1021 直穿 waited=0），原「恰各 1」断言系步骤③两段形态遗留——修为
+   「恰各转移数」+「第 2+ 次 waited==0 直穿不变量」+「全部 release 计数
+   回核」，并补 2 个 RED 单测（对数错/直穿破各一）。负控 merged-3 依旧
+   NEGATIVE-CONTROL LIVE（C1/C3/C3s/C6/C8 五路证伪全踩中）。
+5. **W 通道反压永久锁死写路径（开放发现，已留档）**：首轮
+   `+G3_AXI_BP_W=300`（inject@1174=首个 AW 握手后，release@1473，机制本身
+   工作正常）——release 后直至 S4 超时 $fatal@6238500ps（**4746+ 拍**）写
+   路径零恢复：hbm_writes 恒 0/16、bresp 0/1、**CRD_STBAXI 自始至终未发**
+   （i_saccept 再未来——写缓冲未再接受），而 CRD_STB@1184 不受影响
+   （流侧信用与 W 反压解耦，再度实证不对称）。嫌疑机制：桥模型
+   atcrambrg300.v 内部逻辑直接读自身 `wready` 输出线（:442 `else if
+   (wvalid & wready)`、:323 `wr_cs_en`、:422-426 次态逻辑），TB force 灌进
+   模型 FSM 采样；模型 vs DW_axi_gm 配置 vs glue 的责任未分清——**留作
+   后续根因调查（涉 DS 反压耐受性，或为论文素材），该注入器已移除勿
+   恢复**。物证：`verification_v2/artifacts/
+   m3lite_gate3_round6_faultinjection_20261007/wedge_wstall_drive1/`
+   （sim.log ×2 + expect，sha256 随档）。
+6. **保持力 B 通道两轮实证：ds2 B 响应在本 TB 不可延迟（2026-10-07，
+   drive-2/3）**：预注册的「反压延迟→恢复→GREEN」期望**两轮均未达成**
+   （如实留档，未调期望）——
+   - drive-2（TB 23efdf6f…0344，BVALID 沿武装 `+G3_AXI_BP_B=400`）：
+     inject@1191/release@1590 机制正常，但释放后 4600+ 拍零 B 握手；
+     writes 16/16 全落位、双信用齐发、C6 写账全绿，唯 bresp 恒 0/1 →
+     S4 持满 5000 拍 $fatal@62385000ps（TB:3297）、全程零 dump——
+     **要求③结束顺序在「写齐+响应缺席」形态下生效的实证**。
+   - 机制：正向 B 握手于 bvalid 首活拍即完成（@1191）= B 活窗仅 1 拍；
+     BVALID 沿武装结构性迟到（bvalid 上升沿系时钟沿 NBA 产物，桥模型
+     在产生沿已以 bready=1 走空-FIFO 直通 atcrambrg300.v:344 消耗响应）。
+   - drive-3（TB de839cc8…222c，AW 前置武装，用户 2026-10-07 批准改道）：
+     bready=0 于 @1174 就位（BVALID 前 17 拍）仍丢 B——**直通竞态假说
+     否证**。结论：本 TB 的 ds2 B 响应对任何跨 BVALID 产生沿的停顿不可
+     恢复（W / BVALID 沿 / AW 前置三注入点、两种通道一致）；子位点
+     （桥响应 FIFO 捕获失效 vs DUT 侧 bready 窗口后不复位）未分清，
+     FSDB 波形留档待查（round6_faultinjection/wedge_bstall_drive3_awarmed/）。
+     ⚠ drive-3 数据面 4 项红系单独重跑未恢复 case 全局 HBM 预载的程序性
+     失误（实载预载=a5a5 旧图案 ≠ case 输入，写痕解码证实），与 B 结论
+     正交；单独重跑纪律：先把该 case 的 memory_init_snapshot 恢复进
+     data_engine/sram/ 再跑。
+   - 超时两腿（drive-2）：WBARRIER timeout=1 → $fatal@9495000ps
+     （TB:3266）其后无 DUMP ✓；S4 timeout=50+B 反压 → $fatal@12885000ps
+     （TB:3297），writes 16/16 + bresp 0/1 精确隔离 bresp 半条件 ✓。
+   - 证据矩阵收口：S4 保持力由「持死→响亮超时」双形态（bresp 缺：
+     drive-2/3；writes 缺：drive-1 errata ⑤ + to_s4）与 WBARRIER 自然
+     waited=30（正向硬断言）联合承载；「延迟→恢复→GREEN」形态环境
+     不可达，落 §6.7。
+   - TB 指纹链：6ef2bca9…285d8（round4/5）→ 805a7969…1cbcc6（drive-1）
+     → 23efdf6f…0344（drive-2）→ de839cc8…222c（drive-3，仅 BP 注入器
+     武装点+注释差异；G3_AXI_BP_B=0 时与 23efdf6f 行为全同，正/负/超时
+     腿证据不受指纹差影响）。单测：门③文件级 37/37（+2：屏障对数/直穿
+     RED），全量 pytest 517。

@@ -256,3 +256,235 @@
   数据结论不变）；当前状态 commit develop 不推送。
 - **门②收口 = proposed**；门③ LOAD 参数草稿已出（[ADR-060](adr/ADR-060-m3lite-gate3-load-segment-params.md)，
   DRAFT）：L1/L2 实测参数表 + 屏障约束 + 证据指针；明确未做集成/DFG/L3。
+
+## 2026-10-06 门②状态订正 + 门③同步契约授权（用户指令，逐字要点）
+
+- **状态订正（用户原话）**：「门②取证收口：L1/L2 数据面通过；完成时序 B5c 失败，
+  保留反例；门③必须解决 LOAD→COMPUTE 同步。」——门②**不记为全绿**；ADR-059
+  状态块与本日志按此口径修订。用户本轮未独立复验新日志与源码，决策基于报告。
+- **裁决 1：不批准 total+48 作正式完成屏障**。它仅是两个用例上的候选等待值，
+  无上界证明，不得推广到其他长度/burst/反压/环境；只允许作**明确标注的实验
+  侦察**候选值。「信用无 CSR 可观测→固定等待唯一可行」的论断被驳回为过早——
+  须先核查现有完成/busy/错误/握手机制，并评估修复完成逻辑的成本。
+- **裁决 2：门③设计核查与最小实验即日授权**（无需再等启动确认），四步序：
+  ① 核查 LOAD 可用的真实完成机制——列明软件可观察信号、RTL 内部信号及其保证，
+  区分正式方案与 TB 实验方案 → ② 修订 ADR-060——明确屏障类型、适用范围、
+  超时与未验证时拒绝发布的行为 → ③ 最小 LOAD→COMPUTE 实验——输入只在外部
+  存储、UR 预置不同 sentinel，证明 COMPUTE 首次有效读晚于对应 LOAD 最后写入
+  → ④ 加入 STORE——独立核查最后外部写事务完成，再允许比对和发布。
+  实验中可用 RTL 内部信用信号建对照屏障，但必须标注 **TB 辅助实验**，不得冒充
+  现有 host 可执行协议。暂不把 LSU 塞进固定周期 SMT 调度器；优先在程序级
+  stage 编排表达依赖。
+- **裁决 3：STB 完成保证重新核对**。ADR-058 结构前提已被推翻，不能只补措辞
+  继续依赖；门③结束条件须证明所需外部写事务已完成，不得再次依赖轮询或
+  dump 延迟碰巧掩盖提前通知。
+- **裁决 4：同步方案时间预算 1–2 个工作日**（机制核查 + 方案比较）：
+  找到可靠现有协议→继续正式集成；需改 RTL→单独说明改动/版本/回归影响后再定；
+  只剩无上界固定等待→保留限定实验结果，**不宣布 M3-lite 正式闭环**。
+- **用户定调**：「这次发现明确解释了为什么『单段最终结果正确』不足以支持
+  『多阶段安全组合』。当前最优先的工作是建立可靠的段间依赖，而不是先扩大
+  集成改动面。」
+
+### 步骤① 机制核查 + 步骤② ADR-060 修订完成（2026-10-06，当日）
+
+- **核查结论（全文 `verification_v2/artifacts/m3lite_gate3_sync_recon_20261006/RECON.md`，
+  sha256 已冻结）**：现有 host 可执行协议中**不存在** LOAD 落位的可靠完成机制——
+  - 软件面穷举（cfg_reg_addr 全树仅 3 文件；smi_ctrl_regs.v 385 行全读）：
+    完成信号仅 batch_done 双皮（0x004 intr / 0x024 smi_iq_done，:292-293 同源），
+    无 per-IQ done/busy/outstanding/credit CSR；**无 UR host 读回**
+    （BRAM_PORTA 顶层绑死 aiacc_top_f.v:1921-1925）。
+  - 指令级：**COND 双死**——EN_COND=0 参数级禁用（smi_iq.v:63 默认，实例化宏
+    未覆盖）且 ir_ready_bus 的 LSU 位（24-27）**声明后无驱动**（smi_top.v:289-315）；
+    语义本为就绪撮合非完成。golden STB COND=26 因此惰性无效——DEBT-052-STB-HDR
+    部分解谜。DLY 活但 ≤7 拍/指令，量级不足且无上界。START 队列（深度4）批间
+    自动链接存在，但把竞态直接当依赖——作为同步手段反向。
+  - RTL 内部真实信号（TB 辅助实验候选）：`crd_ldb_o/crd_ldbaxi_o` 结构性末写
+    之后（ldb FSM :1384/:1461-1466）+ 门②实测；STB 侧 crd_stbaxi 仅到
+    DW_axi_gm 受理（`i_saccept`），**不覆盖 b 通道**（b 封闭于 Synopsys IP 内部）；
+    外部写真完成锚点 = TB HBM SRAM 模型写口。
+  - lsu_complete 竞态定格：`.pre_sync_reset` 备份与现版逐字节一致——设计固有，
+    非回归引入；修复方向 A（seen-nonzero，有空队列死锁陷阱）/B（信用对账）
+    仅素描未实施，属裁决 4 分支 2 单独报批项。
+- **方案定界**：F5 TB 辅助信用屏障 = 步骤③④实验屏障（标注仿真限定）；
+  F6 RTL 修复 = 正式化唯一候选待报批；F7 固定等待降级为标注实验。
+- **ADR-060 修订**：§2 重写为屏障类型表 + 实验屏障契约（信用齐才放行、
+  COMPUTE 首读 > LOAD 末写、STORE 以 HBM 写口为锚、超时就 RED、未验证拒发）；
+  §5 步骤③④实验设计要点（含屏障旁路负向断言）。
+- **下一步 = 步骤③最小 LOAD→COMPUTE 实验**（TB 读口探针 + 信用屏障 +
+  两队列指令生成；预算第 2 日内）。
+
+### 步骤③ 参考挖掘完成（2026-10-06，用户指令：参照手写 mul_scalar + GPLPU 设计文档）
+
+- **设计文档定位**：`~/Jianyuan/aiacc/doc/GLGPU.md`（2860 行；文件名 GLGPU、内容
+  「GPLPU指令集架构」）。缺席断言纪律：按 "GPLPU" 文件名全盘未命中后逐层扩搜
+  命中。RECON.md §8 已补遗。
+- **重大互证（三条独立经验记录 ↔ 门②机制发现）**：
+  ① 上游 legacy `op/mul_scalar/mul_scalar_op.cpp:226` 注释「RTL实测：LDB 的
+  ur_wr_line_cnt>1 会提前 done 但不稳定落 UR」→ 该线弃 bulk 用 loops 模式；
+  ② v3 `lsu_op_base.cpp::bulk_burst_segments` 三处避险（整 burst 尾拆 16+8+8 /
+  避 brst=0 / WC==1 补 guard line，注释明写「outstanding completion 未收口」
+  「后一个可能没搬进 UR 就 complete」）；
+  ③ 门② VCS 实测 B5c RED（lsu_complete 采样竞态，通知先于落位）。
+  三条跨代码库、跨时间的记录指向同族「完成早于落位」——论文级素材。
+- **R3 核销**：LINE_BYTE_CNT=15 = N-1 编码（手写注释「0x0F // 16 字节/行」+
+  文档最大 511），从「照抄 golden」降级为已理解常量。
+- **上游资产勘察结论**：
+  - `~/Jianyuan/SMI_IQ/op/mul_scalar`（legacy，Makefile DISABLED_OP_DIRS 屏蔽，
+    未对齐 v4.19 iq 层）——但 compute 发射逻辑被 v3 复用；
+  - `~/Jianyuan/SMI_IQ/load_store_v3/` = 上板血统 L-C-S 框架（mul_scalar/
+    mul/select_int/bitwise_and 四算子 + `gen_*_case.cpp` 独立生成器 +
+    verify_ddr_v3.py）；`MulScalarLsuOp` = LsuOpBase（LOAD/STORE bulk 分段 +
+    三 stage 目录组装）+ legacy compile（compute 12+ IQ：UR_R×2/VIN68/69/70/
+    RTOVR×5/FPMUL/UR_W，全平坦 jump=embed=cond=0，dly∈{0..7}）。
+  - `default_compute_desc` 硬编码 num_smc=8/smc_id_en=7/gr_intlv=0x10000000/
+    bulk_mode=true；LSU_WC 环境变量控 word_count（≤255）；scalar 固定 1.25。
+  - 组装输出：`smi_iq_inst/stage_{0,1,2}/iq_*.hex` + stages.md（v0.4.20
+    multi-stage 格式，与本沙箱 TB 同）、smc_*/ur_data 全零预置（门③需改写为
+    sentinel）、output_bank/bank2_final.hex golden、meta_v3.json、
+    **直写全局 hbm_init_dir**（D5 纪律：驱动须备份/恢复或重定向 scratch）。
+- **门③ ③ 方案定型**：scratch 外部构建 v3 生成器（patch desc：num_smc=1/
+  smc_id_en=0/gr_intlv=0、hbm_dir 重定向、WC=16 fp32），原样消费其
+  stage_1 compute hex + golden（fp32 输入域 [-2,2]×1.25 全在规格化区，
+  不触 FTZ）；LOAD/STORE 沿用其 stage_0/2 hex 或门②生成器形态（待装配时
+  定）；TB 加 plusarg 门控信用屏障 + CRU 读口探针 + 屏障旁路负向用例。
+
+### 步骤③ 工具链落地完成、构建被分类器故障阻断（2026-10-06）
+
+- **四件套已落盘**（全部新增；11 用例首跑全过——480 全量基线复验随 VCS 同做）：
+  - `tools/m3lite_gate3_case_gen.py`（装配器）：v3 生成器 scratch 调用 →
+    结构校验（stage_0=2+2 行 / stage_1=12 文件集精确匹配）→ **stage_0 与门②
+    build_and_emit 同参逐字节互校**（不等即响亮停止）→ 期望从冻结 HBM 快照
+    独立推导（struct fp32；v3 golden 仅作布局一致性校验，非独立真源）→
+    物化 case（smc_0 全 sentinel / smc_1..7 sentinel′ / output_bank 终态
+    供 stock compare 第二意见 / g3_expect.json / v3_gen 归档）。
+  - `tools/m3lite_gate3_compare.py`（比对器）：C0 证据前提（屏障标记恰位 +
+    GEN 清单行数正面取证 2/12 + 末段假绿通道排除）/ C1 数据 / C2 哨兵全谱 /
+    **C3 时序=min(窗口读拍) > max(窗口写拍) 严格不等 + > barrier release 拍** /
+    C4 写账（bank0/1 每址恰 1 写且 wdata==源行——**端到端字节序闭环已用门②
+    L1 实物 trace↔dump 逐字节确认**；窗外/旁 bank/跨 SMC 零写）/ C5 HBM 预载
+    区==快照（**前缀语义**：快照 528 行 vs dump 1048576 行，尾部=未加载区
+    X→0 不可判读，WARN 不判——落地前抓到的自身设计 bug）。
+  - `tools/m3lite_gate3_run.sh`（驱动）：D5 备份/trap 恢复纪律照搬门②；
+    正向（+G3_BARRIER）与负控（+G3_BYPASS）各用独立 case 目录（同 seed
+    确定性重建），屏障参数从 g3_expect.json 回读。
+  - `tests/test_m3lite_gate3.py`：11 用例（happy/C1/C2aux/C3/C4/C0 五路 RED
+    注入 + 负控证活/负控未证活=RED + hex 回环 + FTZ 响拒 + 布局校验）。
+- **共享沙箱资产追加改动（透明呈报，全部 additive 默认关）**：
+  `run_sim_aiacc_top_f_multi_stage.sh` 增 `EXTRA_PLUSARGS` 透传口
+  （原脚本无任何 plusarg 透传，RUN_CMD 固定五项——此为唯一新增口）。
+- **静态预验全过**：TB 探针/屏障/负控/钩子逐行复读一致；v3 scalar=全窗
+  1.25f（`mul_scalar_lsu_op.cpp:40/:123-136`）、HBM 仅写 memory_init1
+  （num_smc=1 → :455-457 单文件）、528 行整（:285-289）、MSB-first
+  （:311-319）与装配器假设逐条吻合。
+- **构建（2026-10-07，用户终端接力完成）**：分类器持续拦 g++，按破阻协议
+  移交用户终端；两轮排障——① 漏拷 `op/common/aiacc_op_ur.h`（ur_iq.h 相对
+  包含，include 全量扫描确认唯一缺口）；② 链接缺 3 符号（gen_ur_read/write
+  _inst、gen_fpmul_inst）→ 补拷 mul_scalar_op_{ur,compute,rtovr}_inst.cpp +
+  ur_code_extractor.h。构建成功仅上游原样 warning；binary sha256
+  e8e48c2c…ac5d 留档。`tests/test_m3lite_gate3.py` 11/11 首跑全过。
+
+### 步骤③ 四轮驱动：正向闭环 GREEN + 负控 pivot 至并段单 trigger（2026-10-07）
+
+- **驱动方式**：分类器持续拦 VCS/gen 命令，四轮均按破阻协议移交用户终端
+  接力，事后重读产物核实（trap 恢复 sha256 逐轮一致 ✓）。
+- **第 1 轮**：装配器守卫拦下——stage_1 实产 13 文件 vs 期望 12（漏
+  rtovr-16）。**回源核实** `mul_scalar_op.cpp:505-510` 六条 rtovr 路由 +
+  `:952` 命名 → 期望集订正为 13（「不按实际输出调期望」的正确执行例：
+  先回源证合法性再改期望）；比对器 GEN 清单数改从 g3_expect 回读，不硬编码。
+- **第 2 轮**：互校拦下——v3 定宽打印（28/40 字符带前导零）vs 门②去前导零
+  （27/39；门② L1 历史 VCS 实证文件同为 27），**整数值 XOR==0**。互校改按值
+  比对（$readmemh 值语义等价），两单测锁定（填充等价通过/真比特差异拒绝）。
+- **第 3 轮**：**正向全绿 43 PASS/0 RED**——屏障 enter/release@338（恰
+  2+2 脉冲）、窗口末写@259、COMPUTE 首读@931（gap=672）、INTR_ASSERT 恰 2、
+  C1 乘积 bit-exact、C2 哨兵全谱、C4 写账逐址逐值、C5 HBM 无损、stock
+  compare 独立第二意见 PASS。负控 time-0 $fatal——**`$test$plusargs` 前缀
+  匹配坑**：`"G3_BARRIER"` 误中 `+G3_BARRIER_TIMEOUT=5000`。修：一律
+  `$value$plusargs("NAME=%d")` 只认 `=1` 形态（声明 integer 化 + 文档订正）。
+- **第 4 轮**：正向复绿（与第 3 轮逐数字一致，确定性重建 ✓）；负控 SIM
+  PASSED 但**全绿=未证活**（比对器正确判 RED：不确定≠通过）——裸 intr 沿
+  ~@300 反在末写@259 之后，BYPASS 结构性踩不中写窗。
+- **trace 定量根因**（m3lite_g3_lc_w16 实物）：stage_1 BEGIN@338 → 取指@926
+  ——**IQ_EN 同步 13 队列耗 ~588 拍，全部在 trigger 之前**；trigger→compute
+  首读仅 **5 拍**（fetch@926→read@931）；LDB trigger→首写 **21 拍**
+  （fetch@197→write@218），写窗 218..259。→ 任何「改放行时机」的负控
+  （BYPASS/立即放行/固定早放行）首读都 ≥~700 拍，**结构性撞不上写窗**；
+  快慢差在取数路径本身（寄存器读 vs AXI 取 HBM），是物理的。B5c 的「通知
+  早于落位」是单窗 L1 形态实测（提前 ~16-31 拍），双窗 bulk 下批中断沿反在
+  末写之后 ~40 拍——**case 形态相关，不可泛化**。
+- **负控 pivot = 并段单 trigger（merged_single_stage）**：LOAD 2+2 与 compute
+  13 队列并入 stage_0 同 trigger——compute 首读 ≈T+5 ≺ LDB 首写 ≈T+21、末写
+  ≈T+62，**读恒先于写，C1/C3/C4(乘积账) 必红**；C2/C5 应绿（LOAD 无恙、
+  红纯因竞态），正是负控应有的证伪剖面。**零 TB 改动**（单段多队列是 TB
+  常规形态；GEN 按目录发现 stage→清单 15 行；TB probe_stage_count 探不到
+  stage_1 清单即 count=1；链路机械闭环已正面核实）。FORCE_RACE 草拟后经本
+  定量分析证死，**未编译即回退**；TB = 第 4 轮已验证状态 + BYPASS 档案注释
+  （无功能改动，sha256 `6ef2bca9…285d8`）。
+- **工具链增量**：case_gen `--merge-stages`；compare 负控双形态
+  （merged=现行 / bypass=档案复现）+ merged 白名单放行 C4 bank2 末写 RED +
+  并段 INTR_ASSERT 恰 1；run.sh 负控段切 merged（stock compare 预期 FAILED
+  = 竞态第三意见，非故障）。单测 13→**15 全过**；**全量基线复验 495 passed**
+  （480+15 恰符，7 skipped/11 xfailed 不动）。自抓自修一例：白名单前缀匹配
+  撞上 Report 标签 `"RED "` 尾部空格 → 回退子串语义（两「证活」单测当场拦下）。
+- **第 5 轮（2026-10-07，用户终端接力，备份 g3_20261007_135950）——步骤③
+  证据链闭环**：
+  - **正向第三次复现**（逐数字一致：release@338 / 首读@931 / 末写@259 /
+    gap=672 / 43 PASS 0 RED / stock compare PASS）。TB 因注释改动触发重建，
+    行为逐比特不变——「注释-only」声明获行为级确认。
+  - **负控 NEGATIVE-CONTROL LIVE（exit=0）**：C1 红（16/16 垃圾乘积）、
+    **C3 红 min_read=709 vs max_write=766（gap=−57，读真实先于写 57 拍，
+    非边缘伪影）**、C4 仅「bank2 末写==期望乘积」红（白名单内）、
+    **C2/C5 全绿**（LOAD 落位完好——红纯因竞态）、C0 全绿（无 G3 标记 /
+    INTR_ASSERT 恰 1 / 清单 15 行 / 无 stage_1 目录正面取证）、stock compare
+    独立 FAIL 作第三意见、trap 恢复 sha256 一致。
+  - 定量模型自洽旁证：并段 trigger≈704（15 队列同步），首读 T+5=709、写窗
+    T+21..62=725..766——5/21/62 拍模型对实测全中。
+  - **裁决 2 步骤③完成判据全部满足**：COMPUTE 首次有效读严格晚于 LOAD
+    最后写入（931>259）且晚于屏障 release（931>338）——VCS 实测三轮
+    确定性复现；负控端到端证活（断言链在仿真内确实能红）。
+  - 证据分级落账：正向屏障 = **TB 辅助实验**（ADR-060 §2.2 标注，非 host
+    可执行协议、非上板语义）；VCS≠硅证；B5c 反例保留（门②不记全绿不变）。
+
+## 2026-10-07 M3-lite 门③ 步骤④（STORE 完整链路）——drive-1/2/3 收口
+
+- **实施**（ADR-060 §6 设计冻结后）：TB +三道闸（WBARRIER 写落位 / S4 完成
+  闸 / 四事件探针 / 反压注入器），case_gen `--with-store` + 门①发射逐字节
+  互校，compare C0-C8（C6 精确写账 / C7 四事件时序 / C8 完整链路 /
+  fatal_expected 模式），run.sh 五跑驱动；单测 15→37（文件级 37/37），
+  全量 pytest 495→**517**（只增不减）。
+- **drive-1（TB 805a7969…1cbcc6）**：正向实质 GREEN——唯一 RED 系比对器
+  C0「屏障恰各 1」spec bug（G3 信用屏障按段间转移逐次触发，3 段=2 对）；
+  修为「对数=转移数 + 第 2+ 次直穿 waited==0 + 全部 release 计数回核」
+  并补 2 个 RED 单测（先验依据=TB 挂点结构与计数不清零语义，非按输出调
+  期望）。负控 LIVE。**W-stall 300 拍永久锁死写路径**（release 后 4746+
+  拍零恢复、CRD_STBAXI 再未发、hbm_writes 恒 0；嫌疑=桥模型内部读自身
+  wready 输出线 atcrambrg300.v:442/:323/:422-426）→ errata ⑤ +
+  物证 wedge_wstall_drive1/，注入器移除勿恢复。
+- **drive-2（TB 23efdf6f…0344，B 通道 BVALID 沿武装，用户终端接力）**：
+  正向 **GREEN（red=0 warn=4）**——C0 修正经端到端验证（恰 2 对/直穿 0/
+  计数回核）；WBARRIER waited=30（硬断言>0）；信用不对称 store 侧实证
+  （CRD_STB@1184/CRD_STBAXI@1188 ≺ 末写@1191，gap=−7/−3）；C6 写账
+  16/16 址恰 1 写、dina==乘积、wea==FFFF、零非目标；C7 四事件时序全序
+  （issue@1155→CRD→末写/B@1191→S4 release/DUMP@1219）；C8 完整链路
+  逐位。负控 **NEGATIVE-CONTROL LIVE**（C1/C3 gap=−63/C4 末写/C3s
+  gap=−25/C6/C8 六路证伪）。两超时 PASS（to_wb $fatal@9495000ps；
+  to_s4 $fatal@12885000ps，writes 16/16+bresp 0/1 精确隔离 bresp 半条件）。
+  **BP 跑预注册 GREEN 未达成**：B 响应永久丢失（B 活窗仅 1 拍 + 桥模型
+  空-FIFO 直通 atcrambrg300.v:344，`@(posedge bvalid)` 武装结构性迟到），
+  S4 持满 5000 拍 $fatal、全程零 dump——**要求③结束顺序在「写齐+响应
+  缺席」形态下生效的实证**。
+- **drive-3（TB de839cc8…222c，AW 前置武装，用户批准改道）**：bready=0
+  于 @1174（BVALID 前 17 拍）就位仍丢 B → **直通竞态假说否证**。结论：
+  本 TB 的 ds2 B 响应对任何跨 BVALID 产生沿的停顿不可恢复（W / BVALID
+  沿 / AW 前置三注入点、两通道一致）；子位点（桥 FIFO 捕获失效 vs DUT
+  bready 窗口后不复位）未分清，FSDB 波形留档待查。⚠ drive-3 数据面
+  4 项红系单独重跑未恢复 case 全局 HBM 预载的程序性失误（实载=a5a5 旧
+  图案，写痕解码证实），与 B 结论正交；**纪律补录：单独重跑任一腿前
+  先把该 case 的 memory_init_snapshot 恢复进 data_engine/sram/**。
+- **收口（要求⑤证据矩阵）**：WBARRIER 等待→放行（自然 waited=30）✓；
+  两超时响亮失败 ✓✓；S4 持死双形态（bresp 缺：drive-2/3；writes 缺：
+  drive-1/to_s4）✓；「延迟→恢复→GREEN」形态环境不可达，落账 ADR-060
+  §6.7/errata 6。归档：`verification_v2/artifacts/
+  m3lite_gate3_round6_positive_20261007/` + `…_faultinjection_20261007/`
+  （各 README 定量表 + SHA256SUMS）。**DS 写路反压耐受 = 开放发现**
+  （根因调查或为论文素材）。门③步骤①-④至此全部执行完毕；集成仍属
+  授权边界外。
