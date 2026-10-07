@@ -69,6 +69,7 @@ negative（负向对照）语义反转：整体 PASS 当且仅当
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -125,6 +126,28 @@ class Report:
         self.lines.append(f"  [WARN] {name} —— {detail}")
 
 
+def tb_provenance(sandbox: str, sim_sha: "str | None", rep: Report) -> dict:
+    """任务 1（用户 2026-10-07）：明示「测试时 TB」与「当前 TB」的差异。
+    sim_sha = 驱动在 sim 时刻记录的 TB sha256；此处现场重算比对时刻指纹。
+    差异记 WARN 如实披露（不判 RED——归档复比对场景 TB 可合法前进，
+    解读旧报告以 sim 时刻指纹为准）。"""
+    tb = os.path.join(sandbox, "sim_multi_stage", "tb_aiacc_top_v04_f_multi_stage.v")
+    now = None
+    if os.path.isfile(tb):
+        h = hashlib.sha256()
+        with open(tb, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        now = h.hexdigest()
+    prov = {"tb_path": tb, "tb_sha256_sim": sim_sha,
+            "tb_sha256_compare_time": now,
+            "tb_match": (sim_sha == now) if (sim_sha and now) else None}
+    if sim_sha and now and sim_sha != now:
+        rep.note("TB 指纹差异（测试时≠比对时，如实披露不判 RED）",
+                 f"sim={sim_sha[:16]}… now={now[:16]}…——解读结果以 sim 时刻指纹为准")
+    return prov
+
+
 def read_lines(path: str) -> list[str]:
     with open(path, encoding="utf-8", errors="replace") as f:
         return [ln.strip() for ln in f if ln.strip()]
@@ -153,6 +176,9 @@ def main() -> int:
     ap.add_argument("--expect-timeout", choices=["wbarrier", "s4barrier"], default=None,
                     help="fatal_expected 模式必填：哪道屏障应超时")
     ap.add_argument("--sandbox", default=os.path.expanduser("~/u280_sim_v422"))
+    ap.add_argument("--tb-sha256", default=None,
+                    help="测试时刻 TB sha256（驱动在 sim 前记录）；与比对时刻现场"
+                         "重算值并列写入报告 provenance，差异记 WARN 如实披露")
     args = ap.parse_args()
     case_dir = os.path.abspath(args.case_dir)
     case = os.path.basename(case_dir)
@@ -177,6 +203,7 @@ def main() -> int:
         dump_after = ("[GATE4][DUMP]" in log_fe[pos:]) if pos >= 0 else ("[GATE4][DUMP]" in log_fe)
         rep.check("fatal_expected TIMEOUT 后无 [GATE4][DUMP]（未 dump/比对/结束）",
                   not dump_after)
+        prov = tb_provenance(args.sandbox, args.tb_sha256, rep)
         print(f"[G3-CMP] case={case} mode=fatal_expected expect={args.expect_timeout}")
         for ln in rep.lines:
             print(ln)
@@ -188,7 +215,8 @@ def main() -> int:
             json.dump({"case": case, "mode": "fatal_expected",
                        "expect_timeout": args.expect_timeout,
                        "verdict": "PASS" if verdict else "RED",
-                       "red": rep.red, "warn": rep.warn, "lines": rep.lines},
+                       "red": rep.red, "warn": rep.warn, "lines": rep.lines,
+                       "provenance": prov},
                       f, indent=2, ensure_ascii=False)
         return 0 if verdict else 1
 
@@ -692,6 +720,7 @@ def main() -> int:
                           f"exp={prod[bad8[0]].lower()}")
 
     # ── 汇总（模式语义）────────────────────────────────────────────────────
+    prov = tb_provenance(args.sandbox, args.tb_sha256, rep)
     print(f"[G3-CMP] case={case} mode={args.mode} words={words}")
     for ln in rep.lines:
         print(ln)
@@ -724,7 +753,7 @@ def main() -> int:
               encoding="utf-8") as f:
         json.dump({"case": case, "mode": args.mode, "verdict": summary,
                    "red": rep.red, "warn": rep.warn, "lines": rep.lines,
-                   "timeline": timeline},
+                   "timeline": timeline, "provenance": prov},
                   f, indent=2, ensure_ascii=False)
     return 0 if verdict else 1
 

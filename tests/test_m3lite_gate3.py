@@ -489,3 +489,131 @@ def test_g3_store_crosscheck_true_bitdiff_rejected():
     bad["stb"][0] = format(int(ref["stb"][0], 16) ^ 0x10, "x")
     with pytest.raises(SystemExit):
         g3.cross_check_store_stage(bad, 16)
+
+
+# ── 任务 1（用户 2026-10-07）：hbm_preload 自动恢复/校验 + TB 指纹 provenance ──
+import hashlib  # noqa: E402
+
+import hbm_preload as hp  # noqa: E402
+
+
+def _mk_preload_case(tmp_path, *, tamper_expect=False, drop_snap=None):
+    """合成最小预载场景：case/memory_init_snapshot/8 文件 + g3_expect 冻结
+    哈希 + 陈旧 hbm_dir（a5a5 旧图案，drive-3 污染形态）。"""
+    case = tmp_path / "case"
+    snap = case / "memory_init_snapshot"
+    hbm = tmp_path / "hbm"
+    snap.mkdir(parents=True)
+    hbm.mkdir()
+    for i in range(1, 9):
+        if drop_snap == i:
+            continue
+        (snap / f"memory_init{i}.hex").write_text(f"deadbeef{i:02x}\n")
+        (hbm / f"memory_init{i}.hex").write_text("a5a50000\n")  # 陈旧预载
+    files = {}
+    for i in range(1, 9):
+        p = snap / f"memory_init{i}.hex"
+        if p.exists():
+            h = hashlib.sha256(p.read_bytes()).hexdigest()
+            files[f"memory_init{i}.hex"] = ("00" * 32 if tamper_expect and i == 3 else h)
+    (case / "g3_expect.json").write_text(json.dumps(
+        {"schema": "m3lite.gate3_expect/v1", "hbm_preload": {"files": files}}))
+    return str(case), str(hbm)
+
+
+def test_hbm_check_detects_stale_preload(tmp_path):
+    """drive-3 形态：全局预载陈旧（a5a5）必须被 check 检出（rc=1）。"""
+    case, hbm = _mk_preload_case(tmp_path)
+    assert hp.check(case, hbm, out=lambda *_: None) == 1
+
+
+def test_hbm_restore_happy_then_check_clean(tmp_path):
+    """restore 后 8/8 == 冻结快照；再 check 转 CLEAN（rc=0）。"""
+    case, hbm = _mk_preload_case(tmp_path)
+    assert hp.restore(case, hbm, out=lambda *_: None) == 0
+    for i in range(1, 9):
+        assert (tmp_path / "hbm" / f"memory_init{i}.hex").read_text() == f"deadbeef{i:02x}\n"
+    assert hp.check(case, hbm, out=lambda *_: None) == 0
+
+
+def test_hbm_restore_refuses_snapshot_expect_mismatch(tmp_path):
+    """快照与 expect 冻结哈希不符 = 冻结证据不可信 → 拒跑且全局目录不被写。"""
+    case, hbm = _mk_preload_case(tmp_path, tamper_expect=True)
+    assert hp.restore(case, hbm, out=lambda *_: None) == 1
+    assert (tmp_path / "hbm" / "memory_init1.hex").read_text() == "a5a50000\n"
+
+
+def test_hbm_restore_refuses_incomplete_snapshot(tmp_path):
+    """快照缺文件 = 不半恢复，拒跑。"""
+    case, hbm = _mk_preload_case(tmp_path, drop_snap=5)
+    assert hp.restore(case, hbm, out=lambda *_: None) == 1
+    assert (tmp_path / "hbm" / "memory_init1.hex").read_text() == "a5a50000\n"
+
+
+def test_hbm_check_missing_current_file(tmp_path):
+    """全局目录缺文件 = MISSING-CURRENT 检出。"""
+    case, hbm = _mk_preload_case(tmp_path)
+    assert hp.restore(case, hbm, out=lambda *_: None) == 0
+    os.remove(os.path.join(hbm, "memory_init8.hex"))
+    assert hp.check(case, hbm, out=lambda *_: None) == 1
+
+
+def test_tb_provenance_match_mismatch_none(tmp_path):
+    """TB 指纹：一致=不 WARN；差异=WARN 且 tb_match=False；TB 缺席=None。"""
+    sbx = tmp_path / "sbx"
+    tb = sbx / "sim_multi_stage" / "tb_aiacc_top_v04_f_multi_stage.v"
+    tb.parent.mkdir(parents=True)
+    tb.write_text("module tb; endmodule\n")
+    import hashlib as _hl
+    now = _hl.sha256(tb.read_bytes()).hexdigest()
+    rep = g3c.Report()
+    prov = g3c.tb_provenance(str(sbx), now, rep)
+    assert prov["tb_match"] is True and rep.warn == 0
+    rep2 = g3c.Report()
+    prov2 = g3c.tb_provenance(str(sbx), "00" * 32, rep2)
+    assert prov2["tb_match"] is False and rep2.warn == 1
+    rep3 = g3c.Report()
+    prov3 = g3c.tb_provenance(str(tmp_path / "empty_sbx"), "00" * 32, rep3)
+    assert prov3["tb_match"] is None and rep3.warn == 0
+
+
+# ── 接力轮漏洞修补（2026-10-07，用户验收发现）静态锚定：run.sh 纪律 ──────────
+
+RUN_SH = os.path.join(ROOT, "verification_v2", "tools", "m3lite_gate3_run.sh")
+
+
+def _run_sh_text():
+    with open(RUN_SH, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_run_sh_gen_failfast_covers_all_five_legs():
+    """修补①：五腿 gen 非零退出即 fail-fast——禁沿用旧产物（目录已存在时
+    旧 g3_expect.json 会通过纯存在性检查，接力轮实测发现）。"""
+    t = _run_sh_text()
+    for var in ["GEN_POS", "GEN_NEG", "GEN_BP", "GEN_TOWB", "GEN_TOS4"]:
+        assert "%s=$?" % var in t, "%s 退出码未捕获" % var
+        assert '[ "$%s" -ne 0 ]' % var in t, "%s 无非零 fail-fast 检查" % var
+    assert t.count("fail-fast 拒跑，禁沿用旧产物") == 5
+
+
+def test_run_sh_aggregated_exit_code():
+    """修补②：脚本最终退出码=五腿期望形态汇总（exit=0 ⇔ 全部 AS-EXPECTED；
+    任何方向偏差含意外变绿均 exit=1 交人工复核）。"""
+    t = _run_sh_text()
+    assert 'LEG_FAILS=""' in t
+    for leg in ["positive", "negative", "bp", "to_wb", "to_s4"]:
+        assert 'LEG_FAILS="$LEG_FAILS %s"' % leg in t, "%s 腿未入汇总" % leg
+        assert 'LEG_FAILS="$LEG_FAILS %s(preload-gate)"' % leg in t
+    tail = t[t.rindex("=== 汇总"):]
+    assert "ALL-LEGS-AS-EXPECTED" in tail
+    assert 'if [ -z "$LEG_FAILS" ]; then' in tail
+    assert "exit 0" in tail and "exit 1" in tail
+
+
+def test_run_sh_leg_verdict_marks_complete():
+    """每腿必须打印 AS-EXPECTED / UNEXPECTED 腿判（汇总依据，留痕可审计）。"""
+    t = _run_sh_text()
+    assert t.count("腿判") >= 10  # 5 腿 × (AS-EXPECTED + UNEXPECTED)
+    # bp 腿信息性 positive 比对不得参与汇总判定（持死形态下必 RED）
+    assert "信息性，留痕不判" in t

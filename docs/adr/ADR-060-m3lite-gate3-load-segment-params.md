@@ -199,9 +199,10 @@ v1 草案的「信用无 CSR 可观测 → 固定等待唯一可行」论断被�
   期望：S4 waited ∈ [bp_release−s4_enter−2, +50]
   （精确一致性，证明 waited 确由注入造成）且 ≥ min_waited（=n−100，
   100=注入点→S4 enter 重叠+模型重驱动余量上界），数据面全绿。
-  （drive-2/3 实测：该期望两轮未达成——B 在本 TB 不可延迟，「恢复」
-  形态环境不可达；本实验现行价值 = bresp 半条件持死形态证据，
-  见 errata 6 与 §6.7。）
+  （drive-2/3 实测：该期望两轮未达成——**当前测试配置及已尝试注入
+  方式下**，B 响应延迟后未能恢复；注入器/桥模型/DUT 责任未分清，
+  **不得外推为硬件本身不可恢复**（用户 2026-10-07 措辞裁定）。
+  本实验现行价值 = bresp 半条件持死形态证据，见 errata 6/⑦ 与 §6.7。）
 - **退役（2026-10-07 首轮实证）**：`+G3_AXI_BP_W`（首个 AW 握手后押
   wready=0）——300 拍 W 反压使写路径**永久锁死**（release 后 4746+ 拍
   零恢复、CRD_STBAXI 再未发、hbm_writes 恒 0）；机制嫌疑=桥模型内部
@@ -244,15 +245,21 @@ v1 草案的「信用无 CSR 可观测 → 固定等待唯一可行」论断被�
   若未来 case 改走 URA 写路径，屏障超时响亮失败（安全方向），届时再扩。
 - S4 的 B 计数为 ds2 全端口计数——本 case 唯 stage_2 产生写事务（stage_0
   为读、host 下载走 us1），期望恰 1；形态变化时需重核。
-- W 通道反压实证锁死写路径并退役（errata ⑤）；B 通道反压实证响应
-  不可延迟（errata 6，三注入点一致）——**「DS/写路对反压的耐受」整体
-  成为开放发现**，根因（桥模型 vs DW_axi_gm 配置 vs glue）未分清，
-  波形物证已留档（round6_faultinjection/wedge_bstall_drive3_awarmed/
-  tb_aiacc_top_multi_inst_stage.fsdb），另行调查。
-- **S4「延迟→恢复→GREEN」保持力形态在本 TB 不可达**（B 不可延迟）；
-  S4 保持力由「持死→响亮超时」双形态（bresp 缺：drive-2/3；writes 缺：
-  drive-1 W-stall / to_s4）与 WBARRIER 自然 waited=30（正向硬断言）
-  联合承载。
+- W 通道反压：已试注入方式下写路径未恢复（errata ⑤，注入器退役）；
+  B 通道反压：三种注入点下响应延迟后均未恢复（errata 6）——
+  **「DS/写路对反压的耐受」整体为开放发现**：注入器、桥模型与 DUT
+  的责任边界未分清，**不得外推为硬件本身无法恢复**（用户 2026-10-07
+  措辞裁定）；波形物证已留档（round6_faultinjection/
+  wedge_bstall_drive3_awarmed/tb_aiacc_top_multi_inst_stage.fsdb），
+  根因调查另行立项（用户 2026-10-07 任务 2，1-2 日盒，三问见 errata ⑦；
+  **源码级机制假说=边界线 force 分裂视图+孤儿 B 重复捕获死锁，
+  可证伪探针预测见 errata ⑧**）。
+- **「延迟→恢复→GREEN」保持力形态：当前测试配置及已尝试注入方式下
+  尚未实现**（用户 2026-10-07 措辞裁定，取代此前「本 TB 不可达」的
+  过强表述）。现有证据的准确语义——超时负控证明的是「**缺失完成条件
+  时不会错误放行**」；WBARRIER 自然 waited=30 证明的是「**该路屏障
+  实际发生了等待**」；二者**不能替代**各屏障的延迟-恢复验证，
+  该验证仍为开放项。
 
 ## Errata（2026-10-07，步骤③实施后实证）
 
@@ -336,16 +343,135 @@ v1 草案的「信用无 CSR 可观测 → 固定等待唯一可行」论断被�
      ⚠ drive-3 数据面 4 项红系单独重跑未恢复 case 全局 HBM 预载的程序性
      失误（实载预载=a5a5 旧图案 ≠ case 输入，写痕解码证实），与 B 结论
      正交；单独重跑纪律：先把该 case 的 memory_init_snapshot 恢复进
-     data_engine/sram/ 再跑。
+     data_engine/sram/ 再跑。**用户 2026-10-07 裁定：drive-3 继续作为
+     污染运行保留；依赖正确初态的结论只能由恢复预载后的干净运行支撑**
+     ——AW 前置武装形态的 B 结论列入任务 1 干净复跑补证（BVALID 沿武装
+     的同类结论本由干净的 drive-2 承载）。
    - 超时两腿（drive-2）：WBARRIER timeout=1 → $fatal@9495000ps
      （TB:3266）其后无 DUMP ✓；S4 timeout=50+B 反压 → $fatal@12885000ps
      （TB:3297），writes 16/16 + bresp 0/1 精确隔离 bresp 半条件 ✓。
    - 证据矩阵收口：S4 保持力由「持死→响亮超时」双形态（bresp 缺：
      drive-2/3；writes 缺：drive-1 errata ⑤ + to_s4）与 WBARRIER 自然
-     waited=30（正向硬断言）联合承载；「延迟→恢复→GREEN」形态环境
-     不可达，落 §6.7。
+     waited=30（正向硬断言）联合承载；「延迟→恢复→GREEN」形态在
+     **当前测试配置及已尝试注入方式下尚未实现**（用户 2026-10-07
+     措辞裁定后的准确表述；各证据的精确语义边界见 §6.7 与 errata ⑦）。
    - TB 指纹链：6ef2bca9…285d8（round4/5）→ 805a7969…1cbcc6（drive-1）
      → 23efdf6f…0344（drive-2）→ de839cc8…222c（drive-3，仅 BP 注入器
      武装点+注释差异；G3_AXI_BP_B=0 时与 23efdf6f 行为全同，正/负/超时
      腿证据不受指纹差影响）。单测：门③文件级 37/37（+2：屏障对数/直穿
      RED），全量 pytest 517。
+7. **用户 2026-10-07 复核指令落实（两处结论收紧 + 路线裁定）**：
+   - **收紧①**：「延迟→恢复→GREEN 本 TB 不可达」过强——改为「**当前
+     测试配置及已尝试注入方式下，尚未实现恢复**」。注入器、桥接模型与
+     DUT 的根因未区分前，不得认定硬件本身无法恢复（§6.5/§6.7/errata ⑥
+     已按此改写；round6 两份归档 README 系 sha256 冻结载体，保留旧措辞
+     不改，以本 errata 为准）。
+   - **收紧②**：超时负控证明的是「**缺失完成条件时不会错误放行**」；
+     自然 waited=30 证明的是「**某一路屏障实际发生了等待**」。二者
+     **不能替代所有屏障的延迟-恢复验证**（§6.7 已按此改写）。
+   - **drive-3 污染运行裁定**：继续作为污染运行保留；依赖正确初态的
+     结论只能由恢复预载后的干净运行支撑。
+   - **批准的对外的结论句（论文/进展总览可用，逐字）**：
+     「M3-lite 已取得 TB 辅助的端到端功能正确性及缺失完成条件时拒绝
+     放行的证据；host 完成协议和反压恢复仍是开放问题。」
+   - **授权两个有界任务（不立即修 RTL、不同时开三条大主线）**：
+     任务 1（半天）= 固定可恢复实验版本、消除人工预载步骤——run.sh
+     每次自动恢复对应 snapshot、校验哈希、串行占用共享预载目录、
+     明示测试时 TB 与当前 TB 的差异；任务 2（1-2 天）= 核查反压注入
+     合法性、定位阻塞责任边界，三问：①停顿期间通道协议是否保持、
+     有无「一端认为握手成功另一端未接受」的不一致；②B 响应是根本
+     没生成、已生成未保存、还是已消费未计入观测；③解除注入后阻塞
+     在哪个状态或未清计数上。
+   - **F6 RTL 不授权直改**：先形成具体修复提案（修改点/为何消除提前
+     完成/影响哪些 LSU 路径/需要哪些回归）再报批。
+   - **统一入口 `tb_assisted_experiment` 通道**：可随后增加，用于一键
+     复现本实验结果，但**不得进入普通 V1 已验证包通道**，且不得掩盖
+     host 同步尚未解决的事实（本条为随后项，本 errata 落地时未实施）。
+8. **任务 2 源码级机制假说（2026-10-07，探针确认待跑——当前为源码推演
+   + 归档日志旁证，非仿真新证据）**：反压「不可恢复」的嫌疑从 DUT/桥
+   功能缺陷转向**注入方式本身**——force 打在桥↔矩阵边界线
+   （bmc_ds2_bready）上，制造了 AXI 握手分裂视图：
+   - **问①（协议保持/不一致）**：矩阵 B 输入级
+     `atcbmc300_ds_wdata_bresp_ctrl.v:422/:429` 的捕获条件**只认
+     `ds_bvalid` 输入、不采样 bready**（`:412 ds_bready=~pending_bvalid`
+     仅是输出反压）；桥 `atcrambrg300.v:344` 却严格按 bready 入账。
+     force 置 0 期间：**矩阵照样收走 B 并交付 DW_axi_gm（T≈1191 直通
+     或 pending 一拍），桥却认为未握手、把响应压入 FIFO 并持 bvalid=1**
+     ——同一响应一端消费、一端留存，正是用户问①的分裂视图。
+   - **问②（B 的三态定位）**：B **已生成**（桥 bresp_valid 脉冲）、
+     **已被矩阵/DUT 消费**（矩阵捕获不依赖 bready；旁证：drive-2/3
+     BP 日志 INTR×3 正常、CRD_STBAXI@1188 正常、HBM_BRESP 打印恰 0 次）
+     且**桥内留存孤儿副本永未被取走**（FIFO 入而未出）。
+   - **问③（解除后阻塞点）**：孤儿 bvalid=1 持高 → 矩阵在 T+1/T+2 把它
+     **当作新 B 重复捕获**进 pending（此刻 bresp_cnt 已随真交付清零）
+     → `slv_bvalid=(pending|ds_bvalid) & ~bresp_cnt_empty` 被
+     `bresp_cnt_empty` 否决 → 永不上呈 master → pending_bvalid 永 1
+     → `ds_bready` 永 0 → 桥 FIFO 永不排空。死锁自锁，与释放无关。
+     W 通道 drive-1 锁死同属一类（桥自读自身 wready 输出 :442 等，
+     force 污染模型 FSM）。
+   - **为何正向永不破**：直通形态 bready=1 时桥不入 FIFO（:344 直通
+     消耗），bvalid 仅 1 拍脉冲，矩阵拍后即交付，无孤儿可复制。
+   - **推论（对用户收紧①的直接回应）**：现有证据**不再支持**「写路
+     反压耐受」作为对 DUT/模型的怀疑——三注入点全部打在边界线上，
+     该位置在本链路结构（矩阵捕获不采 bready + 桥 bready 严格入账）
+     下**原理性不可能**模拟合法反压。合法 B 反压注入点 = master 源头
+     （DW_axi_gm 侧 bready，使矩阵 mst_bready=0 → pending 正常捕获 →
+     ds_bready=0 双方同视图）或矩阵路由内部；边界线 force 已证死。
+   - **可证伪探针预测（待跑，诊断 TB 补丁 additive 默认仅 BP 激活）**：
+     释放后 64 拍内 bmc_ds2_bvalid 恒 1、bmc_ds2_bready 恒 0；
+     桥 u_bresp_fifo.empty 恒 0（孤儿常驻）；矩阵 ds2 口
+     pending_bvalid 自 ~1192 起恒 1、slv_bvalid 恒 0、bresp_cnt_empty=1。
+     任一不符即推翻本假说。预测若中，则「恢复」在边界线注入下结构性
+     不可达，BP 实验应以 master 侧注入重做（届时再评估「延迟→恢复」
+     形态是否可达）。
+   - 旁证核查命令留档：`grep -c "GATE4..HBM_BRESP" 归档/drive*/sim*.log`
+     = 0/0；`INTR_ASSERT` 各 3；CRD 时序与正向逐拍吻合。
+   - **探针路径侦察收口（2026-10-07，纯只读源码核查，探针补丁待干净
+     复跑后上）**：
+     - 桥实例：ae350_ram_subsystem.v :171/:266 两个 atcrambrg300 系
+       `ifdef NDS_FPGA` / `else` 互斥编译分支、同名 `u_sram_brg`，仿真
+       态仅一份激活 ⇒ 探针路径
+       `GEN_SRAM[0].SMC0.u_sram.u_sram_brg.bresp_fifo_empty`。
+     - 矩阵 ds2 口实例名 `ds2_ctrl`（atcbmc300.v:19401，
+       `ifdef ATCBMC300_SLV2_SUPPORT`），wdata_bresp_ctrl 子实例名
+       `ds_wdata_bresp`（atcbmc300_ds_axi.v:1315）⇒ 探针路径
+       `dut.u_atcbmc300.ds2_ctrl.ds_wdata_bresp.{pending_bvalid,
+       slv_bvalid,bresp_cnt_empty}`。
+     - **LSU 写主口身份**：SMCk 的 STBAXI 写经矩阵 us(3+k) 口——
+       `us3_bready = de_stb_bready[0]`（aiacc_top_f.v:877），由 DS 引擎
+       stb_bready 输出驱动（:2016，generate 版 :2139）；us2 tie 1（:850）
+       与本链路无关。⇒ **合法 B 反压注入点具体化**：force
+       `de_stb_bready[0]`（master 源头；矩阵 mst_bready[3] 随之为 0 →
+       pending 正常捕获 → ds_bready=0，桥/矩阵同视图），无需再碰
+       边界线。此亦为「延迟→恢复」形态重做的候选注入方式（任务 2
+       收口后评估）。
+9. **任务 1 干净全量复跑验收 + 执行漏洞修补（2026-10-07 终端接力轮）**：
+   glm-5.3 分类器连续 5 次超时，按破阻协议移交用户终端接力；新 case 基名
+   `m3lite_g4_task1_clean_20261007_codex` 五腿全跑（接力前一次普通沙箱
+   尝试撞许可证失败，该次不作验收证据，已排除）。本会话事后重读产物
+   逐标记核实：
+   - **任务 1 出口验收通过**：五腿 gen 全 exit=0；每腿预载门
+     RESTORED+VERIFIED（8/8 ×5）；退出 trap 恢复校验一致
+     （SHA256SUMS.before == after_restore）；五份报告 provenance 双指纹
+     一致（de839cc8…222c，TB 未动）。
+   - **drive-3 干净补证落地**：干净预载下 BP 腿数据面全绿（C4 写账五项、
+     C6 写账七项全 PASS），drive-3 的 +4 数据面假红消失——确系预载污染
+     所致，与 B 结论正交（errata ⑥ 判断获干净运行支撑）。信息性
+     positive red=21 warn=2，与干净的 drive-2 同类形态一致；fatal_expected
+     正式判定 PASS（S4 持满超时 $fatal、零 dump）。⚠ 本轮 BP 腿**不得**
+     描述为「反压恢复通过」——其为「缺失完成条件时不会错误放行」的
+     证据；「延迟→恢复→GREEN」在当前测试配置及已试注入方式下仍未实现。
+   - **正向腿跨运行确定性复现**：全部关键拍号与 round6 drive-1 逐拍一致
+     （屏障 338/1021、WBARRIER waited=30 @959、CRD 1184/1188、末写/B
+     1191、S4/DUMP 1219、C3 gap=672）——同 seed 确定性重建跨进程成立。
+   - **执行漏洞（接力方验收时发现，本轮修补）**：①生成器因目录已存在
+     失败后旧 g3_expect.json 仍在、原纯存在性检查放行 → 可能沿用旧产物
+     继续跑；②脚本最终 exit=0 不代表各腿通过。修补：五腿 gen 非零即
+     fail-fast 拒跑（exit 1，提示换基名/人工清理）；脚本最终退出码 =
+     五腿预注册期望形态汇总（exit=0 ⇔ 全部 AS-EXPECTED；任何方向偏差
+     含「意外变绿」均 exit=1 交人工复核）。接力轮落地项透明呈报：每腿
+     console log tee 留存 $BK + 跑末 SHA256SUMS.reports 归档步骤系接力轮
+     增补，已复审保留。3 个静态锚定测试（tests/test_m3lite_gate3.py
+     run_sh_*）。归档：
+     `verification_v2/artifacts/m3lite_gate3_round7_task1clean_20261007/`
+     （README 定量表 + 26 项 sha256 冻结清单）。

@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -367,6 +368,12 @@ def materialize(case_dir: str, v3: dict, v3hex: dict, exp: dict, words: int,
         "compute_line_counts": {fn: len(ls) for fn, ls in sorted(v3hex["compute"].items())},
         "hbm_init_dir": HBM_INIT_DIR,
         "hbm_init_written": write_hbm_init,
+        # 任务 1（用户 2026-10-07）：冻结快照 sha256 锚——restore/check 据此
+        # 识别「快照被篡改」与「全局预载陈旧」（drive-3 污染运行教训）。
+        "hbm_preload": {"files": {
+            f"memory_init{i}.hex": hashlib.sha256(
+                open(os.path.join(snap, f"memory_init{i}.hex"), "rb").read()
+            ).hexdigest() for i in range(1, 9)}},
         "notes": [
             "TB 辅助信用屏障（ADR-060 §2.2，F5）：仿真限定，非 host 可执行协议",
             "期望乘积由本装配器从冻结 HBM 初值独立推导；v3 golden 仅作布局一致性校验",

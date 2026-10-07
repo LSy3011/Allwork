@@ -488,3 +488,88 @@
   （各 README 定量表 + SHA256SUMS）。**DS 写路反压耐受 = 开放发现**
   （根因调查或为论文素材）。门③步骤①-④至此全部执行完毕；集成仍属
   授权边界外。
+
+## 2026-10-07 门③ 步骤④ 复核收口：用户两处结论收紧 + 任务 1（可恢复实验版本）落地
+
+**用户复核指令（基于收口报告，未独立复查日志/代码，逐字要旨）**：
+- **收紧①**：「延迟→恢复→GREEN 本 TB 不可达」过强 → 「**当前测试配置及
+  已尝试注入方式下，尚未实现恢复**」；注入器/桥模型/DUT 根因未分清前
+  不得认定硬件本身无法恢复。
+- **收紧②**：超时负控证明的是「缺失完成条件时不会错误放行」；自然
+  waited=30 证明「某一路实际发生等待」；二者不替代所有屏障的延迟-恢复验证。
+- **drive-3 污染运行裁定**：继续保留为污染运行；依赖正确初态的结论只能
+  由恢复预载后的干净运行支撑。
+- **批准结论句（论文/进展总览可用，逐字）**：「M3-lite 已取得 TB 辅助的
+  端到端功能正确性及缺失完成条件时拒绝放行的证据；host 完成协议和反压
+  恢复仍是开放问题。」
+- **授权两有界任务**（不立即修 RTL、不同时开三条大主线）：任务 1（半天）
+  = 可恢复实验版本；任务 2（1-2 天）= 反压注入合法性核查与阻塞责任边界
+  （三问：协议保持/不一致、B 响应生成-保存-消费三态定位、解除后阻塞点）。
+- **F6 RTL 不授权直改**：先交具体修复提案（修改点/消缺机理/影响面/回归）。
+- `tb_assisted_experiment` 统一入口通道可随后增加，但禁入 V1 已验证包
+  通道、不得掩盖 host 同步未解决（随后项，本轮未实施）。
+
+**文档收紧落账**：ADR-060 §6.5/§6.7/errata ⑥ 按裁定改写 + 新增 errata ⑦
+（含三问与路线裁定全量）；round6 两份归档 README 系 sha256 冻结载体，
+保留旧措辞不改，以 errata ⑦ 为准。
+
+**任务 1 落地（消除人工预载步骤）**：
+- 新工具 `verification_v2/tools/hbm_preload.py`：check（只读三方比对：
+  现行全局 vs 冻结快照 vs expect 冻结哈希）/ restore（先验快照可信→
+  复制→逐文件复核，任一失败拒跑且不半恢复）。
+- `m3lite_gate3_case_gen.py`：expect 增 `hbm_preload.files` 8 文件 sha256
+  冻结锚。
+- `m3lite_gate3_compare.py`：`--tb-sha256` + 报告 `provenance`（sim 时/
+  比对时双指纹并列，差异记 WARN 不 RED——归档复比对合法前进）。
+- `m3lite_gate3_run.sh`：flock 整跑串行占用共享预载目录；每腿 VCS 前
+  restore 门（拒跑即跳过该腿 VCS+比对）；测试时 TB 指纹传入比对器；
+  [7/9] BP 腿期望按实测改写为持死形态（positive 信息性 + fatal_expected
+  正式判定双模式）；头注退役史/errata 编号同步。
+- 新 `m3lite_gate3_rerun_leg.sh`：单腿干净重跑唯一受支持入口
+  （flock→restore 门→TB 指纹差异明示→run_sim），替代裸 run_sim。
+- **实测**：`hbm_preload.py check` 对真实 `m3lite_g4_lc_w16_bp` 立即检出
+  8/8 STALE（drive-3 污染形态复现，工具抓得住该故障类）。
+- pytest **517→523**（+6：check 检出陈旧/restore 后转 CLEAN/快照-expect
+  不符拒跑且不写/快照不全拒跑/缺现行文件检出/TB 指纹三态）。
+- 待办：干净全量复跑（run.sh 五腿）——为 AW 前置武装 B 结论补干净运行
+  支撑（drive-3 裁定）；其后任务 2 开工。
+
+**任务 2 源码侦察收口（2026-10-07，纯只读核查，errata ⑧ 已回填）**：
+- 桥实例两副本系 `ifdef NDS_FPGA` 互斥分支、同名 `u_sram_brg` ⇒ 探针
+  路径 `GEN_SRAM[0].SMC0.u_sram.u_sram_brg.bresp_fifo_empty`。
+- 矩阵 ds2 口实例 `ds2_ctrl` + 子实例 `ds_wdata_bresp` ⇒ 探针路径
+  `dut.u_atcbmc300.ds2_ctrl.ds_wdata_bresp.{pending_bvalid,slv_bvalid,
+  bresp_cnt_empty}`。
+- **LSU 写主口身份落定**：SMCk 写经 us(3+k) 口，`us3_bready=
+  de_stb_bready[0]`（DS 引擎驱动）；us2 tie 1 与本链路无关 ⇒ 合法 B
+  反压注入点具体化 = force `de_stb_bready[0]`（master 源头，双方同
+  视图），「延迟→恢复」重做候选。
+- 探针补丁**有意暂缓**：干净复跑须先用现行 TB（de839cc8…222c）保
+  指纹链纯洁，其后才上 additive 探针验证 errata ⑧ 假说。
+- **阻塞**：glm-5.3 分类器连续 5 次超时（上 session 3 + 本 session 2，
+  沙箱与 dangerouslyDisableSandbox 两通道均堵）→ 干净复跑启动与
+  commit 均须 Bash，按破阻协议移交用户终端接力（命令见下条），
+  事后重读 /tmp/g4_task1_rerun.log 与五份 g3_report_*.json 核实。
+
+**接力轮回填（2026-10-07 深夜，ADR-060 errata ⑨）**：用户终端接力完成
+干净全量复跑（新 case 基名 m3lite_g4_task1_clean_20261007_codex；首次
+普通沙箱尝试撞许可证失败，该次不作证据已排除）。本会话逐标记核实：
+- 五腿 gen 全 exit=0；预载门 RESTORED+VERIFIED ×5（8/8）；trap 恢复
+  校验一致；五报告 provenance 双指纹一致（de839cc8…222c，TB 未动）。
+- 正向 GREEN（red=0 warn=4），**全部关键拍号与 round6 drive-1 逐拍
+  一致**（338/1021/959 waited=30/1184/1188/1191/1219/931>259）——
+  跨运行确定性复现成立。
+- 负控 NEGATIVE-CONTROL LIVE（red=6）；BP 腿 fatal_expected PASS +
+  信息性 red=21（**数据面全绿，drive-3 的 +4 假红消失** = 干净补证
+  落地）；两超时腿 PASS（TIMEOUT 标记 + 零 DUMP）。
+- ⚠ BP 腿不得描述为「反压恢复通过」（缺失完成条件不误放行的证据；
+  延迟-恢复仍未实现）。
+- **新发现并修补执行漏洞**：①gen 目录已存在失败后旧产物会被沿用
+  （原纯存在性检查放行）→ 五腿 gen 非零即 fail-fast；②脚本 exit=0
+  不代表各腿通过 → 末行五腿期望形态汇总退出码（任何方向偏差含
+  意外变绿均 exit=1 交人工复核）。接力轮增补（每腿 console log +
+  SHA256SUMS.reports 归档步）已复审保留。+3 静态锚定测试。
+- 归档 `verification_v2/artifacts/m3lite_gate3_round7_task1clean_20261007/`
+  （README + 26 项 sha256 冻结）。
+- pytest 523→**526**。待办：commit 任务 1 全集 → BPDBG 探针验证
+  errata ⑧ 假说（任务 2 收口）。
