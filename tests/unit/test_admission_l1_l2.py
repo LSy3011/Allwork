@@ -430,17 +430,18 @@ class TestYamlCorpusCompat(unittest.TestCase):
     def test_yaml_corpus_zero_conflict_and_single_flag(self):
         paths = sorted(OPS_DIR.glob("*.yaml"))
         # scale_sum.yaml 自 2026-09-26 预检期已在语料（当时无 flag），步⑤ 仅补 flag+length；
-        # 2026-10-12 步② 新增 horner_v3u.yaml（语料 38→39）。
-        self.assertEqual(len(paths), 39,
+        # 2026-10-12 步② 新增 horner_v3u.yaml（语料 38→39）；
+        # 2026-10-12 addcmul 步② 新增 addcmulu.yaml（语料 39→40）。
+        self.assertEqual(len(paths), 40,
                          f"ops/*.yaml 语料规模漂移（键并集取证的基数前提）: {len(paths)}")
         flagged = []
         for p in paths:
             op = ConfigurableOperator(str(p))   # 任何一份构造失败即 RED
             if op.experimental_unroll:
                 flagged.append(op.name)
-        self.assertEqual(flagged, ["add", "add_v1", "horner_v3u", "scale_sum"],
+        self.assertEqual(flagged, ["add", "add_v1", "addcmulu", "horner_v3u", "scale_sum"],
                          f"声明 experimental_unroll 的算子应恰为 "
-                         f"[add, add_v1, horner_v3u, scale_sum]: {flagged}")
+                         f"[add, add_v1, addcmulu, horner_v3u, scale_sum]: {flagged}")
 
 
 if __name__ == "__main__":

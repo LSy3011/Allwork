@@ -1,0 +1,33 @@
+name: "addcmulu"
+# 第二复杂结构案例（2026-10-12 用户令：addcmul 五步序·步②）：y = x + t1*t2*value
+# ——2 乘 + 1 加 3 级链（M→M→A），II=3，fpmul 双有效槽（U9 求解器实证），
+#   三流式输入（x/t1/t2）+ 标量参数 value。
+# 与 addcmul.yaml 的关系 = horner_v3u 之于 horner_v3：等价目的新配置
+#（addcmul.yaml 原样保留以守护 census 归档快照可复现性），两处配置面适配：
+#  ① 公式文本对齐：addcmul.yaml 文本 "x + value*t1*t2" 的有序 AST 结合序
+#     ((value·t1)·t2) 与编译器实际消费序不同——DFG 由 SymPy 树生成，
+#     Mul.args 规范序 (t1,t2,value) 经 lower_mul 左折叠实算 ((t1·t2)·value)，
+#     fp32 乘结合不安全 ⇒ 名义语义与编译语义分歧（步①静态确认首发实证，
+#     docs/addcmul_static_confirmation_20261012.md §1）。本配置将文本序对齐
+#     到折叠序：sympify 后同一 SymPy 树、共享同一 DFG，数学函数不变。
+#  ② test_data 安全域：遗留域 x[-1,1]/t1[-2,2]/t2[0,5] 跨 0 被静态域闸
+#     SUBNORMAL_BAND 响拒（步① §4 复核）；取预检通过的 cand-B 含负域
+#    （x/t2 负、t1 正，输出全负——注意：输出区间跨 0 的混合符号域同样被
+#     域闸保守拒绝，单符号输出是该闸下的必然形态）。
+# 准入标记与 length 约定同 horner_v3u（§B.1 experimental_unroll；各张量
+# offset=0 独占其 bank → length 取满 bank_depth=256；value 为 stride=0
+# 驻留标量，消耗 1 word）。
+formula: "x + t1 * t2 * value"
+experimental_unroll: true
+tensors:
+  x:         { bank: 0, role: "input",    offset: 0, length: 256 }
+  t1:        { bank: 1, role: "input",    offset: 0, length: 256 }
+  t2:        { bank: 2, role: "input",    offset: 0, length: 256 }
+  value:     { bank: 3, role: "param",    offset: 0, length: 256 } # 驻留标量（stride=0，消耗 1 word）
+  y:         { bank: 4, role: "output",   offset: 0, length: 256 }
+  constants: { bank: 7, role: "constant", offset: 0, length: 256 }
+test_data:
+  x:     { range: [-1.75, -0.25] }
+  t1:    { range: [0.5, 2.5] }
+  t2:    { range: [-3.0, -0.75] }
+  value: [0.5]

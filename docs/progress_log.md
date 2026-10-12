@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **addcmul 步②：小规模计算验证通过（II=3 双槽首个 VCS 证据）+ 发射层放置漂移实证** | n=4/8/60 三规模 V1 链全 GREEN+published，逐拍 18/18 队列 ok、三区全绿、写账零非法；发射链 span=3（L_q=3(m+3)+2 五档成立），干跑实测 n=156 单段恰 128 行顶格（构造预测 152 保守已修正）；**方法学实证：放置漂移可达真实发射产物**（n=4 同配置两进程两合法变体 1/8；近壁 n=156 跨 5 进程逐字节稳定）——步①开放问题关闭，「跨进程确定性」口径收缩；生产代码零改动 | docs/addcmul_step2_smallscale_20261012.md；releases/addcmulu_acu_step2_n{4,8,60}_20261012；VARIANCE.md 当日补遗 |
 | 2026-10-12 | **addcmul 第二复杂案例·步①：静态确认通过（三因子乘积结合序分歧首发实证 + U9 关闭）** | 遗留文本 ((value·t1)·t2) vs DFG ((t1·t2)·value) 结合序分歧正面鉴别（fp32 乘结合不安全；horner 全二元乘无此类）→ 处置=配置级公式文本对齐（x+t1*t2*value 三层签名互等，零代码零特判）；II=3 复现、fpmul 双槽 U9【推断】→【实测】、容量构造预测 n_max≈152（未校准禁准入）；遗留域 SUBNORMAL_BAND ×6、候选安全域双过；求解器放置漂移登记（II 稳定/放置随进程漂移，校准锚=发射产物实测）；生产代码零改动 | docs/addcmul_static_confirmation_20261012.md；artifacts/addcmul_static_20261012/（gitignored，sha256 锚） |
 | 2026-10-12 | **horner_v3 步④：统一 LCS 集成通过（经一次公式化通用规则修复，按用户立法序）** | 首跑暴露 C-H 独立参考 scale_sum 硬编码（RED 留档）→ 6 项鉴别性测试 → 公式驱动修复（零名称特判，commit bd2ed7b）→ n=8/n=72 统一链全 GREEN+published；scale_sum/add 回归全 GREEN；pytest 577；提交态 n=8 复验闭合（dirty=false、包内报告一致） | docs/horner_v3_step4_unified_lcs_20261012.md；releases/horner_v3u_hv3u_step4fix_n8_committed_20261012、…_n72_20261012_codex_r2 |
 | 2026-10-12 | **horner_v3 步③：自动分段验证通过（容量边界 VCS 校准 + 尾段/地址/中间状态 + 响拒两点）** | 单段 n_max=68 经 VCS 校准（七队列恰 128 行 GREEN）；n=72 分段 17+1 全 GREEN，尾段写 ADDR=17 经 payload+hex 位级双证、三路 x 流滞后 0/2/3 结构解释死读绕回、段间 C1/C2/C3 全过；n=72 stage_0 与 n=68 单段 18/18 hex 逐字节一致；n=70/n=1028 config_check 响亮早拒；生产代码零改动 | docs/horner_v3_step3_segmentation_20261012.md；releases/horner_v3u_hv3u_step3_n{68,72}_20261012 |
@@ -1147,3 +1148,30 @@
   artifacts/addcmul_static_20261012/VARIANCE.md。附带修复：两静态探针
   `d.path`→`.node_path` 潜在崩溃字段（horner 探针未重跑，归档不动）。
 - 生产代码零改动。详见 docs/addcmul_static_confirmation_20261012.md。
+
+## 2026-10-12｜addcmul 步②：小规模计算验证通过 + 发射层放置漂移实证
+
+- **步②通过**：addcmulu（步①对齐公式 `x + t1*t2*value` + cand-B 含负安全域 +
+  value=0.5 恰可表）n=4/8/60 三规模 V1 链全 GREEN+published；逐拍仲裁
+  18/18 队列全 ok（issue 期望==实测、fetch=期望+1 残尾恰 1）、三区全 GREEN、
+  写账零非法（8/16/120 写、wbe 全 0xffff、smc_seen 0..7）。一轮通过，
+  零生产代码/通用规则/协议常数改动（配置-only + 守卫名单 39→40）。
+- **容量对账修正**：真实发射链 span=3（L_q=3·(m+3)+2 在 m=1/2/15/38/39 五档
+  逐字节成立；束缚队列 rtovr-14/vin0）——步①构造预测（span=4 → n_max=152）
+  保守，干跑实测 n=152→125 行、**n=156→128 行恰顶格单段**（未分段）；
+  构造式 n_max 修正为 156（仍未校准，步③ VCS 顶格 + n=160 上探）。
+- **方法学实证（步①开放问题关闭）**：放置漂移**可达真实发射产物**——n=4
+  同配置 08:11 干跑进程发射变体 B（17 队列 rtovr-37/ur-w2，ur-r3=17 行）、
+  08:21 VCS 进程发射变体 A（18 队列 rtovr-35/ur-r1/ur-w0，ur-r3=5 行）；
+  6 个定量探针进程 6/6=变体 A（sha256 29388453…）；漂移率观察 1/8。
+  **近壁稳定**：n=156 跨 5 进程全 128 行、sha256 de7f00bc… 一致。
+  口径收缩：horner 步③ 18/18 跨进程 hex 一致仍为实测事实，但「真实发射链
+  跨进程确定性」不得再作全称陈述；当日口头「规模间路由差异」归因撤回
+  （正解=进程漂移）。注册表 v3 论证新增必答项：冻结公式与放置选择的关系。
+- **provenance**：三 run_report 内嵌 op_yaml_sha256=a66aa9da…8239 == 本提交
+  addcmulu.yaml 逐字节；TB 3324a33b…f7c5 / simv 72c2c031…1c96 / 注册表 v2
+  973861aa… 三锚互符；运行时 git_head=f64a787 dirty=true（脏内容恰为本步
+  两文件）。
+- 详见 docs/addcmul_step2_smallscale_20261012.md；VARIANCE.md 当日补遗
+  （gitignored）；探针 case 目录取证后已清理，规范副本存
+  build/v1_runs/addcmulu/acu_varprobe_*。
