@@ -2,7 +2,7 @@
 adr_id: ADR-061
 title: scale_sum 统一入口：LOAD→COMPUTE→STORE 自动完整链路（公式链 COMPUTE + 布局驱动 LOAD/STORE 自动生成 + 程序 manifest）
 decided: 2026-10-10
-last_verified: 2026-10-10
+last_verified: 2026-10-12
 still_holds: proposed
 hco_review: pending
 builds_on: ADR-004, ADR-055, ADR-056, ADR-057, ADR-058, ADR-059, ADR-060
@@ -123,7 +123,7 @@ STATIC_ADMISSION_REJECTED 类诊断，不发布。
 ## 4. 验收（2026-10-10 全项执行完毕）
 
 **④ ✅**：n∈{16, 60, 240} 单 COMPUTE 段 → 3 段程序 VCS 全 GREEN +
-D6 全检查 GREEN + manifest 校验 GREEN + 篡改测试 RED（33 项单测）。
+D6 全检查 GREEN + manifest 校验 GREEN + 篡改测试 RED（36 项单测）。
 关键拍号（LOAD 覆盖 / STORE 覆盖 / C-L 首读>release>末写）：
 n=16：16/16、4/4、3496>442>367；n=60：60/60、15/15、9540>480>411；
 n=240：240/240、60/60、34726>1096>1023。run_id=adr061_accept_n{16,60,240}，
@@ -167,12 +167,24 @@ multi_stage），确认 ADR-057 行为不漂；配置注释陈旧系 ADR-057 既
   两条均 RED，已有专测钉死）；
   ② 末写 == 首读 → RED（不降为 limitation——无 UR 存储端口同拍读写
   语义或更精采样证据前，同拍不可宣称安全）；
-  ③ 首读 ≤ release → RED（含同拍，从严——同拍采样分辨率不足以证明
-  读在屏障放行之后）；
-  ④ release > BEGIN₁ → RED（屏障未在段间生效）；
-  ⑤ release == BEGIN₁ → 不单独致 RED 但落 limitation（TB 段间零延迟
-  顺序推进的构造性同拍，与 ADR-057 errata 空窗同源），**且不据此声称
-  独立屏障证据**——次序证据由 ①③ 的严格大于独立承载。
+  ③ **首读 ≤ max(前置 release 集) → RED**（含同拍，从严——同拍采样
+  分辨率不足以证明读在屏障放行之后）。前置集按段匹配（2026-10-12 用户
+  有界核查裁定）：release r 归于首个满足 begins[k] ≥ r 的段入口 k；
+  首读所在段 j_fr 的前置集 P={r : r ≤ begins[j_fr]}；单 release 退化
+  为原规则；多 release 同为首读前置时须晚于其最大值——原 min 实现在
+  「首读与后段入口 release 同拍」形态下有洞（同拍即违例却放行），
+  已由合成测试双向钉死（同拍 RED / 严格大于 GREEN）；release 不归于
+  任何段入口（晚于末段 BEGIN）→ RED；
+  ④ 无 release ≤ BEGIN₁ → RED（屏障未在 LOAD→COMPUTE 段间生效；
+  与原「release > BEGIN₁ → RED」对单 release 等价，对多 release 更准）；
+  ⑤ release == 其归属段 BEGIN → 不单独致 RED 但逐条落 limitation
+  （TB 段间零延迟顺序推进的构造性同拍，与 ADR-057 errata 空窗同源），
+  **且不据此声称独立屏障证据**——次序证据由 ①③ 的严格大于独立承载。
+  **已测案例核查（2026-10-12）**：四次验收运行 g3_credit release 实测
+  均为每段过渡一次（n=16 [442,3582]、n=60 [480,9648]、n=240
+  [1096,34924]、n=244 [1096,34934,36430]，恰为各自 begins[1..]）；
+  首读均落在 stage_1 窗内，前置集恰 1 元（单 release 分支成立），
+  新规则下原 GREEN 判决逐拍不变（首读 > max(P) 余量三个数量级）。
   实测全部严格大于、余量三个数量级：n=16 首读3496 > release442 > 末写367；
   n=60 9540>480>411；n=240 34726>1096>1023；n=244 34726>1096>1027。
 - **LOAD/STORE 段 ack↔末写关系仅观察**（B5c/ADR-058 errata 既知：LSU 批完成
@@ -215,9 +227,10 @@ multi_stage），确认 ADR-057 行为不漂；配置注释陈旧系 ADR-057 既
   three_zone/arbitrate 四段，其余（准入/独立参考/期望先行/原生比对/
   归档/发布门禁）原样继承；vcs 段平移任务 1 纪律（flock + 全局 HBM
   备份 sha256 锚 + hbm_preload.restore 双锚门 + 无条件恢复复核）。
-- 测试：tests/unit/test_unified_lcs.py 33 项（chunk_descs×4/布局守卫×10/
-  manifest 检查篡改×5/程序仲裁合成日志红绿×10/比对篡改×4——对抗自验，
-  含 C-L 同拍降级边界双向钉死与迟到 LOAD 写不可藏匿专测）。
+- 测试：tests/unit/test_unified_lcs.py 36 项（chunk_descs×4/布局守卫×10/
+  manifest 检查篡改×5/程序仲裁合成日志红绿×13/比对篡改×4——对抗自验，
+  含 C-L 同拍降级边界双向钉死、多 release 段匹配最大值规则（2026-10-12
+  有界核查）与迟到 LOAD 写不可藏匿专测）。
 - **验收④⑤结果全录 §4**（n∈{16,60,240} 单段 + n=244 两段全 GREEN
   published；n=480 既有链不回退；add/scale_sum 回归全 GREEN）。
   验收配置归档 verification_v2/artifacts/run_configs/adr061_*.yaml。

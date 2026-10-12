@@ -656,8 +656,12 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
         并保持 C1「末写 < ack」硬断言（ADR-057 实证成立域）。
       * STORE 段：FETCH/ISSUE 限于 {24,25}；**UR 写恒空**；HBM 写 ⊆ 声明窗且
         覆盖 == 声明行数；HBM 写在 STORE 窗之外恒空。
-      * C-L：COMPUTE 窗内对 LOAD 服务 bank 的首读 > LOAD 末写，且 > 信用屏障
-        release（release < 次段 BEGIN 结构性成立，此处正向核验）。
+      * C-L：COMPUTE 窗内对 LOAD 服务 bank 的首读 > LOAD 末写，且 > 其**按段
+        匹配的全部前置信用屏障 release 的最大值**（2026-10-12 用户有界核查
+        裁定：release r 归于首个满足 begins[k] >= r 的段入口 k；首读所在段
+        j_fr 的前置集 P={r : r <= begins[j_fr]}；单 release 时退化为原规则；
+        多 release 同为首读前置时须晚于其最大值——min 规则在「首读与后段
+        入口 release 同拍」形态下有洞，已钉死回归测试）。
       * C-W：三类屏障 release 必须各 ≥1（WBARRIER/S4 恰 1）；S4 release
         > 末笔 HBM 写（排干正向证据）；WBARRIER release 落于末 COMPUTE 段窗。
     """
@@ -853,13 +857,24 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
     per_stage.append(rep)
 
     # ---- C-L：COMPUTE 首读 vs LOAD 末写/信用屏障 release ----
+    # release 匹配规则（2026-10-12 用户有界核查裁定，不重开模型设计）：
+    #   release r 归于首个满足 begins[k] >= r 的段入口 k∈[1,S)；
+    #   首读所在段 j_fr 的前置集 P = {r : r <= begins[j_fr]}（begins 严格递增
+    #   已检，等价于「归于 stage_1..j_fr 的全部 release」）；
+    #   单 release：退化为原规则；多 release 同为首读前置：须晚于其最大值
+    #   （含同拍从严——同拍采样分辨率不足以证明读在放行之后）。
     cl: Dict[str, Any] = {}
     comp_reads = [(c, b, a) for (c, s, _p, b, a) in read_rows
                   if s == 0 and b in load_banks and c >= begins[1]]
     first_read = min((c for (c, _b, _a) in comp_reads), default=None)
+    g3r = sorted(releases["g3_credit"])
     cl["first_compute_read"] = first_read
     cl["last_load_write"] = last_ld_w
-    cl["credit_release_min"] = min(releases["g3_credit"], default=None)
+    cl["credit_release_min"] = min(g3r, default=None)
+    cl["credit_releases_all"] = g3r
+    cl["credit_release_stage_map"] = {
+        str(r): next((k for k in range(1, S) if begins[k] >= r), None)
+        for r in g3r}
     if first_read is None:
         bad.append("(C-L) COMPUTE 窗内对 LOAD 服务 bank 无 UR 读——COMPUTE "
                    "未消费 LOAD 数据（读探针断裂或程序断裂）")
@@ -867,21 +882,36 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
         if last_ld_w is not None and first_read <= last_ld_w:
             bad.append(f"(C-L) COMPUTE 首读 @{first_read} 不晚于 LOAD 末写"
                        f" @{last_ld_w}——读先于写（数据未落位即消费）")
-        if releases["g3_credit"] \
-                and first_read <= min(releases["g3_credit"]):
-            bad.append(f"(C-L) COMPUTE 首读 @{first_read} 不晚于信用屏障 "
-                       f"release @{min(releases['g3_credit'])}")
-    if releases["g3_credit"]:
-        rel0 = min(releases["g3_credit"])
-        if rel0 > begins[1]:
-            bad.append(f"(C-L) 信用屏障 release @{rel0} 晚于 stage_1 BEGIN "
-                       f"@{begins[1]}——屏障未在段间生效")
-        elif rel0 == begins[1]:
-            limits.append(
-                f"(C-L) 信用屏障 release 与 stage_1 BEGIN 同拍 @{rel0}——现役 TB "
-                f"段间零延迟顺序推进的构造性产物（同 ADR-057 errata 空窗口径）；"
-                f"LOAD→COMPUTE 次序由「首读 > release」与「首读 > LOAD 末写」硬断言"
-                f"承载，本项不单独致 RED，也不据此声称独立屏障证据")
+        j_fr = max(k for k in range(1, S) if begins[k] <= first_read)
+        pre = [r for r in g3r if r <= begins[j_fr]]
+        cl["first_read_stage"] = j_fr
+        cl["credit_release_preconditions"] = pre
+        if g3r and not pre:
+            bad.append(f"(C-L) 首读所在 stage_{j_fr} 入口之前无信用屏障 "
+                       f"release——首读 @{first_read} 缺屏障前置")
+        elif pre and first_read <= max(pre):
+            bad.append(f"(C-L) COMPUTE 首读 @{first_read} 不晚于其前置信用屏障 "
+                       f"release 最大值 @{max(pre)}（按段匹配前置集 {pre}；"
+                       f"含同拍从严——同拍采样分辨率不足以证明读在放行之后）")
+    if g3r:
+        pre1 = [r for r in g3r if r <= begins[1]]
+        if not pre1:
+            bad.append(f"(C-L) 信用屏障 release（最早 @{g3r[0]}）未在 stage_1 "
+                       f"BEGIN @{begins[1]} 之前或同拍生效——屏障未在 "
+                       f"LOAD→COMPUTE 段间生效")
+        for r in g3r:
+            k_r = next((k for k in range(1, S) if begins[k] >= r), None)
+            if k_r is None:
+                bad.append(f"(C-L) 信用屏障 release @{r} 晚于末段 BEGIN "
+                           f"@{begins[S - 1]}——不归于任何段入口，"
+                           f"屏障语义无法匹配")
+            elif r == begins[k_r]:
+                limits.append(
+                    f"(C-L) 信用屏障 release 与 stage_{k_r} BEGIN 同拍 @{r}"
+                    f"——现役 TB 段间零延迟顺序推进的构造性产物（同 ADR-057 "
+                    f"errata 空窗口径）；次序由「首读 > 前置 release 最大值」与"
+                    f"「首读 > LOAD 末写」硬断言承载，本项不单独致 RED，"
+                    f"也不据此声称独立屏障证据")
 
     # ---- C2 段外残留写（UR） ----
     pre = [r for r in write_rows if r[0] < begins[0]]

@@ -622,6 +622,52 @@ class ArbitrateProgramTest(unittest.TestCase):
         self.assertTrue(any("(C-L) COMPUTE 首读" in v and "信用屏障" in v
                             for v in rep["violations"]), msg=rep["violations"])
 
+    def test_multi_release_first_read_at_later_boundary_red(self):
+        # 2026-10-12 用户有界核查钉死：多 release 按段匹配——首读落在后段
+        # 入口且与该入口 release 同拍时，min 规则（仅查最早 release）会漏放；
+        # 须晚于前置集最大值（含同拍从严）。本形态在旧实现下 GREEN、新实现 RED。
+        sim = (self.root / "sim.log").read_text()
+        sim = sim.replace(
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}",
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}\n"
+            f"[GATE3][BARRIER] release @probe_cycle {C_STORE}", 1)
+        (self.root / "sim.log").write_text(sim + "\n")
+        (self.root / "ur_read_trace.log").write_text(
+            f"# cycle smc port bank addr\n{C_STORE} 0 0 0 0\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(C-L) COMPUTE 首读" in v and "最大值" in v
+                            for v in rep["violations"]), msg=rep["violations"])
+
+    def test_multi_release_first_read_after_max_green(self):
+        # 同双 release 形态，首读严格晚于前置集最大值 → GREEN；
+        # release==BEGIN 同拍仅落 limitation（按归属段入口逐条记录）
+        sim = (self.root / "sim.log").read_text()
+        sim = sim.replace(
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}",
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}\n"
+            f"[GATE3][BARRIER] release @probe_cycle {C_STORE}", 1)
+        (self.root / "sim.log").write_text(sim + "\n")
+        (self.root / "ur_read_trace.log").write_text(
+            f"# cycle smc port bank addr\n{C_STORE + 5} 0 0 0 0\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "GREEN", msg=rep["violations"])
+        self.assertTrue(any("(C-L)" in lim and "stage_2" in lim
+                            for lim in rep["limitations"]), msg=rep["limitations"])
+
+    def test_release_beyond_last_begin_red(self):
+        # release 晚于末段 BEGIN：不归于任何段入口，匹配失败 → RED
+        sim = (self.root / "sim.log").read_text()
+        sim = sim.replace(
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}",
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}\n"
+            f"[GATE3][BARRIER] release @probe_cycle {C_STORE + 40}", 1)
+        (self.root / "sim.log").write_text(sim + "\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(C-L)" in v and "不归于任何段入口" in v
+                            for v in rep["violations"]), msg=rep["violations"])
+
     def test_late_load_write_cannot_hide_red(self):
         # 用户裁定钉死：迟到 LOAD 写（落在 STORE 窗）必须 RED——
         # 由 LOAD 覆盖缺失 + STORE 段 UR 写恒空两条独立捕获
