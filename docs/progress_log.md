@@ -1012,3 +1012,29 @@
 - 上板实验包状态单列：`/home/juno1023/m3lite_w16_fpga_20261010.tar.gz`
   （sha256=3d59949f…fd73）+ `artifacts/m3lite_w16_fpga_pkg_20261010/`，
   不能由统一链验收推定已完成。
+
+## 2026-10-12｜收口复核三点裁定落地：C-L 有界核查 + D5 归档关闭 + E1–E5 对账
+
+- **C-L 多 release 有界核查（裁定①）**：用户指出 `min(releases)` 在多
+  release 同为首读前置时漏放。正面核验四次验收运行：g3_credit 实测
+  **每段过渡各释放一次**（n=16 [442,3582]、n=60 [480,9648]、n=240
+  [1096,34924]、n=244 [1096,34934,36430]）；首读均在 stage_1 窗内、
+  前置集恰 1 元——单 release 分支成立，原 GREEN 判决有效。漏洞形态
+  仍然真实存在（首读与后段入口 release 同拍时 min 规则放行）→
+  仲裁器改为按段匹配（release 归于首个 begins[k]≥r 的段入口；前置集
+  P={r≤begins[j_fr]}，首读须 > max(P)，含同拍从严；release 越末段
+  BEGIN 不属任何入口 → RED），新增 3 项合成钉死测试（36+15 全过）。
+  commit `e76592b`。
+- **D5 归档缺口关闭（裁定②四步全执行）**：①沙箱原始 manifest/g3_expect
+  已保存至 `artifacts/adr061_manifest_recovery_20261012/`（manifest
+  sha256 对锚四次全 MATCH；g3_expect 与 tb_plusargs 11 字段互证
+  CONSISTENT；旧 run 目录/发布包零改动）；②copy2+拷后哈希复核补丁落地
+  （不符即 StageFailure）；③四规模复跑 adr061_accept2_n{16,60,240,244}
+  全 GREEN+published，run 包自包含（两文件入 evidence 且计入 run 级
+  SHA256SUMS），拍号与首轮逐拍一致，新 C-L 规则下判决不变；④单独提交，
+  旧证据未覆盖。
+- **E1–E5 文档对账（裁定③）**：F6 文档新增 §16 证据对账矩阵（实现/
+  用例/结果/限制逐项照录已冻结归档，不重复仿真）。**不构成全闭合宣布**；
+  恢复能力不扩大到通用软恢复或上板。commit `3657c59`。
+- 里程碑性质更新：ADR-061 由「功能验收通过」升为「功能验收通过 +
+  交付证据完整（accept2 起自包含）」。

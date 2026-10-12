@@ -200,13 +200,17 @@ multi_stage），确认 ADR-057 行为不漂；配置注释陈旧系 ADR-057 既
   LIRPacker 重算描述符再发射，与 case 指令文件逐字节相等——语义篡改（重算
   哈希后改指令）与字节篡改双形态均被捕获（替代 D5 原拟的逐 INST 解码器，
   等价且更严：发射器即解码关系的正向构造）。
-- **已知证据打包缺口（2026-10-10 落账，不影响本轮验收判定）**：
-  program_manifest.json / g3_expect.json 现仅存于沙箱 case 目录，
-  run 证据以 run_report provenance 中的 sha256 锚定（D5「随 run 归档计入
-  SHA256SUMS」的文件级形态未完全达成）。拷入 evidence 的补丁已拟定
-  （package 段末尾 shutil.copy2 ×2），因分类器故障未能完成复测，
-  **本次提交未包含该补丁**——保持提交树与四轮验收实际运行代码逐字节一致；
-  补丁连同一轮复跑验证列为后续任务。
+- ~~**已知证据打包缺口（2026-10-10 落账，不影响本轮验收判定）**~~
+  **已关闭（2026-10-12，用户裁定四步）**：①沙箱四次运行原始
+  manifest/g3_expect 已保存至独立归档
+  `artifacts/adr061_manifest_recovery_20261012/`——manifest sha256 与
+  run_report provenance 锚四次全 MATCH，g3_expect 与证据内
+  tb_plusargs.txt 反解 11 字段逐项互证 CONSISTENT（旧 run 目录与发布包
+  未做任何修改）；②copy2 补丁+拷后哈希复核（不符即 StageFailure 响亮
+  失败）已落地；③四规模复跑 adr061_accept2_n{16,60,240,244} 全
+  GREEN+published，run 包自包含（两文件入 evidence 且计入 run 级
+  SHA256SUMS），拍号与首轮逐拍一致（确定性复现），且在新 C-L 段匹配
+  最大值规则下判决不变；④本修复单独提交，旧证据未覆盖。
 
 ## 6. 实现记录（2026-10-10）
 

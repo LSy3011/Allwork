@@ -82,6 +82,16 @@ class UnifiedOrchestrator(Orchestrator):
                 logs={"program_manifest": str(case / "program_manifest.json")})
         sctx.case_root = case
         sctx.case_rel = f"{self.cfg.suite}/{sctx.case_name}/smc_0"
+        # D5：程序 manifest 与屏障/双锚 expect 为一等证据——拷入 evidence
+        # （run 级 SHA256SUMS 自动覆盖），不留沙箱唯一副本；拷贝后立即
+        # 逐字节哈希复核，不符即响亮失败（不静默降级）
+        for name in ("program_manifest.json", "g3_expect.json"):
+            dst = sctx.ev(f"n{sctx.n}_{name}")
+            shutil.copy2(case / name, dst)
+            if sha256_file(dst) != sha256_file(case / name):
+                raise StageFailure(
+                    ["PACKAGE_OR_EMISSION_ERROR"],
+                    f"证据拷贝复核不符: {name}——run 包不自包含，人工核查")
         self.provenance["unified_lcs"] = {
             "entry": "run_unified_lcs_verify.py (ADR-061)",
             "sync_model": "tb_assisted",
