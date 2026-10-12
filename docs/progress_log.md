@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **horner_v3 步④：统一 LCS 集成通过（经一次公式化通用规则修复，按用户立法序）** | 首跑暴露 C-H 独立参考 scale_sum 硬编码（RED 留档）→ 6 项鉴别性测试 → 公式驱动修复（零名称特判，commit bd2ed7b）→ n=8/n=72 统一链全 GREEN+published；scale_sum/add 回归全 GREEN；pytest 577；提交态 n=8 复验闭合（dirty=false、包内报告一致） | docs/horner_v3_step4_unified_lcs_20261012.md；releases/horner_v3u_hv3u_step4fix_n8_committed_20261012、…_n72_20261012_codex_r2 |
 | 2026-10-12 | **horner_v3 步③：自动分段验证通过（容量边界 VCS 校准 + 尾段/地址/中间状态 + 响拒两点）** | 单段 n_max=68 经 VCS 校准（七队列恰 128 行 GREEN）；n=72 分段 17+1 全 GREEN，尾段写 ADDR=17 经 payload+hex 位级双证、三路 x 流滞后 0/2/3 结构解释死读绕回、段间 C1/C2/C3 全过；n=72 stage_0 与 n=68 单段 18/18 hex 逐字节一致；n=70/n=1028 config_check 响亮早拒；生产代码零改动 | docs/horner_v3_step3_segmentation_20261012.md；releases/horner_v3u_hv3u_step3_n{68,72}_20261012 |
 | 2026-10-12 | **复杂结构首证 horner_v3 步①②：静态确认 + 小规模 VCS 全 GREEN** | II=6 Horner 6 级链（fpadd/fpmul 各 3 有效槽，计算队列多槽首证）经等价目的新配置 horner_v3u 过通用准入，n=4/8/60 三规模 V1 链 GREEN+published、逐拍 18/18 队列 ok、三区全绿；有序浮点语义三层机器比对 MATCH；生产代码零改动；注册表 v3 冻结留裁定 | docs/horner_v3_static_confirmation_20261012.md；docs/horner_v3_step2_smallscale_20261012.md；releases/horner_v3u_hv3u_step2_n{4,8,60}_20261012 |
 | 2026-10-10 | **ADR-061：scale_sum 统一 LOAD→COMPUTE→STORE 链路验收（五项令 #4）** | 公式链 COMPUTE + 布局驱动自动 LOAD/STORE 统一入口串通：n16/60/240 三段、n244 四段全 GREEN+published；证据限已测布局/单 SMC/TB 辅助同步/RTL 0x00042200，不支持上板或任意公式 | ADR-061 §4/§5；`releases/scale_sum_adr061_accept_n{16,60,240,244}` |
@@ -1089,3 +1090,32 @@
 - **响亮拒绝**：n=70（不整除 4）与 n=1028（257>256 行）均 RED@config_check、
   零产物发布、原因明确；容量界夹在 256/257 行之间。
 - 生产代码零改动。详见 docs/horner_v3_step3_segmentation_20261012.md。
+
+## 2026-10-12｜horner_v3 步④：统一 LCS 集成通过
+
+- **失败形态（留档）**：首跑 `hv3u_step4_n8_20261012` RED@three_zone
+  「(C-H) 布局缺张量 'other'」——ADR-061 C-H 独立参考实现硬编码
+  scale_sum 形态（直取 x/other/alpha 内联重算），且 manifest `op` 硬编码
+  `"scale_sum"`（provenance 错标）。两条均属实现窄于 D6 通用设计表述。
+- **按用户立法序修复**（禁名称特判）：先加 6 项鉴别性测试（36→42，
+  horner 合成 case 双向钉死：GREEN 必绿；参数区互换/参数形态破坏/缺
+  formula/未声明叶/装载未消费输入五类各自必 RED）→ 修复 = manifest
+  自包含 `formula` 字段 + C-H 公式驱动（有序 AST fp32 逐 op 求值，与 V1
+  independent_reference 同 machinery；输入按 role 重建，param stride0
+  驻留形态正面取证）+ runner 传真实 op/formula。commit `bd2ed7b`
+  （5 文件 380+/31-，含 ADR-061 §7 errata 三条）。
+- **修复后实测全 GREEN+published**：n=8（3 段程序，LOAD 12/12 行、
+  C-L 首读8408>release546>末写487、C-H 三方一致）；n=72（4 段程序
+  LOAD+COMPUTE×2+STORE，LOAD 108/108、两 COMPUTE 段末写<ack、STORE
+  18/18、6 项同拍 limitation 沿用 errata 口径登记）。
+- **回归**：scale_sum 统一链 n=60 GREEN+published（新公式路径判决不变）；
+  add 冻结链 n=4/8/60 GREEN+published；pytest 577 passed。
+- **事件留档**：发布冲突（同 run_id 二次发布被门禁阻断，GREEN run 未发布，
+  既有 release 未删未覆盖=按设计）；VCS 许可证失败 RED 一次
+  （`_codex` 留档，沙箱外获准通道复跑 `_codex_r2` GREEN）。
+- **provenance 口径（用户裁定）**：脏树运行未存工具源码哈希——如实登记
+  「无法从运行自证完整恒等」，辅助链=mtime 链+git status 恰 5 文件+commit
+  恰含此 5 文件；**闭合数据点=提交态 n=8 复验**（bd2ed7b、dirty=false、
+  TB 3324a33b…、RTL 0x00042200、GREEN+published、包内报告逐字节一致）。
+  n=72 条件复跑条款列入步⑤跟踪。
+- 详见 docs/horner_v3_step4_unified_lcs_20261012.md。
