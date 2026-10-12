@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-10 | **ADR-061：scale_sum 统一 LOAD→COMPUTE→STORE 链路验收（五项令 #4）** | 公式链 COMPUTE + 布局驱动自动 LOAD/STORE 统一入口串通：n16/60/240 三段、n244 四段全 GREEN+published；证据限已测布局/单 SMC/TB 辅助同步/RTL 0x00042200，不支持上板或任意公式 | ADR-061 §4/§5；`releases/scale_sum_adr061_accept_n{16,60,240,244}` |
 | 2026-10-10 | **F6 阶段二：错误检出/通知/FAILED 锁定定向验证通过（五项令 #2）** | TB-B 三模式（legacy 原树/重建 p1/阶段二 p2）判据 v2 全 AS-EXPECTED，fixed_p2 B1–B6 首跑全 PASS；签收=「隔离 RTL 中 IQ24–27 定向验证通过」，**不支持完整契约已修复/可上板** | F6 文档 §13；`artifacts/f6_phase2_rtl_20261010`、`f6b_smi_fixed_p2_20261010` |
 | 2026-10-10 | F6 阶段一复核补丁（用户复核裁定） | 重复载荷同拍 NBA 漏洞→当拍协议异常并入完成排除；C7 定向+变异核验（移除排除项即复现）；签收措辞限定为隔离 RTL 定向验证 | F6 文档 §11.5 |
 | 2026-10-10 | F6 阶段二设计冻结 + 复杂公式结构预检（五项令 #5 穿插） | E1/E1′/E2/E3/E4 设计、R-DELAY-0 审计表、判据 v2 矩阵**先冻结后跑**；horner_v3 静态预检交付 | F6 文档 §12；`docs/precheck_complex_formula_20261010.md` |
@@ -970,3 +971,44 @@
   **签收**：信用注入结论获真实 LOAD/STORE 路径验证成立；E1–E5 全闭合
   口径仍留用户裁定；不支持上板。**下一步=第④项**（scale_sum 统一入口
   自动完整 LOAD→COMPUTE→STORE）与第⑤项静态预检接续。
+
+## 2026-10-10｜ADR-061：scale_sum 统一 LOAD→COMPUTE→STORE 链路验收（五项令 #4）
+
+> 里程碑：此前分别成立的公式编译、自动分段和搬运验证，已经通过统一入口串起来。
+
+- 统一入口完成公式编译、搬运段组合、VCS 验证、裁决与发布
+  （`verification_v2/tools/run_unified_lcs_verify.py` + 四件套
+  unified_lcs_case_gen / check_program_manifest / unified_lcs_compare /
+  arbitrate_program；ADR-061 §3 D1–D8）。
+- n=16/60/240：LOAD→COMPUTE→STORE 三段程序通过
+  （run_id=adr061_accept_n{16,60,240}，均 GREEN+published；C-L
+  首读>release>末写 = 3496>442>367 / 9540>480>411 / 34726>1096>1023；
+  run 目录 `build/v1_runs/scale_sum/adr061_accept_n{16,60,240}/`，发布包
+  `verification_v2/artifacts/releases/scale_sum_adr061_accept_n{16,60,240}/`）。
+- n=244：LOAD→COMPUTE₀→COMPUTE₁→STORE 四段程序通过，计算跨段地址与写回
+  检查通过（run_id=adr061_accept_n244；LOAD 244/244、STORE 61/61、
+  C1 34868<34934 与 36374<36430、S4@36898>末写@36822、WBARRIER@36368∈
+  [34934,36430] 跨段累积掩码实证、Z3 双源计数 305=61+244）。
+- n=480：ADR-057 既有计算分段链回归通过
+  （run_id=adr057_regress_n480_20261010），**不计作本轮完整 LCS 链通过**。
+- add、scale_sum 四配置回归 GREEN（add_frozen_regression /
+  add_v1_admission / scale_sum_v1_n4n8n60 / scale_sum_v1_n240_boundary）；
+  pytest 566 passed。
+- 证据范围：当前已测试布局、单 SMC、TB 辅助同步和指定 RTL 版本（发布包
+  provenance 逐项核验：tb_sha256=3324a33b…、sync_model=tb_assisted、
+  rtl_version=0x00042200）；不代表上板通过或任意公式均支持。
+- 保留 alpha stride=0、同拍 release 和探针格式等限制，逐项链接
+  ADR-061 §5 与对应运行报告
+  （`releases/scale_sum_adr061_accept_n*/run_report.json`）。
+- C-L 同拍裁定落地（用户 2026-10-10 三条规则）：首读<末写→RED；
+  末写==首读→RED（不降级——无存储端口语义或更精采样证据）；首读≤release
+  →RED；release>BEGIN₁→RED；release==BEGIN₁→仅 limitation（TB 零延迟
+  构造性同拍，次序证据由①③严格大于独立承载）——ADR-061 §5 比较矩阵 +
+  `tests/unit/test_unified_lcs.py` 33 项含边界双向钉死。
+- 已知证据打包缺口：program_manifest.json / g3_expect.json 未拷入 run
+  evidence（文件在沙箱 case 目录，sha256 锚在 run_report provenance）；
+  copy2 补丁已拟定但因分类器故障未完成复测——本轮提交保持与四轮验收实际
+  运行代码逐字节一致，补丁+复跑验证列为后续任务（ADR-061 §5 末条）。
+- 上板实验包状态单列：`/home/juno1023/m3lite_w16_fpga_20261010.tar.gz`
+  （sha256=3d59949f…fd73）+ `artifacts/m3lite_w16_fpga_pkg_20261010/`，
+  不能由统一链验收推定已完成。

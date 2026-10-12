@@ -575,6 +575,348 @@ def arbitrate_multi(case_root: Path, expected_stages: List[Dict[str, Any]],
     }
 
 
+# ----------------------------------------------------------------------
+# ADR-061 D6：完整程序仲裁——LOAD/COMPUTE/STORE 三类段的窗口感知裁决
+# ----------------------------------------------------------------------
+
+PROGRAM_MANIFEST_SCHEMA = "adr061_program_manifest_v1"
+
+# LOAD/COMPUTE 段队列（rtl_probe_plan 镜像）：LOAD={ldb:26, ldb-axi:27}，
+# STORE={stb:24, stb-axi:25}。
+LOAD_QUEUE_IDS = {26, 27}
+STORE_QUEUE_IDS = {24, 25}
+
+_MARK_G3_RELEASE = re.compile(
+    r"\[GATE3\]\[BARRIER\] release @probe_cycle (\d+)")
+_MARK_WB_RELEASE = re.compile(
+    r"\[GATE4\]\[WBARRIER\] release @probe_cycle (\d+)")
+_MARK_S4_RELEASE = re.compile(
+    r"\[GATE4\]\[S4BARRIER\] release @probe_cycle (\d+)")
+
+
+def load_ur_read_log(path: Path) -> List[Tuple[int, int, int, int, int]]:
+    """ur_read_trace.log → [(cycle, smc, port, bank, addr)]。"""
+    rows = []
+    for ln, raw in enumerate(path.read_text().splitlines(), 1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) != 5:
+            raise ArbiterError(f"{path.name}@{ln} 行格式坏: {raw!r}")
+        rows.append((int(parts[0]), int(parts[1]), int(parts[2]),
+                     int(parts[3]), int(parts[4])))
+    return rows
+
+
+def load_hbm_write_log(path: Path) -> List[Tuple[int, int, int, int]]:
+    """hbm_write_trace.log → [(cycle, smc, addra, wea)]（addra/wea 为 hex 打印）。"""
+    rows = []
+    for ln, raw in enumerate(path.read_text().splitlines(), 1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) != 5:
+            raise ArbiterError(f"{path.name}@{ln} 行格式坏: {raw!r}")
+        rows.append((int(parts[0]), int(parts[1]), int(parts[2], 16),
+                     int(parts[3], 16)))
+    return rows
+
+
+def parse_barrier_releases(sim_log_path: Path) -> Dict[str, List[int]]:
+    """三类 TB 辅助屏障 release 拍号（正跑必须各 ≥1；缺 = 屏障未生效/未生效配置）。"""
+    out = {"g3_credit": [], "wbarrier": [], "s4": []}
+    for ln in Path(sim_log_path).read_text(errors="replace").splitlines():
+        m = _MARK_G3_RELEASE.search(ln)
+        if m:
+            out["g3_credit"].append(int(m.group(1)))
+            continue
+        m = _MARK_WB_RELEASE.search(ln)
+        if m:
+            out["wbarrier"].append(int(m.group(1)))
+            continue
+        m = _MARK_S4_RELEASE.search(ln)
+        if m:
+            out["s4"].append(int(m.group(1)))
+    return out
+
+
+def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
+                      expected_compute: Dict[int, Dict[str, Any]],
+                      sim_log_path: Path) -> Dict[str, Any]:
+    """ADR-061 程序仲裁（LOAD→COMPUTE×K→STORE）。
+
+    与 arbitrate_multi 的分野（数据搬移段无逐拍期望模型——ADR-057 延期
+    数据搬移完成契约）：
+      * LOAD 段：FETCH/ISSUE 限于 {26,27}；UR 写 ⊆ 声明窗且 SMC0 覆盖 == 声明
+        （写账逐拍）；**不要求 末写<ack**——B5c/errata 既知 LSU 通知可先于落位，
+        ack 与末写关系仅作观察量记录；次序保证来自信用屏障 + C-L。
+      * COMPUTE 段：复用 _arbitrate_core（ADR-056/057 逐拍期望，c0 窗内重锚），
+        并保持 C1「末写 < ack」硬断言（ADR-057 实证成立域）。
+      * STORE 段：FETCH/ISSUE 限于 {24,25}；**UR 写恒空**；HBM 写 ⊆ 声明窗且
+        覆盖 == 声明行数；HBM 写在 STORE 窗之外恒空。
+      * C-L：COMPUTE 窗内对 LOAD 服务 bank 的首读 > LOAD 末写，且 > 信用屏障
+        release（release < 次段 BEGIN 结构性成立，此处正向核验）。
+      * C-W：三类屏障 release 必须各 ≥1（WBARRIER/S4 恰 1）；S4 release
+        > 末笔 HBM 写（排干正向证据）；WBARRIER release 落于末 COMPUTE 段窗。
+    """
+    bad: List[str] = []
+    limits: List[str] = []
+    if program_manifest.get("schema_version") != PROGRAM_MANIFEST_SCHEMA:
+        return {"mode": "program", "violations":
+                [f"manifest schema={program_manifest.get('schema_version')!r}"
+                 f" != {PROGRAM_MANIFEST_SCHEMA!r}"], "limitations": [],
+                "verdict": "RED"}
+    stages = program_manifest.get("stages") or []
+    S = len(stages)
+    if S < 3 or stages[0].get("kind") != "LOAD" \
+            or stages[-1].get("kind") != "STORE":
+        return {"mode": "program",
+                "violations": ["段列形态非 LOAD→COMPUTE×K→STORE"],
+                "limitations": [], "verdict": "RED"}
+    for i, st in enumerate(stages):
+        if st.get("stage_id") != i:
+            bad.append(f"manifest 段号乱序: stages[{i}].stage_id="
+                       f"{st.get('stage_id')}")
+    load_banks = {w["bank"] for w in stages[0].get("covers", [])}
+    load_windows = {(w["bank"], a)
+                    for w in stages[0].get("expected_ur_write_windows", [])
+                    for a in range(w["line0"], w["line0"] + w["lines"])}
+    store_win = stages[-1].get("expected_hbm_write_window") or {}
+    store_l0, store_n = store_win.get("line0"), store_win.get("lines")
+    if not load_windows or store_l0 is None or store_n is None:
+        bad.append("manifest 声明窗缺失（LOAD 写窗 / STORE HBM 窗）")
+        return {"mode": "program", "violations": bad, "limitations": [],
+                "verdict": "RED"}
+
+    fetch_path = case_root / "iq_probe_trace.log"
+    issue_path = case_root / "iq_issue_trace.log"
+    write_path = case_root / "ur_write_trace.log"
+    read_path = case_root / "ur_read_trace.log"
+    hbm_path = case_root / "hbm_write_trace.log"
+    for p in (fetch_path, issue_path, write_path, read_path, hbm_path,
+              sim_log_path):
+        if not Path(p).is_file():
+            bad.append(f"日志缺失: {p}（TB 探针/标记断裂，不得静默降级）")
+    if bad:
+        return {"mode": "program", "violations": bad, "limitations": [],
+                "verdict": "RED"}
+    fetch_evs = load_fetch_log(fetch_path)
+    issue_evs = load_issue_log(issue_path)
+    write_rows = load_write_log(write_path)
+    read_rows = load_ur_read_log(read_path)
+    hbm_rows = load_hbm_write_log(hbm_path)
+    marks = parse_stage_markers(sim_log_path)
+    begins, acks = marks["begins"], marks["acks"]
+    releases = parse_barrier_releases(sim_log_path)
+    if sorted(begins) != list(range(S)) or sorted(acks) != list(range(S)):
+        bad.append(f"TB 段标记不齐: begins={sorted(begins)} acks={sorted(acks)}"
+                   f" != 0..{S - 1}")
+        return {"mode": "program", "violations": bad, "limitations": [],
+                "verdict": "RED"}
+    if marks["max_idx"] is not None and marks["max_idx"] != S - 1:
+        bad.append(f"TB 侧段数上界 {marks['max_idx']} != manifest 段数-1 {S - 1}")
+    if marks["complete"] is None:
+        bad.append("缺 'all stages complete' 标记——TB 未走完段序列")
+    for k in range(S - 1):
+        if begins[k + 1] <= begins[k]:
+            bad.append(f"(C1) BEGIN 乱序: stage_{k}@{begins[k]} 不早于 "
+                       f"stage_{k + 1}@{begins[k + 1]}")
+
+    # ---- C-W 屏障证据 ----
+    barriers: Dict[str, Any] = dict(releases)
+    if not releases["g3_credit"]:
+        bad.append("(C-W) 缺 G3 信用屏障 release——LOAD 完成佐证缺失")
+    if len(releases["wbarrier"]) != 1:
+        bad.append(f"(C-W) WBARRIER release 次数 {len(releases['wbarrier'])} != 1")
+    if len(releases["s4"]) != 1:
+        bad.append(f"(C-W) S4BARRIER release 次数 {len(releases['s4'])} != 1")
+    if releases["wbarrier"] and not (
+            begins[S - 2] <= releases["wbarrier"][0] <= acks[S - 2]):
+        bad.append(f"(C-W) WBARRIER release @{releases['wbarrier'][0]} 不在末 "
+                   f"COMPUTE 段窗 [{begins[S - 2]},{acks[S - 2]}] 内")
+
+    per_stage: List[Dict[str, Any]] = []
+    # ---- LOAD 段 ----
+    f_w, i_w, w_w = _window_filter(fetch_evs, issue_evs, write_rows,
+                                   begins[0], begins[1])
+    rep: Dict[str, Any] = {"stage_id": 0, "kind": "LOAD",
+                           "window": {"begin": begins[0], "end": begins[1]}}
+    for iq in sorted({iq for iq in f_w} | {iq for iq in i_w}):
+        if iq not in LOAD_QUEUE_IDS:
+            bad.append(f"(LOAD/G1) 窗口内 iq{iq} 活动越出 {{26,27}}")
+    ldb_fetch = sum(1 for e in f_w.get(26, []) if e[1] == 1)
+    axi_fetch = sum(1 for e in f_w.get(27, []) if e[1] == 1)
+    rep["fetch_counts"] = {"iq26": ldb_fetch, "iq27": axi_fetch}
+    if ldb_fetch == 0 or axi_fetch == 0:
+        bad.append(f"(LOAD) LDB/LDBAXI 取指计数 {ldb_fetch}/{axi_fetch} 含零"
+                   f"——LOAD 未发射（漏发）")
+    ld_writes = {(b, a) for (_c, s, b, a, _we, _wd) in w_w if s == 0}
+    outside = ld_writes - load_windows
+    if outside:
+        bad.append(f"(LOAD/C-S) UR 写越出声明窗 ×{len(outside)}"
+                   f"（首例 {sorted(outside)[0]}）")
+    missing = load_windows - ld_writes
+    if missing:
+        bad.append(f"(LOAD/C-S) 声明窗覆盖不足：缺 {len(missing)} 行"
+                   f"（首例 {sorted(missing)[0]}）——LOAD 未送达")
+    rep["ur_writes"] = {"observed": len(ld_writes), "declared": len(load_windows),
+                        "outside": len(outside), "missing": len(missing)}
+    last_ld_w = max((c for (c, _s, _b, _a, _we, _wd) in w_w), default=None)
+    rep["last_ur_write"] = last_ld_w
+    rep["ack"] = acks[0]
+    rep["ack_vs_last_write"] = ("write_first" if last_ld_w is not None
+                                and last_ld_w < acks[0] else
+                                "notify_first_or_unknown")
+    if rep["ack_vs_last_write"] != "write_first":
+        limits.append(
+            "(LOAD) ack 不晚于末写不成立（B5c/ADR-058 errata：LSU 批完成通知"
+            "可先于写落位）——LOAD 次序保证仅由信用屏障 + C-L 提供，本项仅观察")
+    per_stage.append(rep)
+
+    # ---- COMPUTE 段（复用单段核心） ----
+    for j in range(1, S - 1):
+        exp = expected_compute.get(j)
+        if exp is None:
+            bad.append(f"缺 stage_{j} 的 COMPUTE 期望事件文件")
+            continue
+        hi = begins[j + 1]
+        f_j, i_j, w_j = _window_filter(fetch_evs, issue_evs, write_rows,
+                                       begins[j], hi)
+        try:
+            rep_j, _aux = _arbitrate_core(f_j, i_j, w_j, exp)
+        except Exception as e:  # noqa: BLE001
+            bad.append(f"[stage_{j}] 仲裁核心异常: {type(e).__name__}: {e}")
+            continue
+        rep_j["stage_id"] = j
+        rep_j["kind"] = "COMPUTE"
+        rep_j["window"] = {"begin": begins[j], "end": hi}
+        rep_j["violations"] = [f"[stage_{j}] {v}" for v in rep_j["violations"]]
+        bad.extend(rep_j["violations"])
+        # C1 末写<ack（COMPUTE 段保持 ADR-057 实证域硬断言）
+        w_cycles = [c for (c, _s, _b, _a, _we, _wd) in w_j]
+        last_w = max(w_cycles, default=None)
+        if not (acks[j] > begins[j] and acks[j] <= hi):
+            bad.append(f"(C1) stage_{j} 应答 @{acks[j]} 不在窗口 "
+                       f"({begins[j]}, {hi}] 内")
+        if last_w is not None and last_w >= acks[j]:
+            bad.append(f"(C1) stage_{j} 末笔写 @{last_w} 不早于应答 @{acks[j]}"
+                       f"——写回未完成即应答")
+        rep_j["ack"] = acks[j]
+        rep_j["last_ur_write"] = last_w
+        per_stage.append(rep_j)
+
+    # ---- STORE 段 ----
+    f_s, i_s, w_s = _window_filter(fetch_evs, issue_evs, write_rows,
+                                   begins[S - 1], None)
+    rep = {"stage_id": S - 1, "kind": "STORE",
+           "window": {"begin": begins[S - 1], "end": None}}
+    for iq in sorted({iq for iq in f_s} | {iq for iq in i_s}):
+        if iq not in STORE_QUEUE_IDS:
+            bad.append(f"(STORE/G1) 窗口内 iq{iq} 活动越出 {{24,25}}")
+    stb_fetch = sum(1 for e in f_s.get(24, []) if e[1] == 1)
+    axi_fetch = sum(1 for e in f_s.get(25, []) if e[1] == 1)
+    rep["fetch_counts"] = {"iq24": stb_fetch, "iq25": axi_fetch}
+    if stb_fetch == 0 or axi_fetch == 0:
+        bad.append(f"(STORE) STB/STBAXI 取指计数 {stb_fetch}/{axi_fetch} 含零")
+    if w_s:
+        bad.append(f"(STORE/C-S) 窗口内存在 UR 写 ×{len(w_s)}（STORE 不写 UR，"
+                   f"首笔 @{w_s[0][0]} bank={w_s[0][2]} addr={w_s[0][3]}）")
+    hbm_in = [(c, s, a) for (c, s, a, wea) in hbm_rows
+              if wea != 0 and c >= begins[S - 1]]
+    hbm_pre = [(c, s, a) for (c, s, a, wea) in hbm_rows
+               if wea != 0 and c < begins[S - 1]]
+    if hbm_pre:
+        bad.append(f"(STORE/C-S) STORE 窗之前存在 HBM 写 ×{len(hbm_pre)}"
+                   f"（首笔 @{hbm_pre[0][0]} addra={hbm_pre[0][2]}）")
+    hbm_addrs = {a for (_c, s, a) in hbm_in if s == 0}
+    want_addrs = set(range(store_l0, store_l0 + store_n))
+    out_h = hbm_addrs - want_addrs
+    miss_h = want_addrs - hbm_addrs
+    if out_h:
+        bad.append(f"(STORE/C-S) HBM 写越出声明窗 ×{len(out_h)}"
+                   f"（首例 addra={min(out_h)}）")
+    if miss_h:
+        bad.append(f"(STORE/C-S) HBM 声明窗覆盖不足：缺 {len(miss_h)} 行"
+                   f"（首例 addra={min(miss_h)}）——STORE 未送齐")
+    last_hbm = max((c for (c, _s, _a) in hbm_in), default=None)
+    rep["hbm_writes"] = {"observed_lines": len(hbm_addrs),
+                         "declared": store_n,
+                         "outside": len(out_h), "missing": len(miss_h),
+                         "last_write": last_hbm}
+    rep["ack"] = acks[S - 1]
+    if releases["s4"] and last_hbm is not None \
+            and releases["s4"][0] <= last_hbm:
+        bad.append(f"(C-W) S4 release @{releases['s4'][0]} 不晚于末笔 HBM 写"
+                   f" @{last_hbm}——排干证据断裂")
+    per_stage.append(rep)
+
+    # ---- C-L：COMPUTE 首读 vs LOAD 末写/信用屏障 release ----
+    cl: Dict[str, Any] = {}
+    comp_reads = [(c, b, a) for (c, s, _p, b, a) in read_rows
+                  if s == 0 and b in load_banks and c >= begins[1]]
+    first_read = min((c for (c, _b, _a) in comp_reads), default=None)
+    cl["first_compute_read"] = first_read
+    cl["last_load_write"] = last_ld_w
+    cl["credit_release_min"] = min(releases["g3_credit"], default=None)
+    if first_read is None:
+        bad.append("(C-L) COMPUTE 窗内对 LOAD 服务 bank 无 UR 读——COMPUTE "
+                   "未消费 LOAD 数据（读探针断裂或程序断裂）")
+    else:
+        if last_ld_w is not None and first_read <= last_ld_w:
+            bad.append(f"(C-L) COMPUTE 首读 @{first_read} 不晚于 LOAD 末写"
+                       f" @{last_ld_w}——读先于写（数据未落位即消费）")
+        if releases["g3_credit"] \
+                and first_read <= min(releases["g3_credit"]):
+            bad.append(f"(C-L) COMPUTE 首读 @{first_read} 不晚于信用屏障 "
+                       f"release @{min(releases['g3_credit'])}")
+    if releases["g3_credit"]:
+        rel0 = min(releases["g3_credit"])
+        if rel0 > begins[1]:
+            bad.append(f"(C-L) 信用屏障 release @{rel0} 晚于 stage_1 BEGIN "
+                       f"@{begins[1]}——屏障未在段间生效")
+        elif rel0 == begins[1]:
+            limits.append(
+                f"(C-L) 信用屏障 release 与 stage_1 BEGIN 同拍 @{rel0}——现役 TB "
+                f"段间零延迟顺序推进的构造性产物（同 ADR-057 errata 空窗口径）；"
+                f"LOAD→COMPUTE 次序由「首读 > release」与「首读 > LOAD 末写」硬断言"
+                f"承载，本项不单独致 RED，也不据此声称独立屏障证据")
+
+    # ---- C2 段外残留写（UR） ----
+    pre = [r for r in write_rows if r[0] < begins[0]]
+    if pre:
+        bad.append(f"(C2) 首段 BEGIN 之前存在 UR 写 ×{len(pre)}")
+    for k in range(S):
+        ack_k = acks[k]
+        hi = begins[k + 1] if k + 1 < S else None
+        resid = [r for r in write_rows if ack_k <= r[0]
+                 and (hi is None or r[0] < hi)]
+        if hi is not None and ack_k == hi:
+            limits.append(
+                f"(C2) stage_{k} 应答与 stage_{k + 1} BEGIN 同拍 @{ack_k}"
+                f"——空窗不称排干证明（ADR-057 errata-2026-10-01：现役 TB 段间"
+                f"零延迟顺序推进，空窗系 testbench 构造性产物；残留写排除由"
+                f" C1 次序 + 写集不相交前提下的全时线写归因正向支撑）")
+        if resid:
+            bad.append(f"(C2) stage_{k} 应答后静默窗内残留 UR 写 ×{len(resid)}"
+                       f"（首笔 cycle={resid[0][0]} bank={resid[0][2]}）")
+
+    return {
+        "mode": "program",
+        "case_root": str(case_root),
+        "stage_count": S,
+        "markers": {"begins": begins, "acks": acks,
+                    "complete": marks["complete"], "max_idx": marks["max_idx"]},
+        "barriers": barriers,
+        "C_L": cl,
+        "stages": per_stage,
+        "violations": bad,
+        "limitations": limits,
+        "verdict": "RED" if bad else "GREEN",
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ADR-056 步④-2 / ADR-057 D4 三日志 × 期望事件全局仲裁")
     ap.add_argument("--case-root", type=Path, required=True,
@@ -586,10 +928,35 @@ def main() -> int:
                          "按段号顺序重复传入")
     ap.add_argument("--sim-log", type=Path, default=None,
                     help="多段必给：VCS sim.log（TB_MULTI_STAGE 标记来源，段界唯一依据）")
+    ap.add_argument("--program-manifest", type=Path, default=None,
+                    help="ADR-061：adr061_program_manifest_v1（LOAD→COMPUTE×K→STORE"
+                         " 程序仲裁；须配 --sim-log 与 --expected-compute）")
+    ap.add_argument("--expected-compute", action="append", default=None,
+                    metavar="TB_STAGE_ID=PATH",
+                    help="ADR-061：COMPUTE 段的 ADR-056/057 期望事件文件，"
+                         "键为 TB 段号（LOAD=0 起算），每段重复传入")
     ap.add_argument("--report", type=Path, default=None, help="JSON 报告落盘路径")
     args = ap.parse_args()
 
-    if args.expected_stage:
+    if args.program_manifest:
+        if not args.sim_log:
+            ap.error("程序仲裁须给 --sim-log（段界标记来源）")
+        exp_compute: Dict[int, Dict[str, Any]] = {}
+        for item in (args.expected_compute or []):
+            k, sep, v = item.partition("=")
+            if not sep or not k.strip().isdigit():
+                ap.error(f"--expected-compute 须为 TB_STAGE_ID=PATH: {item!r}")
+            exp_compute[int(k.strip())] = json.loads(
+                Path(v).read_text(encoding="utf-8"))
+        manifest = json.loads(args.program_manifest.read_text(encoding="utf-8"))
+        n_compute = sum(1 for s in manifest.get("stages", [])
+                        if s.get("kind") == "COMPUTE")
+        if len(exp_compute) != n_compute:
+            ap.error(f"--expected-compute 数 {len(exp_compute)} != manifest "
+                     f"COMPUTE 段数 {n_compute}")
+        report = arbitrate_program(args.case_root, manifest, exp_compute,
+                                   args.sim_log)
+    elif args.expected_stage:
         if not args.sim_log:
             ap.error("多段模式须给 --sim-log（段界标记来源）")
         expected_stages = [json.loads(p.read_text(encoding="utf-8"))
