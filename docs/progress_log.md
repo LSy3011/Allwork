@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **addcmul 步③：容量 VCS 校准 n_max=156 + 分段链验证通过** | 单段 n_max=156 经 VCS 校准（rtovr-14/vin0 恰 128 行 GREEN，近壁形状跨 5 进程稳定）；n=160 分段 39+1 全 GREEN（段间 C1/C2/C3 全过、尾段写址恰 bank4 row39、stage_0 与 n=156 十八队列逐字节一致）；n=158（不整除）/n=1028（静态消耗越界）config_check 响亮早拒；预测-实测算账全闭合（构造预测保守方向）；GREEN 运行全提交态（c0ba5f3b dirty=false） | docs/addcmul_step3_capacity_20261012.md；releases/addcmulu_acu_step3_n{156,160}_20261012 |
 | 2026-10-12 | **addcmul 步②：小规模计算验证通过（II=3 双槽首个 VCS 证据）+ 发射层放置漂移实证** | n=4/8/60 三规模 V1 链全 GREEN+published，逐拍 18/18 队列 ok、三区全绿、写账零非法；发射链 span=3（L_q=3(m+3)+2 五档成立），干跑实测 n=156 单段恰 128 行顶格（构造预测 152 保守已修正）；**方法学实证：放置漂移可达真实发射产物**（n=4 同配置两进程两合法变体 1/8；近壁 n=156 跨 5 进程逐字节稳定）——步①开放问题关闭，「跨进程确定性」口径收缩；生产代码零改动 | docs/addcmul_step2_smallscale_20261012.md；releases/addcmulu_acu_step2_n{4,8,60}_20261012；VARIANCE.md 当日补遗 |
 | 2026-10-12 | **addcmul 第二复杂案例·步①：静态确认通过（三因子乘积结合序分歧首发实证 + U9 关闭）** | 遗留文本 ((value·t1)·t2) vs DFG ((t1·t2)·value) 结合序分歧正面鉴别（fp32 乘结合不安全；horner 全二元乘无此类）→ 处置=配置级公式文本对齐（x+t1*t2*value 三层签名互等，零代码零特判）；II=3 复现、fpmul 双槽 U9【推断】→【实测】、容量构造预测 n_max≈152（未校准禁准入）；遗留域 SUBNORMAL_BAND ×6、候选安全域双过；求解器放置漂移登记（II 稳定/放置随进程漂移，校准锚=发射产物实测）；生产代码零改动 | docs/addcmul_static_confirmation_20261012.md；artifacts/addcmul_static_20261012/（gitignored，sha256 锚） |
 | 2026-10-12 | **horner_v3 步④：统一 LCS 集成通过（经一次公式化通用规则修复，按用户立法序）** | 首跑暴露 C-H 独立参考 scale_sum 硬编码（RED 留档）→ 6 项鉴别性测试 → 公式驱动修复（零名称特判，commit bd2ed7b）→ n=8/n=72 统一链全 GREEN+published；scale_sum/add 回归全 GREEN；pytest 577；提交态 n=8 复验闭合（dirty=false、包内报告一致） | docs/horner_v3_step4_unified_lcs_20261012.md；releases/horner_v3u_hv3u_step4fix_n8_committed_20261012、…_n72_20261012_codex_r2 |
@@ -1175,3 +1176,24 @@
 - 详见 docs/addcmul_step2_smallscale_20261012.md；VARIANCE.md 当日补遗
   （gitignored）；探针 case 目录取证后已清理，规范副本存
   build/v1_runs/addcmulu/acu_varprobe_*。
+
+## 2026-10-12｜addcmul 步③：容量 VCS 校准 n_max=156 + 分段链验证通过
+
+- **容量校准落锤**：n=156 单段（m=39）VCS 全链 GREEN，被仿真包中束缚队列
+  rtovr-14/vin0 = 恰 128 行（直接计数）⇒ addcmulu 单段 n_max=156（VCS 校准
+  值）；三区 39/39 行 bit-exact、逐拍 18/18 队列 ok、写账 312 零非法、
+  c0=37962。预测-实测算账闭合：步①构造 152（span=4 保守）→ 步②干跑修正
+  156（span=3，L_q=3(m+3)+2 五档成立）→ 步③ VCS 证实；全程实测优先。
+- **上探分段**：n=160（构造预测 L=131>128）由分段器介入为 39+1 两段全
+  GREEN——ADR-057 语义（超墙分段而非响拒）在第二案例复现；段间 C1 段序/
+  C2 无残留写（空窗构造性注记照录）/C3 地址连续全过；尾段写账恰
+  {bank4,row39}×1、8 写零非法；c0 锚 stage_0=37962（== n=156）、
+  stage_1=40561。
+- **跨案例 hex**：n=160 stage_0 与 n=156 单段 18/18 队列逐字节一致
+  （两独立进程；按步②口径限定已实测进程集合，不作全称推广）。
+- **响亮拒绝两点**：n=158（不整除 vector_lanes=4）/n=1028（静态消耗
+  257>256）均 config_check TYPE_LAYOUT_UNSUPPORTED 早拒、published=False，
+  与 horner n=70/n=1028 同闸门族。
+- **provenance**：GREEN 运行全提交态（git_head=c0ba5f3b dirty=false，
+  yaml/TB/simv/注册表四锚互符）；RED 探针早拒无 provenance 块属预期。
+- 生产代码零改动；详见 docs/addcmul_step3_capacity_20261012.md。
