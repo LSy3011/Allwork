@@ -191,9 +191,14 @@ def chunk_descs(n_lines: int) -> list[dict]:
 # 装配主流程
 # ----------------------------------------------------------------------
 def build_unified_case(build_copy: Path, case_dir: Path, n: int,
-                       tb_path: Path, generated_at: str | None = None) -> dict:
+                       tb_path: Path, *, op_name: str, formula: str,
+                       generated_at: str | None = None) -> dict:
     build_copy = Path(build_copy)
     case_dir = Path(case_dir)
+    if not isinstance(op_name, str) or not op_name:
+        _die("op_name 缺失——manifest 须如实记录算子身份（禁硬编码）")
+    if not isinstance(formula, str) or not formula.strip():
+        _die("formula 缺失——manifest 须自包含记录公式串（C-H 独立参考之源）")
     if case_dir.exists():
         _die(f"case 目录已存在: {case_dir}（拒绝沿用/覆盖旧产物，先人工清理）")
     lay = parse_layout(build_copy, n)
@@ -425,7 +430,8 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
     tb_sha = _sha256_file(tb_path) if Path(tb_path).is_file() else None
     manifest = {
         "schema_version": PROGRAM_MANIFEST_SCHEMA,
-        "op": "scale_sum", "n": n, "lanes": 4, "n_lines": n_lines,
+        "op": op_name, "formula": formula,
+        "n": n, "lanes": 4, "n_lines": n_lines,
         "generated_at": expect["generated_at"],
         "hashes": {
             "sim_config_json": _sha256_file(lay["sim_cfg_path"]),
@@ -472,8 +478,13 @@ def main() -> int:
     ap.add_argument("--tb", type=Path,
                     default=Path.home() / "u280_sim_v422" / "sim_multi_stage"
                     / "tb_aiacc_top_v04_f_multi_stage.v")
+    ap.add_argument("--op-name", required=True,
+                    help="算子名（manifest 如实记录，禁硬编码）")
+    ap.add_argument("--formula", required=True,
+                    help="公式串（manifest 自包含记录，C-H 独立参考之源）")
     a = ap.parse_args()
-    man = build_unified_case(a.build_copy, a.case_dir, a.n, a.tb)
+    man = build_unified_case(a.build_copy, a.case_dir, a.n, a.tb,
+                             op_name=a.op_name, formula=a.formula)
     print(f"[ULCS-GEN] case = {a.case_dir}")
     print(f"[ULCS-GEN] stages = "
           + " → ".join(f"{s['kind']}(stage_{s['stage_id']})"

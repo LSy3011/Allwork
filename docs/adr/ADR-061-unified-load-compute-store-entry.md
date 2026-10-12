@@ -238,3 +238,27 @@ multi_stage），确认 ADR-057 行为不漂；配置注释陈旧系 ADR-057 既
 - **验收④⑤结果全录 §4**（n∈{16,60,240} 单段 + n=244 两段全 GREEN
   published；n=480 既有链不回退；add/scale_sum 回归全 GREEN）。
   验收配置归档 verification_v2/artifacts/run_configs/adr061_*.yaml。
+
+## 7. Errata
+
+### errata-2026-10-12（horner_v3u 步④暴露，当日修复）
+
+1. **C-H 独立参考实现曾硬编码 scale_sum 形态**（`unified_lcs_compare.py` 旧版
+   直取布局张量 x/other/alpha 并内联 `alpha*(x+other)`）——越出本 ADR D6 的
+   通用设计表述（「独立参考（fp32 逐 lane）」未限定公式）。失败形态：
+   horner_v3u n=8 统一链 RED@three_zone「(C-H) 布局缺张量 'other'」
+   （run `hv3u_step4_n8_20261012`，保留为失败形态档案）。
+   修复 = **公式驱动泛化**：manifest 新增自包含 `formula` 字段；C-H 以
+   有序 AST fp32 逐 op 求值（与 V1 链 independent_reference 同 machinery），
+   输入按 role 重建（input=全行流、param=stride0 标量驻留——line0 四 lane
+   全等 ∧ line1.. 全零的正面形态取证逐参数保留）；公式叶缺/布局多载/
+   公式未声明名均响亮 RED。无任何算子名/张量名特判。
+2. **manifest `"op"` 字段曾硬编码 `"scale_sum"`**（`unified_lcs_case_gen.py`）——
+   provenance 错误（horner case 被记录为 scale_sum）。修复 = 由 runner 传入
+   真实算子名（op_yaml 词干）+ 公式串（`op.formula_str`），二者缺失即
+   装配响亮拒绝；CLI 同步增加 `--op-name/--formula` 必填。
+3. 鉴别性测试：`tests/unit/test_unified_lcs.py` 36→42（新增 horner 形态
+   合成 case 双向钉死：GREEN 必须绿；参数区互换/参数形态破坏/缺 formula/
+   未声明叶/装载未消费输入五类必须各自 RED）。scale_sum 合成 fixture
+   原样通过 = 旧形态零回归。真实链回归：scale_sum 统一入口复跑记录于
+   docs/horner_v3_step4_unified_lcs_20261012.md。

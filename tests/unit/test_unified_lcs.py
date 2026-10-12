@@ -293,6 +293,7 @@ def build_min_case(case: Path) -> dict:
 
     manifest = {
         "schema_version": "adr061_program_manifest_v1",
+        "op": "scale_sum", "formula": "alpha * (x + other)",
         "n": 8, "n_lines": N_LINES,
         "hbm_layout": lay_entries,
         "hbm_region_sha256": region_sha,
@@ -329,6 +330,186 @@ def build_min_case(case: Path) -> dict:
         "wbarrier": {"bank": 2, "writes": N_LINES, "stage": 1,
                      "timeout_cycles": 5000},
         "s4barrier": {"addr0": 1024, "writes": N_LINES,
+                      "bresp": len(stbaxi), "timeout_cycles": 5000},
+        "hbm_preload": {"files": hp_files},
+    }), encoding="utf-8")
+    return manifest, y_lines
+
+
+# ----------------------------------------------------------------------
+# horner 形态合成 case（C-H 公式驱动独立参考的鉴别性 fixture）
+# ----------------------------------------------------------------------
+C_VALS = [0.125, -0.25, 0.375, -0.5]          # c0..c3（fp32 恰可表）
+HORNER_FORMULA = "((c0 * x + c1) * x + c2) * x + c3"
+
+
+def _horner_y_ref():
+    """有序 AST 同序 fp32：mul→add→mul→add→mul→add 逐 op 舍入。"""
+    import numpy as np
+    xf = np.asarray(X_VALS, dtype=np.float32)
+    t = np.float32(C_VALS[0]) * xf
+    t = t + np.float32(C_VALS[1])
+    t = t * xf
+    t = t + np.float32(C_VALS[2])
+    t = t * xf
+    return (t + np.float32(C_VALS[3])).astype(np.float32)
+
+
+def build_horner_case(case: Path) -> dict:
+    """装配 horner 形态最小统一 case：x@bank0 + c0..c3 分置 bank1/3/4/5
+    + constants@bank7 + y@bank2——布局无 'other'/'alpha'，专鉴 C-H 独立
+    参考的算子名/张量名特判（2026-10-12 horner_v3u 步④失败形态回归钉）。"""
+    lay_entries = [
+        {"name": "x", "role": "input", "bank": 0, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x1000,
+         "bytes": N_LINES * 16, "direction": "h2d"},
+        {"name": "c0", "role": "param", "bank": 1, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x2000,
+         "bytes": N_LINES * 16, "direction": "h2d"},
+        {"name": "c1", "role": "param", "bank": 3, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x3000,
+         "bytes": N_LINES * 16, "direction": "h2d"},
+        {"name": "c2", "role": "param", "bank": 4, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x4000,
+         "bytes": N_LINES * 16, "direction": "h2d"},
+        {"name": "c3", "role": "param", "bank": 5, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x5000,
+         "bytes": N_LINES * 16, "direction": "h2d"},
+        {"name": "constants", "role": "constant", "bank": 7, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x6000,
+         "bytes": N_LINES * 16, "direction": "h2d"},
+        {"name": "y", "role": "output", "bank": 2, "ur_line0": 0,
+         "lines": N_LINES, "byte_base": 0x7000,
+         "bytes": N_LINES * 16, "direction": "d2h"},
+    ]
+    x_lines = _data_lines(X_VALS)
+    c_lines = [[_pack([_f32(c)] * 4), g2.ZERO_LINE] for c in C_VALS]
+    k_lines = [g2.ZERO_LINE] * N_LINES
+    y_lines = _data_lines([float(v) for v in _horner_y_ref()])
+
+    descs = chunk_descs(N_LINES)
+    cwd = os.getcwd()
+    os.chdir(_ROOT)
+    try:
+        ldb_all, axi_all = [], []
+        for e in lay_entries[:6]:
+            ls, xs = g2.build_and_emit(descs, e["bank"], 0, e["byte_base"], 0)
+            ldb_all += ls
+            axi_all += xs
+        stb, stbaxi = s1.build_and_emit(descs, 2, 0, 0x7000, 0)
+    finally:
+        os.chdir(cwd)
+
+    import hashlib
+
+    def _w(p: Path, lines):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return {"file": p.name, "lines": len(lines),
+                "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+
+    iq_meta = {}
+    for sid, files in ((0, (("iq_ldb.hex", ldb_all),
+                            ("iq_ldb_axi.hex", axi_all))),
+                       (1, (("iq_ur_r0.hex", ["deadbeef"] * 3),)),
+                       (2, (("iq_stb.hex", stb),
+                            ("iq_stb_axi.hex", stbaxi)))):
+        iq_meta[sid] = [_w(case / "smi_iq_inst" / f"stage_{sid}" / nm, ls)
+                        for nm, ls in files]
+
+    ur = case / "smc_0" / "ur_data"
+    outb = case / "smc_0" / "output_bank"
+    src_of = {0: x_lines, 1: c_lines[0], 3: c_lines[1],
+              4: c_lines[2], 5: c_lines[3], 7: k_lines}
+    for b in range(8):
+        if b in src_of:
+            init = [g2.sentinel_line(b, k) for k in range(256)]
+            fin = list(init)
+            fin[:N_LINES] = src_of[b]
+        elif b == 2:
+            init = [g2.ZERO_LINE] * 256
+            fin = y_lines + [g2.ZERO_LINE] * (256 - N_LINES)
+        else:
+            init = [g2.ZERO_LINE] * 256
+            fin = list(init)
+        _w(ur / f"bank{b}.hex", init)
+        _w(outb / f"bank{b}_final.hex", fin)
+        _w(case / "smc_0" / f"ur_result_smc_0_bank{b}.hex", fin)
+    for i in range(1, 8):
+        _w(case / f"smc_{i}" / "ur_data" / "bank0.hex",
+           [g2.sentinel_aux_line(i, 0, k) for k in range(256)])
+
+    y_l0 = 0x7000 // 16                            # 1792
+    init1 = [g2.preload_pattern_line(k) for k in range(1856)]
+    for e, lines in ((lay_entries[0], x_lines), (lay_entries[1], c_lines[0]),
+                     (lay_entries[2], c_lines[1]), (lay_entries[3], c_lines[2]),
+                     (lay_entries[4], c_lines[3]), (lay_entries[5], k_lines)):
+        l0 = e["byte_base"] // 16
+        init1[l0:l0 + N_LINES] = lines
+    init1[y_l0:y_l0 + N_LINES] = [g2.ZERO_LINE] * N_LINES
+    snap = case / "memory_init_snapshot"
+    _w(snap / "memory_init1.hex", init1)
+    hp_files = {"memory_init1.hex": hashlib.sha256(
+        (snap / "memory_init1.hex").read_bytes()).hexdigest()}
+    for i in range(2, 9):
+        _w(snap / f"memory_init{i}.hex",
+           [g2.mark_pattern_line(k) for k in range(64)])
+        hp_files[f"memory_init{i}.hex"] = hashlib.sha256(
+            (snap / f"memory_init{i}.hex").read_bytes()).hexdigest()
+
+    hbm0 = list(init1)
+    hbm0[y_l0:y_l0 + N_LINES] = y_lines
+    _w(case / "smc_0" / "hbm_result_smc_0.hex", hbm0)
+    for i in range(1, 8):
+        _w(case / f"smc_{i}" / f"hbm_result_smc_{i}.hex",
+           [g2.mark_pattern_line(k) for k in range(64)])
+
+    region_sha = {}
+    for e in lay_entries:
+        l0 = e["byte_base"] // 16
+        region = init1[l0:l0 + N_LINES]
+        region_sha[e["name"]] = hashlib.sha256(
+            ("\n".join(region) + "\n").encode()).hexdigest()
+
+    manifest = {
+        "schema_version": "adr061_program_manifest_v1",
+        "op": "horner_v3u", "formula": HORNER_FORMULA,
+        "n": 8, "n_lines": N_LINES,
+        "hbm_layout": lay_entries,
+        "hbm_region_sha256": region_sha,
+        "stages": [
+            {"stage_id": 0, "kind": "LOAD", "predecessor": None,
+             "covers": [{"tensor": e["name"], "bank": e["bank"],
+                         "line0": 0, "lines": N_LINES}
+                        for e in lay_entries[:6]],
+             "expected_ur_write_windows": [
+                 {"bank": e["bank"], "line0": 0, "lines": N_LINES}
+                 for e in lay_entries[:6]],
+             "iq_files": iq_meta[0]},
+            {"stage_id": 1, "kind": "COMPUTE", "predecessor": 0,
+             "iteration_range": [0, N_LINES],
+             "expected_ur_write_windows": [
+                 {"bank": 2, "line0": 0, "lines": N_LINES}],
+             "iq_files": iq_meta[1]},
+            {"stage_id": 2, "kind": "STORE", "predecessor": 1,
+             "covers": [{"tensor": "y", "hbm_byte_base": 0x7000}],
+             "expected_ur_write_windows": [],
+             "expected_hbm_write_window": {
+                 "byte_base": 0x7000, "line0": y_l0, "lines": N_LINES},
+             "iq_files": iq_meta[2]},
+        ],
+    }
+    (case / "program_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8")
+    (case / "g3_expect.json").write_text(json.dumps({
+        "schema": "adr061.unified_expect/v1",
+        "stage_count": 3,
+        "barrier": {"exp_ldb_done": len(ldb_all),
+                    "exp_ldbaxi_done": len(axi_all),
+                    "timeout_cycles": 5000},
+        "wbarrier": {"bank": 2, "writes": N_LINES, "stage": 1,
+                     "timeout_cycles": 5000},
+        "s4barrier": {"addr0": y_l0, "writes": N_LINES,
                       "bresp": len(stbaxi), "timeout_cycles": 5000},
         "hbm_preload": {"files": hp_files},
     }), encoding="utf-8")
@@ -693,3 +874,90 @@ class ArbitrateProgramTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnifiedLcsCompareHornerTest(unittest.TestCase):
+    """C-H 独立参考公式化的鉴别性测试（2026-10-12 horner_v3u 步④失败形态
+    回归钉）：旧实现硬编码 y=alpha*(x+other)，对 horner 布局响拒
+    「布局缺张量 'other'」——本类证明泛化后非 scale_sum 形态可 GREEN，
+    且各篡改/形态破坏仍各自 RED。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.case = Path(self.tmp.name) / "case"
+        build_horner_case(self.case)
+        self.instr = Path(self.tmp.name) / "physical_instructions.json"
+        self.instr.write_text(json.dumps(
+            [{"iq_name": "vout0", "stage": "BODY", "header": {"VLD": 1}}
+             for _ in range(N_LINES)]), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_horner_green(self):
+        cmp_ = LcsCompare(self.case, [self.instr])
+        self.assertEqual(cmp_.run(), 0,
+                         msg=f"horner 形态合成完美终态必须 GREEN: {cmp_.bad}")
+        self.assertIn("input_modes", cmp_.report["c_h"])
+        self.assertEqual(cmp_.report["c_h"]["input_modes"].get("c0"),
+                         "stride0 标量驻留（line0 四 lane 核验）")
+
+    def test_horner_param_region_swap_red(self):
+        # c0 与 c3 区内容互换（LOAD 映射错位）→ 独立参考随之改变 ≠ golden/HBM
+        p = self.case / "memory_init_snapshot" / "memory_init1.hex"
+        lines = p.read_text().splitlines()
+        c0_l0, c3_l0 = 0x2000 // 16, 0x5000 // 16
+        c0r = lines[c0_l0:c0_l0 + N_LINES]
+        lines[c0_l0:c0_l0 + N_LINES] = lines[c3_l0:c3_l0 + N_LINES]
+        lines[c3_l0:c3_l0 + N_LINES] = c0r
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        cmp_ = LcsCompare(self.case, [self.instr])
+        self.assertEqual(cmp_.run(), 1)
+        self.assertTrue(any("(C-H)" in m for m in cmp_.bad),
+                        msg=f"参数区错位须由 C-H 捕获: {cmp_.bad}")
+
+    def test_horner_param_form_violation_red(self):
+        # c1 line0 仅改一个 lane（非标量驻留形态）→ 响亮 RED
+        p = self.case / "memory_init_snapshot" / "memory_init1.hex"
+        lines = p.read_text().splitlines()
+        v = int(lines[0x3000 // 16], 16) ^ (1 << 64)     # lane2 翻转 1 bit
+        lines[0x3000 // 16] = f"{v:032x}"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        cmp_ = LcsCompare(self.case, [self.instr])
+        self.assertEqual(cmp_.run(), 1)
+        self.assertTrue(any("非标量驻留形态" in m for m in cmp_.bad),
+                        msg=f"参数形态破坏须正面取证: {cmp_.bad}")
+
+    def test_formula_missing_red(self):
+        p = self.case / "program_manifest.json"
+        man = json.loads(p.read_text())
+        del man["formula"]
+        p.write_text(json.dumps(man, indent=2), encoding="utf-8")
+        cmp_ = LcsCompare(self.case, [self.instr])
+        self.assertEqual(cmp_.run(), 1)
+        self.assertTrue(any("缺 formula" in m for m in cmp_.bad),
+                        msg=f"缺 formula 须响亮 RED（不静默跳过）: {cmp_.bad}")
+
+    def test_formula_undeclared_leaf_red(self):
+        p = self.case / "program_manifest.json"
+        man = json.loads(p.read_text())
+        man["formula"] = man["formula"].replace("c3", "c9")
+        p.write_text(json.dumps(man, indent=2), encoding="utf-8")
+        cmp_ = LcsCompare(self.case, [self.instr])
+        self.assertEqual(cmp_.run(), 1)
+        self.assertTrue(any("公式解析失败" in m for m in cmp_.bad),
+                        msg=f"未声明叶须解析期响拒: {cmp_.bad}")
+
+    def test_extra_input_not_referenced_red(self):
+        # 布局装载了公式不消费的输入（ghost）→ 不静默放过（Z3 与 C-H 双闸）
+        p = self.case / "program_manifest.json"
+        man = json.loads(p.read_text())
+        man["hbm_layout"].insert(
+            1, {"name": "ghost", "role": "input", "bank": 6, "ur_line0": 0,
+                "lines": N_LINES, "byte_base": 0x8000,
+                "bytes": N_LINES * 16, "direction": "h2d"})
+        p.write_text(json.dumps(man, indent=2), encoding="utf-8")
+        cmp_ = LcsCompare(self.case, [self.instr])
+        self.assertEqual(cmp_.run(), 1)
+        self.assertTrue(any("未被公式" in m for m in cmp_.bad),
+                        msg=f"装载未消费输入须由 C-H 点名: {cmp_.bad}")

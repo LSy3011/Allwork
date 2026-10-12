@@ -9,8 +9,9 @@ physical_instructions.json（反空洞双源计数，沿用 ADR-055 A1 纪律）
       |T| == vout0 BODY vld 行数（逐段求和）+ LOAD 行数（LOAD 服务 bank 数
       × n_lines，manifest 声明）；T 上 dump==golden；T 外 dump==golden==init。
   C-H HBM 输出窗终态 == golden UR 输出窗（STORE 映射逐字节）
-      == 从 memory_init1 输入区独立 numpy fp32 重算（y=alpha*(x+other)，
-      逐 lane 中间值 fp32 舍入——与硬件 FPADD→FPMUL 两拍序同构）；
+      == 从 memory_init1 输入区独立重算（manifest 记录的公式经有序 AST
+      fp32 逐 op 舍入求值——与硬件流水同序；输入按 role 重建：
+      input=全行流、param=line0 四 lane 标量驻留形态正面取证）；
       HBM 窗口外 canary 完整（slice0 非窗口区 == 预载底图；slice1..7 ==
       标记图案——STORE 泄漏写检测）。
 口径：UR 读写次序/写账/屏障证据在 arbitrate_program（本工具不重复）。
@@ -32,6 +33,9 @@ import ldb_review_case_gen as g2  # noqa: E402
 from three_zone_compare import live_bodily_writes  # noqa: E402
 from unified_lcs_case_gen import (  # noqa: E402
     PROGRAM_MANIFEST_SCHEMA, UR_BANKS, UR_BANK_DEPTH, LINE_BYTES)
+from verification_v2.reference.ordered_ast import (  # noqa: E402
+    FormulaRejection, parse_ordered_formula)
+from verification_v2.reference import reference_generator as rg  # noqa: E402
 
 F32 = np.float32
 U32 = np.uint32
@@ -162,13 +166,27 @@ class Compare:
             self.err(f"(C-H) HBM 输出窗 != golden UR 窗 ×{len(diff)}（首例行"
                      f"{k}: hbm={hbm_win[k]:032x} golden={golden_win[k]:032x}）"
                      f"——STORE 映射断裂")
-        # 独立 numpy fp32 重算：输入 = memory_init1 各 h2d 区（外部存储真源）
+        # 独立重算：输入 = memory_init1 各 h2d 区（外部存储真源）；公式 =
+        # manifest 自包含记录，经有序 AST fp32 逐 op 舍入求值（与 V1 链
+        # independent_reference 同一 machinery、与硬件流水同序）。公式驱动
+        # 通用形态——不含算子名特判；输入按 role 重建并正面取证形态。
         init1 = _read_ints(self.case / "memory_init_snapshot" / "memory_init1.hex")
-        try:
-            x_e, o_e, a_e = lay["x"], lay["other"], lay["alpha"]
-        except KeyError as exc:
-            self.err(f"(C-H) 布局缺张量 {exc}——独立参考仅覆盖 scale_sum 形态")
+        formula = man.get("formula")
+        if not isinstance(formula, str) or not formula.strip():
+            self.err("(C-H) manifest 缺 formula 字段——独立参考无公式之源"
+                     "（adr061_program_manifest_v1 须自包含记录；旧 case 须重新生成）")
             return
+        load_entries = [e for e in man["hbm_layout"] if e["role"] in ("input", "param")]
+        reserved = [e["name"] for e in man["hbm_layout"]
+                    if e["role"] in ("output", "constant")]
+        try:
+            root = parse_ordered_formula(formula,
+                                         [e["name"] for e in load_entries],
+                                         reserved)
+        except Exception as exc:  # noqa: BLE001——解析失败须响亮入档
+            self.err(f"(C-H) 公式解析失败 {formula!r}: {exc}")
+            return
+        leaves = set(rg.leaf_paths(root).values())   # {路径: 叶名} → 叶名集
 
         def region_vals(e):
             l0 = e["byte_base"] // LINE_BYTES
@@ -177,41 +195,65 @@ class Compare:
                 vals.extend(_line_to_lanes(ln))
             return np.asarray(vals, dtype=U32).view(F32)
 
-        x, other = region_vals(x_e), region_vals(o_e)
-        # alpha = stride=0 驻留标量（yaml：消耗 1 word）：line0 四 lane 须全等、
-        # 其余行须全零（形态正面取证），然后按标量广播——与硬件 stride=0 重读
-        # line0 的消费方式及 ADR-056 独立参考的标量语义一致。
-        a_l0 = a_e["byte_base"] // LINE_BYTES
-        a_lines = init1[a_l0:a_l0 + a_e["lines"]]
-        a0_lanes = _line_to_lanes(a_lines[0])
-        if len(set(a0_lanes)) != 1:
-            self.err(f"(C-H) alpha line0 四 lane 不全等: "
-                     f"{[f'{w:08x}' for w in a0_lanes]}——非标量驻留形态")
+        inputs: dict[str, np.ndarray] = {}
+        modes: dict[str, str] = {}
+        for e in load_entries:
+            name, role = e["name"], e["role"]
+            if role == "input":
+                inputs[name] = region_vals(e)
+                modes[name] = "stream（全行）"
+            else:
+                # param = stride=0 驻留标量（yaml：消耗 1 word）：line0 四 lane
+                # 须全等、其余行须全零（形态正面取证），然后按标量广播——与硬件
+                # stride=0 重读 line0 的消费方式及 ADR-056 独立参考标量语义一致。
+                l0 = e["byte_base"] // LINE_BYTES
+                p_lines = init1[l0:l0 + e["lines"]]
+                p0_lanes = _line_to_lanes(p_lines[0])
+                if len(set(p0_lanes)) != 1:
+                    self.err(f"(C-H) 参数 {name} line0 四 lane 不全等: "
+                             f"{[f'{w:08x}' for w in p0_lanes]}——非标量驻留形态")
+                    return
+                if any(v != 0 for ln in p_lines[1:] for v in _line_to_lanes(ln)):
+                    self.err(f"(C-H) 参数 {name} line1.. 存在非零——非 stride=0 "
+                             "驻留形态（独立参考仅覆盖标量广播语义）")
+                    return
+                inputs[name] = np.asarray([p0_lanes[0]], dtype=U32).view(F32)
+                modes[name] = "stride0 标量驻留（line0 四 lane 核验）"
+        missing = leaves - set(inputs)
+        if missing:
+            self.err(f"(C-H) 公式叶 {sorted(missing)} 在布局中无输入区"
+                     f"（formula={formula!r}，可提供={sorted(inputs)}）")
             return
-        if any(v != 0 for ln in a_lines[1:] for v in _line_to_lanes(ln)):
-            self.err("(C-H) alpha line1.. 存在非零——非 stride=0 驻留形态"
-                     "（独立参考仅覆盖标量广播语义）")
+        extra = set(inputs) - leaves
+        if extra:
+            self.err(f"(C-H) 布局输入 {sorted(extra)} 未被公式 {formula!r} 引用"
+                     "——装载而未消费，不静默放过")
             return
-        alpha = np.asarray([a0_lanes[0]], dtype=U32).view(F32)[0]
-        y_ref = (alpha * (x + other)).astype(F32)   # 逐 op fp32 舍入
+        ev = rg.evaluate(root, inputs)
+        y_ref = np.asarray(ev.y, dtype=F32).reshape(-1)
+        if y_ref.size != 4 * n_lines:
+            self.err(f"(C-H) 参考求值元素数 {y_ref.size} != 4·n_lines="
+                     f"{4 * n_lines}（输入形态与布局不符）")
+            return
         ref_win = [_lanes_to_line(y_ref.view(U32)[4 * k:4 * k + 4].tolist())
                    for k in range(n_lines)]
         diff_rg = [k for k in range(n_lines) if ref_win[k] != golden_win[k]]
         if diff_rg:
             k = diff_rg[0]
-            self.err(f"(C-H) 独立 numpy 重算 != golden ×{len(diff_rg)}（首例行{k}: "
-                     f"ref={ref_win[k]:032x} golden={golden_win[k]:032x}）")
+            self.err(f"(C-H) 独立重算（公式有序 AST）!= golden ×{len(diff_rg)}"
+                     f"（首例行{k}: ref={ref_win[k]:032x} "
+                     f"golden={golden_win[k]:032x}）")
         diff_rh = [k for k in range(n_lines)
                    if k < len(hbm_win) and ref_win[k] != hbm_win[k]]
         if diff_rh:
-            self.err(f"(C-H) 独立 numpy 重算 != HBM 窗 ×{len(diff_rh)}"
+            self.err(f"(C-H) 独立重算（公式有序 AST）!= HBM 窗 ×{len(diff_rh)}"
                      f"（首例行{diff_rh[0]}）")
         self.report["c_h"] = {"golden_vs_hbm": not diff,
                               "ref_vs_golden": not diff_rg,
                               "ref_vs_hbm": not diff_rh,
-                              "reference": "numpy fp32 y=alpha*(x+other)，"
-                                           "alpha=stride0 标量广播（line0 核验）"
-                                           "，输入=memory_init1 区域"}
+                              "reference": f"公式有序 AST fp32 求值（{formula}），"
+                                           "输入=memory_init1 区域按 role 重建",
+                              "input_modes": modes}
         # canary：slice0 窗口外 == 预载底图（检查 memory_init1 覆盖范围）
         spans = [(e["byte_base"] // LINE_BYTES,
                   e["byte_base"] // LINE_BYTES + e["lines"])

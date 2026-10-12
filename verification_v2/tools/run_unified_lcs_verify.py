@@ -62,7 +62,11 @@ class UnifiedOrchestrator(Orchestrator):
         case = self.cfg.sandbox / "test_atomic_ops" / self.cfg.suite / sctx.case_name
         tb = self.cfg.sandbox / "sim_multi_stage" / "tb_aiacc_top_v04_f_multi_stage.v"
         try:
-            manifest = build_unified_case(sctx.build_copy, case, sctx.n, tb)
+            op = self._get_operator(sctx)
+            manifest = build_unified_case(
+                sctx.build_copy, case, sctx.n, tb,
+                op_name=Path(self.cfg.op_yaml).stem,
+                formula=op.formula_str)
         except SystemExit as e:
             raise StageFailure(["TYPE_LAYOUT_UNSUPPORTED"],
                                f"统一 case 装配响亮拒绝: {e}") from e
