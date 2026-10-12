@@ -21,6 +21,11 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-10 | **F6 阶段二：错误检出/通知/FAILED 锁定定向验证通过（五项令 #2）** | TB-B 三模式（legacy 原树/重建 p1/阶段二 p2）判据 v2 全 AS-EXPECTED，fixed_p2 B1–B6 首跑全 PASS；签收=「隔离 RTL 中 IQ24–27 定向验证通过」，**不支持完整契约已修复/可上板** | F6 文档 §13；`artifacts/f6_phase2_rtl_20261010`、`f6b_smi_fixed_p2_20261010` |
+| 2026-10-10 | F6 阶段一复核补丁（用户复核裁定） | 重复载荷同拍 NBA 漏洞→当拍协议异常并入完成排除；C7 定向+变异核验（移除排除项即复现）；签收措辞限定为隔离 RTL 定向验证 | F6 文档 §11.5 |
+| 2026-10-10 | F6 阶段二设计冻结 + 复杂公式结构预检（五项令 #5 穿插） | E1/E1′/E2/E3/E4 设计、R-DELAY-0 审计表、判据 v2 矩阵**先冻结后跑**；horner_v3 静态预检交付 | F6 文档 §12；`docs/precheck_complex_formula_20261010.md` |
+| 2026-10-09 | F6 阶段一：提前完成竞态修复（隔离副本） | TB-A C1 done 22→32=lcv+2 转绿、兼容用例逐拍一致；TB-B fixed_p1 首跑 AS-EXPECTED | F6 文档 §11；`artifacts/f6_phase1_rtl_20261009`、`f6b_smi_fixed_p1_20261009` |
+| 2026-10-08 | F6 契约 v3 定稿 + RTL 冻结基线 | LSU 完成契约 v3（Q6/Q7/三边界）裁决落定；139 文件冻结清单+隔离副本建立 | F6 文档 §1–§10；`artifacts/f6_rtl_freeze_20261008` |
 | 2026-09-30 | **ADR-056 步⑤：V1 闭环验收** | scale_sum 配置-only 准入、n4/8/60/240 GREEN、n244 响亮拒绝、全回归过；步⑤暴露并修复失败码提取缺陷（`/G-xxx` 注解） | `verification_v2/artifacts/v1_step5_scale_sum_acceptance_20260930/README.md`；ADR-056 §F-回填 |
 | 2026-09-30 | ADR-056 步④：统一验证链 | 十段编排器 run_v1_verify.py、发布通道分列（v1_admission vs frozen_regression）、失败不发布契约 | develop@74d6557；`tests/unit/test_run_v1_verify.py` |
 | 2026-09-29 | 步④-1/2：冻结协议模型 + TB 三日志探针 | 注册表 v1→v2 独立版本化（v1 首跑 RED → RTL 行级取证 → 勘误修正）；72 铺针 + G1–G5 全局仲裁 | `artifacts/protocol_expectations_add_v2_20260929/` |
@@ -48,10 +53,12 @@
 | **V1 通用准入（核心贡献候选）** | ADR-056 全链：L1/L2/L3、八闸门、双道数值域、发布制 | VCS（add/add_v1/scale_sum × 4 规模点） | 仅单 SMC；形态覆盖=2 类槽形态 |
 | 容量边界与响亮拒绝（工程严谨性案例） | 步⑤ n=240 顶格 + n=244 拒绝 + 失败码传递缺陷修复 | VCS + 契约测试 | — |
 | 搬运路径（LDB/STB） | ADR-050（LDB 取证史）/ADR-052（STB 阶段1） | LDB 有 VCS；**STB 仅编码层** | M3 端到端未做 |
+| F6：完成协议缺陷「发现—复现—修复—定向验证」闭环（问题驱动验证案例） | F6 契约 v3 + TB-A/TB-B 三模式（legacy/重建 p1/p2）+ 判据演进 v1→v2 记录 + 变异核验 | 仿真（VCS TB 定向；隔离 RTL） | 门②门③真实单元回归未在修复 RTL 上执行；不支持上板/完整契约宣称 |
 | 上板闭环 | **编译器产物无**；手写线 llama r2 PASS | 上板（手写线） | 编译器上板 = 最大缺口（已降级为周期抽验，不阻塞主线） |
 
 ## 4. 遗留债务登记（随验收保留，不豁免）
 
+- F6 门②（LDB L1/L2 真实 LOAD）/门③（M3-lite 真实 STORE）回归未在阶段二修复 RTL 上执行（五项令 #3）；STORE 外部完成缺口（F6-C）保持验证屏障，不宣称 host 闭环已解决
 - flat ISSUE 层 VCS 实证缺口（ADR-056 §D.4 入门槛项）
 - c0_spread 常数未冻结（仲裁器仅记录）
 - 反压未建模（统一入口只支持无反压展开形态；出现即 UNVERIFIED）
@@ -573,3 +580,393 @@
   （README + 26 项 sha256 冻结）。
 - pytest 523→**526**。待办：commit 任务 1 全集 → BPDBG 探针验证
   errata ⑧ 假说（任务 2 收口）。
+
+## 2026-10-08 任务 2 收口：BPDBG 实证 → master 侧合法注入「延迟→恢复→GREEN」→ F6（矩阵线）提案起草
+
+- **BPDBG 探针实证 errata ⑧ 假说全中**：释放后 64/64 拍不动点
+  `{bmc_ds2_bvalid=1, bready=0, brg_fifo_empty=0, mtx_pending=1, mtx_slv_bvalid=0, mtx_cnt_empty=1}`；
+  「桥 FIFO 捕获失效」子假说证伪。死锁=矩阵 ds2 上送否决自锁（errata ⑧ 机制成立）。
+  TB 指纹 `95382ceb…030b`；归档 `artifacts/m3lite_gate3_bpdbg_20261008/`。
+- **us3bp n=150 首次达成「延迟→恢复→GREEN」**（合法注入点 `de_stb_bready[0]`，
+  master 源头）：inject@1172 < bvalid risen@1192 < release@1321 ≤ drained@1321，
+  delay=129 拍，释放后窗口矩阵 ds2 三态 pending=0 无楔死，比对 GREEN。
+  此前「反压后未恢复」归因**注入点非法**（边界 force 分裂视图），非 DUT/桥缺陷；
+  措辞裁定对称保持：不外推「硬件已证健壮」。n=400 腿 $finish 早于预定 release
+  的假绿已分账（教训：注入窗必须短于运行自然尾部）。比对器 us3_mode 分支 +4 测试；
+  pytest 530。TB 指纹 `355d48d4…52a54`；归档 `artifacts/m3lite_gate3_us3bp_20261008/`。
+- **F6 指代钉死**：F6 本义 = LSU 完成竞态修复（RECON §4 A/B，IQ24/25/26/27/92
+  影响面，**仍待拟**）；矩阵死锁为任务 2 遗留的另一条线。
+- **F6 提案（矩阵线）已起草待裁决**：`docs/adr/F6-proposal-ds2-bresp-forward-veto.md`。
+  结论：合法环境下矩阵无功能缺陷（幻影必要条件是 force 分裂视图，源码因果论证 +
+  合法注入实证对照）；推荐选项 B = 不改 RTL + TB 侧常驻「不可能态」检查
+  （pending&cnt_empty 持续 >16 拍即响亮失败）；选项 C（RTL fail-open）不推荐。
+  四裁决问题：命名（F6/F6b）/ 选项 / 阈值与处置 / LSU 线 F6 是否立项。
+
+## 2026-10-08 任务2收口裁决落地：RESPACCT 常驻监测 + 全链回归符合预注册期望
+
+- **用户四问裁决（2026-10-08）**：①命名——矩阵线定名「任务2收口：DS2 写响应
+  注入与监测」，**F6 专属 LSU 线**（提前完成竞态及完成契约修复）；②选项 B 批准
+  带两处论证修订（删「无功能缺陷/只能由 force 制造」绝对表述；§4「pending=1 时
+  无 forward、无减账」与 RTL :413 不符，重写为接收/缓存/交付/计数守恒两交付形态）；
+  ③阈值 16 连续有效采样拍 `$fatal`——**诊断防抖阈值，非协议允许延迟上界**，专属
+  标记 `[G3_RESPACCT][FATAL]`，编排器识别判 RED 不发布、不得被预期超时通道吸收；
+  ④**LSU F6 立即立项**，先 1–2 工作日设计评审，**暂不授权改 RTL**；修复
+  WAIT_DRAIN 提前采零 ≠ 自动得到 STORE 外部完成保证，设计须分四完成层次
+  （分发/LOAD/STORE/软件可见）。
+- **定稿文档**：`docs/adr/task2-closure-ds2-bresp-injection-monitoring.md`
+  （旧 F6-proposal 文件删除）；ADR-060 errata ⑩ 回填。
+- **实施**：TB 新增 RESPACCT 常驻块（复位清零/条件消失即清零/第 16 连续命中拍
+  触发，先诊断行后 $fatal；指纹 `3324a33b…f7c5`）；比对器新增 respacct 专属
+  判定通道 + C0 全模式「无 RESPACCT」防误报 + 超时分支防吸收断言；run.sh bp/
+  to_s4 腿期望改判 respacct（**限制落账：S4BARRIER TIMEOUT 通道自此失去在套
+  激发**，WBARRIER TIMEOUT 由 to_wb 继续覆盖）；pytest +5（gate3 55/55，全量
+  **535**）；VCS 冒烟编译 exit=0（generate 作用域分层引用 elaborate 通过）。
+- **回归（同日下午，后台链 45s）**：套件 `m3lite_g4_respacct_20261008` 总判
+  **ALL-LEGS-AS-EXPECTED**——positive GREEN（red=0 warn=4）零误报；neg
+  NEGATIVE-CONTROL LIVE（red=6）；**bp 与 to_s4 腿均被 RESPACCT 提前终结于
+  12275000ps**（同拍确定性；旧死锁原挂 62385000ps），fatal_expected respacct
+  判定双双 PASS（标记恰 2 处=TB $display+VCS echo，其后零 dump）；to_wb 腿
+  WBARRIER 超时通道独立激发（9495000ps）且防吸收断言 PASS。第六腿 us3bp
+  n=150 复跑 **GREEN（red=0 warn=6）零误报**，拍号与 round6 首次达成逐拍
+  一致（inject1172/risen1192/release1321/drained1321，delay=129 stall=149），
+  信用不对称复测同值（−7/−3）。
+- **裁决预期逐条核对**：负控准确命中新报警 ✓；合法反压与正常运行不误报 ✓；
+  旧死锁不再要求存活至原超时 ✓；历史证据原样冻结 ✓。
+- **归档**：`verification_v2/artifacts/m3lite_gate3_respacct_20261008/`
+  （README + 六腿 sim.log + 七份报告 + expect 快照 + 全链 console log，
+  16 项 sha256 冻结）。
+- **下一步（裁决执行顺序第二步）**：F6 LSU 完成契约设计文档（1–2 工作日
+  设计评审，不改 RTL；四完成层次 + RECON §4 A/B 对照评估 + 影响面
+  IQ24/25/26/27/92 与 llama r2 上板同路径 + InchiTech 第三方 IP 权属）。
+
+## 2026-10-08 F6 LSU 完成契约设计评审稿交付（裁决④第二步，未改 RTL）
+
+- **文档**：`docs/adr/F6-lsu-completion-contract-design.md`。按裁决④四完成
+  层次立契约骨架：L0 分发完成（rdi_done_dispatch=w_prog_done，inst_queen
+  :405-413/:441-442，空队列 0>=0 即 fire）/ L1 LOAD 完成（crd_ldb 结构性
+  在末写后，缺口只在排空武装）/ **L2 STORE 完成（crd_stbaxi 语义上限=AXI
+  受理，DUT 内无 B 对账：DW_axi_gm 响应侧 svalid/sdata/sid/slast 全悬空、
+  mready 绑 1，stb_top.v:216-222；B 错误仅经 sresp→axi_err 单路径上报）** /
+  L3 软件可见完成（batch_done 聚合，保证=min(L1,L2)）。
+- **A/B 候选评估**：seen-nonzero 双陷阱（空队列死锁需 N=0 旁路；电平式
+  武装不可区分「未升起」与「已升已落」）；计数相等双陷阱（批间稳态 0==0；
+  64bit 计数器跨批自由滚动无批边界）。**共同根因=排空判定缺「本批应计
+  指令数 N」输入**。
+- **契约草案 C-F6**：C-ARM（N 随 dispatch-done 送出，N==0 当拍完成）+
+  C-DRAIN（增量对账 (crd−base)==N，D1 快照/D2 递减两形态，评审建议 D1）+
+  C-VIS（sid 配对不变量经 START 链构造保持）。语义上限钉死：**修 WAIT_DRAIN
+  只把 L1 提到满额、L2 提到信用上限；不自动得 STORE 外部完成**。
+- **选项表**：F6-0 不改（保底）/ **F6-A 推荐**（C-F6 武装，改动面
+  inst_queen+lsu_complete+smi_top 连线）/ F6-B 不推荐（批语义渗入执行层）/
+  F6-C（B 对账）建议独立立项不捆绑。
+- **影响面**：五队列完成只会变晚不会变早（单调加强论证）；llama r2 上板
+  同路径须板级复验决策（上板 PASS 结论不自动继承）；START 链式批污染通道
+  消除属收益面但回归须新增多批链用例；手写线三处经验避险修复后是否可退役
+  另行评估不得默认退役；软复位相干冲刷已核销（smi_rst_n 含 cfg_rst_pulse）。
+- **评审发现落账**：R1 ir_err 与 batch_done 共享 intid 自增（中断计数
+  混叠）；R2 信用超发不阻断 done；R3 w_axi_err 直连分接被注释禁用；
+  R5 outstanding 2bit 饱和视图对零检测无损。
+- **留用户裁决五问**：F6-A 批准与否/D1 vs D2；R1 是否配套修；F6-C 独立
+  立项确认；板级复验触发条件；InchiTech 上游版本基线沟通。
+
+## 2026-10-08 F6 五项裁决 + v2 有界契约修订（仍未授权改 RTL）
+
+- **用户裁决（五项+两措辞修订）**：①F6-A 方向保留、D1 首选，但 v1 契约
+  有**永不完成漏洞**——dispatch-done 拍取信用快照漏掉武装前已返回的信用
+  （N=3 已回 2 笔则增量永远达不到 3），「已升已落天然入账」撤回；基线须
+  前移到**批起点**，dispatch-done 只锁定目标数；完成=四联言（分发关闭 ∧
+  应发齐 ∧ 信用齐 ∧ 无未处置错误）；N 不得直接取 `r_wr_inst_cnt`（存储
+  写计数），1:1 对应仅在枚举支持形态成立。②R1 独立登记不改编码，但
+  错误语义必须进 F6-A 验收（错误不得经计数相等形成成功；host 可区分
+  错误/成功；错误退出与后续 START 规则须定义）。③F6-C 独立立项不捆绑；
+  「DUT 内无任何 B 对账」收紧为「批完成判定链接入的现有信号中无写响应
+  完成保证」。④板级复验另行裁决（提交 RTL 差异/指纹/影响路径/回归/
+  构建回滚五材料），旧板端 PASS 不继承。⑤本地冻结实际 VCS RTL+依赖+
+  参数+哈希、隔离副本实验；上游确认为正式合入前提。措辞修订：「完成
+  只晚不早」→「绝不早于本批真实完成条件」；竞态用例旧 RED/新 GREEN，
+  兼容用例允许两版皆 GREEN。
+- **v2 修订稿已交付**：`docs/adr/F6-lsu-completion-contract-design.md`
+  四钉死——**C-BASE**（批起点 S=START 自动弹出拍，注册脉冲每批恰一次；
+  cru/crd 双基线快照；首笔信用下界 ≥S+3；批起点不变量 crd==cru 防御
+  检查+响亮拒绝；软复位相干归属）·**C-N**（单位审计表：M3-lite LSU
+  描述符行实测 LDB 2/2、STB 1/1 成立；VLD=0/LOOPS>0/INIT/TERM 混入=
+  排除形态；EXTRA_DATA 范围外；核心假设 A-credit「每个 inst_valid 恰一
+  信用」可证伪、内建 id 自校兜底；N=inst_amount 于 dispatch-done 同拍
+  采样=R9 窗口）·**C-DRAIN**（四联言对注册值求值；同拍归属 t≥S；第 N
+  笔信用 t+1 可见 ⇒ done 绝不早于真实完成；64bit 模减回绕非问题；
+  N==0 当拍完成=时序变更点按兼容用例验收）·**C-ERR**（E1 err_sticky
+  阻断计数成功/E2 单元错误位接入重映射/E3 int_err 置位+done_r 保持 0/
+  E4 FAILED 退出+START 冲刷+软复位恢复/E5 进验收）。
+- **评审新发现（v2 回源取证）**：R6 int_err 不被 ir_err 置位（仅队列
+  溢出置位）→错误中断与成功不可区分；R7 信用单元错误位（7bit bit6）
+  在 smi_top :494-497 重映射被丢弃，ir_err 仅反映 dly_queen 簿记自检；
+  R8 错误后 glue_busy 不清→批楔死、START 停摆至 cfg_rst；R9
+  r_wr_inst_cnt 于 dispatch-done 同拍清零→N 采样窗口=同拍。
+- **留裁决**：Q6 错误时 intid 是否停止自增（建议停）；Q7 N 排除形态
+  走准入门拒绝还是契约内挂死（建议准入门）。
+- 矩阵线按裁决维持限定范围收口，不再追加工作。
+
+## 2026-10-08 F6 第三轮裁决：Q6/Q7 定案 + 三条时序边界 → v3 契约（边界先落契约与测试，仍不改功能 RTL）
+
+- **第三轮裁决全文落实**（用户对 v2 的五点回覆）：**「同意继续采用 D1
+  双基线方案，进入定向测试与隔离实验实现的准备；上述边界先落入契约
+  和测试，再改功能 RTL。无需再扩展一轮大方案。」** F6-A 目标重申限定
+  = **本批发射与信用正确对账**；STORE 外部完成仍属 F6-C。
+- **Q6 定案**：错误时 intid **继续自增**（v2「停自增」建议被否——
+  `intr_ro=(intid_hw_r != intid_sw_r)`，停自增将饿死等中断的 host）。
+  最小方案入 E3：intid=通知事件序号、同一失败沿触发只通知一次、
+  int_err 置位 + done_r 保持 0、同拍错误优先不登记成功、明文
+  「intid 增加≠一批成功完成」、int_q_full（R11：8bit 通知序号回卷
+  保护 :118/:122，满时 :282 置 int_err 抑制自增）入测试 T-INTFULL。
+- **Q7 定案**：**准入拒绝**（响亮挂死不缔约）；检查覆盖**最终指令包
+  一切入口**（非仅 case_gen），拒绝报告队列/行/字段/原因；**IQ92
+  限制修复范围**——信用源 `u_smc.ds_crd_ds_o`（6bit 链无错误位，
+  R12）未审计，不得据四队列证据宣称五队列支持，IQ92 实例保留旧
+  行为（per-instance 使能）。
+- **三条时序边界落入契约**：
+  ① 同拍错误双排除（err_sticky ∧ err_detect_now）+ 错误源流水线
+  延迟审计表（实施准备必做）+ T-ERRSYN/T-ERRLATE；
+  ② FAILED 持续锁存（排队与新写 START 均封锁，不靠 host 自律）+
+  **新结构性发现 R10：cfg_rst 不触达信用源**（u_smc 仅 rst_n，
+  aiacc_top_f.v:1916-1918；o_cfg_rst 上行 TB 悬空）——「cfg_rst 后
+  必然安全恢复」不得写成已证结论，恢复路径 (a) 实测静默窗 /(b) 信用
+  源门控待择，T-RSTLATE 先行且两案测试相同；
+  ③ N+sid 单载荷 `{dispatch_closed_valid, batch_sid, N}`（生产者
+  inst_queen 在 rdi_done 脉冲拍的清零同 posedge 注册，NBA 读清前值；
+  消费者 lsu_complete 单拍捕获），附正常批/空批/连续不同 sid +
+  S 快照四张逐拍表；基线快照精化为**静默窗 [S,S+3) 内任一拍**。
+- **首批验证优先级**（裁决原文）落 §9.0：T-PREARM（武装前信用已
+  返回，旧 RED/新 GREEN）/ T-EMPTY、T-LASTCRD、T-ERRSYN /
+  T-FAILLOCK / T-RSTLATE / T-INTFULL。
+- **冻结基线落地**（第二轮裁决 5）：`verification_v2/artifacts/
+  f6_rtl_freeze_20261008/`（README + RTL_FREEZE_MANIFEST.txt 79 行
+  sha256+size+mtime + SHA256SUMS）；TB 指纹 3324a33b…f7c5 与
+  RESPACCT 回归归档一致（未漂移）；smi/+data_engine/ RTL mtime 全为
+  2026-07-21（原始树自备份以来未改）；编译器仓库侧脚本以 git commit
+  记账不入清单。隔离副本在实施启动时 cp -a 建立并以清单校验。
+- **v3 文档**：`docs/adr/F6-lsu-completion-contract-design.md`（全量
+  重写为 v3；新增 R10/R11/R12；§10 六问全部落定，剩四项实施准备项：
+  错误延迟审计表/恢复路径择定/隔离副本/DS 审计[仅当未来主张 IQ92]）。
+
+## 2026-10-09 F6 四步执行令：步①②③完成 + 步④ TB-A legacy 基线 AS-EXPECTED
+
+- **执行令（2026-10-08 用户原文）**：①错误源延迟审计（错误不晚于成功
+  判定被识别，覆盖末笔信用与错误同拍）②固定恢复边界（FAILED 持续锁定；
+  cfg_rst 不得单独解锁；未证明的静默等待/信用屏蔽不作恢复依据；
+  T-RSTLATE 验证迟到信用不触发新批/假成功）③可恢复隔离副本（实际
+  源码+编译依赖+哈希，不只清单；mtime 不作历史未修改证明）④定向测试
+  （先复现原始竞态，再覆盖空批/末信用/同拍错误/FAILED 锁定/通知队列满；
+  快照选定明确采样拍）。范围 IQ24–27；IQ92/STORE 外部完成/通用软恢复
+  不纳入；准备完成后才进隔离副本最小 RTL 修复。
+- **步① DONE**：§4.3 审计表——枚举错误源全部与信用计数同块同拍注册
+  （dly_queen :184-202 同 always 块同 `if(w_crd_inst_done)`，相对延迟 0）；
+  设计规则 **R-DELAY-0** 钉死后续接入；附注 source-2 的 :193 预增量比较
+  存在 1/16 同 id 迟到信用逃逸窗（非安全机制，已记录）。
+- **步② DONE**：§4.5 E4 重写——failed_latch 双置位（err_sticky 上升沿
+  ∨ 在飞期间 cfg_rst），**仅 rst_n 解锁**（rst_n 触达信用源 R10；
+  cfg_rst 空闲期=合法配置操作）；静默等待/信用屏蔽明确排除；
+  T-RSTLATE 重写为三子项（在飞 cfg_rst 封锁 / 迟到信用无武装无联言
+  无 done / rst_n 后新批 GREEN）。
+- **步③ DONE**：冻结清单扩围修正 79→139 文件（首版漏 smc/ 编译依赖，
+  README 记作废）；隔离副本 `/home/juno1023/u280_sim_v422_f6a_20261008/`
+  建立并 **139/139 逐哈希校验**（ISOLATE_VERIFY.log ALL-OK）；mtime 降格
+  为元数据，唯一历史正面证据=lsu_complete 与 .pre_sync_reset 备份
+  **sha256 逐字节一致**（40b4573d…149c，新增 R13）；冻结目录 SHA256SUMS
+  重封（README/manifest v2/ISOLATE_VERIFY）。
+- **步④ TB-A DONE（前半）**：`verification_v2/f6a_unit/`（契约级单元 TB +
+  legacy 包装器 + 分离裁决器 f6a_unit_check.py + 运行器，DUT sha256 打入
+  日志）。**legacy 基线 overall=AS-EXPECTED**：C1 原始竞态复现
+  （done−末信用可见=−8，dispatch 落 outstanding==0 空窗即放行）、
+  C5 同拍错误漏放复现（err 145 可见后 146 仍放行 done，旧模块无错误
+  输入）、C2/C3/C4/C6 PASS。快照采样拍钉死 SAMP=S+1（§4.1，删除
+  「静默窗内任一拍」歧义）；断言一律相对拍差，==仅约束 fixed、legacy 按
+  >=判「不早于真实完成」。TB 自身两缺陷已修并记录（复位沉降窗监测器
+  重捕获滞留 err_sticky；可见拍打印 +1 偏差统一为 lc+2）。
+  归档 `verification_v2/artifacts/f6a_unit_legacy_baseline_20261009/`
+  （事实日志+裁决输出+7 项 sha256）。
+- **步④ TB-B DONE（后半，同日完成）**：`verification_v2/f6b_smi/`
+  （DUT=隔离副本内整个 smi_top 壳；host 全走真实 AXI；信用在 u_smc
+  边界端口 `i_crd_stb` 注入并逐笔 `[F6B_INJ]` 记录；分离裁决器；
+  运行器分档退出码 0-7 + 每轮全新 work 目录 + legacy 五文件哈希守卫
+  对齐冻结清单）。**legacy 基线 overall=AS-EXPECTED**（B1-B4 预期
+  首跑前冻结、B5 于首跑前冻结）：
+  B1 T-FAILLOCK VIOLATION 三违约全命中（R6 实证 err 仅 intid+1 不置
+  int_err；cfg_rst 清锁后新批照样发射=iss_postcfgrst 1；1 指令批零真
+  信用竞态完成 eid=2）；
+  B2 T-INTFULL PASS（R11 回卷保护完好 50→255→int_err+intr）；
+  B3 T-RSTLATE 字面序 PASS（诚实注记：旧信用先于新 START 时 legacy
+  为 executing_inst_cnt 0→7 下溢静默楔死，与锁定 host 面不可区分，
+  鉴别归 B4/B5）；
+  B4 1 指令批竞态抢先完成（intr@3374 早于旧信用@3387 十三拍）；
+  **B5 真·归因假成功实证**（C=2 指令防竞态抢跑，两笔 cfg_rst 前批次
+  旧信用 id=0/1 凑足 cru=2，intr@3656 晚于第二笔@3652 四拍——R10
+  危害在集成壳内复现）。
+  普遍观察：legacy 上一切 N=1 批完成皆为竞态完成（对照批 D 的 intr
+  亦早于其真信用 2 拍），与 TB-A C1 互证，直接支撑 C-N 计数要求。
+  TB 自身缺陷修复记录：negedge 采样幻影握手（DW_axi_gs aselect 组合
+  抬起 ready 骗过电平等待 → 改 posedge 接受计数器，写通道此前能用仅
+  相位侥幸）、CSR 读协议 arsize=2、eid 字段勘定 w[8:7]（首轮 B3
+  SURPRISE 全部来源=TB bug）、捕获器取存须在 hard_reset 前。
+  悬空 ir_*_rdy 已登记不补绑（iss0=3 实证本配置不触达）。
+  归档 `verification_v2/artifacts/f6b_smi_legacy_baseline_20261009/`
+  （实测报告+sim/check/compile 三日志+12 项 sha256）。
+- **执行令步④至此全部完成**。其后：隔离副本内最小 RTL 修复
+  （不重启大方案讨论；范围 IQ24-27；IQ92/STORE 外部完成/通用软恢复
+  不纳入）。
+- **只读核验 DONE（2026-10-09，用户只读核验令步①-④；原树与冻结
+  基线全程未动，未改任何 RTL）**：
+  步① 版本确认 4.22（PARAM_RTL_VERSION=0x00042200）；完成链结构
+  证实空窗（lsu_complete 45 行通读：不持 N、不做信用对账，WAIT_DRAIN
+  首采样 outstanding==0 即完成）。
+  步②「以前为什么通过」：mul_scalar stage_2 STB/STBAXI（IQ24/25）均
+  INST_LINES=1（N=1）→ 板上同为竞态完成（RTL 同源强推断非直接观测）；
+  通过原因=host 时标遮蔽（poll 10ms/DMA ms 级 vs 竞态窗口 ns 级，
+  5-6 个数量级余量）+ runner 从不检查提前 done（唯一交叉检查
+  int_delta≠1 为非致命 WARN，竞态完成恰好 intid+1 连 WARN 都不触发）。
+  步③ C1 逐拍复核：TB 语义核验六项全过（Δ1/Δ2 诚实注记均惰性）；
+  复现逐字段一致（done@22 vs 末信用可见@30，−8 拍）；决定拍铁证
+  （done 置位 posedge 上 cru=1∧crd=1，指令 2/3 尚未发射）；NBA 采样
+  推论：同拍注册不救 ⇒ N=1 批结构必然竞态。新增 trace TB
+  `f6a_unit/tb_f6a_c1_trace.v`（归档 TB 全部未动），归档
+  `artifacts/f6a_c1_trace_20261009/`（5 项 sha256）。
+  步④ 三分类落账于 F6 设计文档 §10-6：已证实旧实现缺陷（提前完成
+  竞态+N=1 结构必然性）/ C-F6 新增要求（C-N/C-DRAIN/C-PAYLOAD/C-ERR/
+  E4/SAMP=S+1/R6 记录）/ 尚待确认（错误处理与复位锁定进一步核验待
+  用户裁决；IQ92/STORE 外部完成范围外；板上直接观测需探针未做）。
+  最小修改范围初判：仅提前完成一项=F6-A 核心子集（C-BASE+C-N+
+  C-DRAIN+C-PAYLOAD；C-ERR/E4 可后置），拆分实施待裁决。
+- **第四轮裁决落账（2026-10-09，当前管辖）**：先补齐错误处理与复位
+  锁定的只读核验（错误来源及延迟/同拍错误与 done 优先级/cfg_rst 清理
+  范围/在飞状态判断/rst_n 是否覆盖旧信用来源，继续区分旧行为与新增
+  契约要求）；随后分两阶段实现——阶段一修提前完成（计数对账+批次
+  载荷+规定采样时序，仅签收「提前完成修复」，不宣称 TB-A/TB-B fixed
+  全 PASS），阶段二补齐 E1-E5+R-DELAY-0+恢复边界后执行完整 fixed
+  验收与既定回归。**最终按完整 C-F6 v3.1 契约验收，拆分不降低验收
+  要求**；阶段一接口设计须容纳后续错误抑制与锁定。三处收紧已同步
+  修订（F6 文档 §10-6/裁决记录 7、trace 归档 README 重封、本条）：
+  ①「N=1 竞态」限已核实时序与初始状态、不推广未核实路径；
+  ②host 毫秒级等待仅解释旧测试未暴露，无板上直接时序证据不断言
+  「真实写入必然完成、因果无害」；③不提前断言改动全部只在
+  lsu_complete 内（修复需接入发射数/信用/批次信息）。不重启大方案
+  讨论、不必每步等批准；原树/冻结基线/IQ92/STORE 外部完成不动。
+- **只读核验② DONE（2026-10-09，第四轮裁决第 1 项：错误处理与复位
+  锁定；纯源码核验无新仿真；引用文件 8/8 哈希复核=冻结清单）**，五问
+  全部直接读码闭环、落 F6 文档 §10-7：
+  Q1 错误来源=dly_queen err（信用同拍注册，R-DELAY-0 成立；粘性）→
+  ir_err OR → 边沿检测 → 仅 intid+1（2 posedge），int_err 不置位（B1
+  源码级印证 R6）；**源码观察①=检出 off-by-one（预增 crd>cru，首笔
+  越界信用不触发，与 B5 静默吸收一致）**；**源码观察②=粘性 err+OR
+  边沿 ⇒ 后续错误（含跨队列）复位前静默**；IQ0-23/28-66/桥/93 err 与
+  error_inst_queen 全为死路（正面取证）。
+  Q2 同拍 err+done：单 intid 自增入口、done 照常置位、无优先级无排除
+  ——host 面与干净成功不可区分（单元级 C5+系统级 ctrl_regs :281-297）。
+  Q3 cfg_rst=ctrl_regs 全可变状态清零+smi_rst_n 单拍扇出全部 IQ/
+  lsu_complete/dispatcher/packer/ds_t（dly_queen cru/crd/executing/err
+  全清→粘性 err 清后通知重新武装）；不触达 u_axi_wrapper/DW_axi_gs
+  （raw rst_n）与 u_smc 信用源（R10；o_cfg_rst 唯一消费者为 TB，全树
+  grep 正面取证）。
+  Q4 host 可读全集=CFG/INT/IQ_EN×4/START/DONE/RTL_VERSION，**无在飞/
+  outstanding/credit 可见性**；glue_busy 等内部态无 host 通道。
+  Q5 rst_n 覆盖信用源逐跳直接读码：u_smc(:1916-1918 唯一 rst_n)→
+  u_stb→stb_ur_axi_conv GEN_CRD_STB_O :804/GEN_CRD_STBAXI_O :1161+
+  ldb_ur_axi_conv :1482/:1000 四路信用寄存器复位分支全直接读到——
+  **rst_n 后无旧信用滞留（E4 rst_n 唯一解锁自洽）；cfg_rst 不触达
+  （R10）危害已由 B5 实证**。DS（IQ92）链未审计（R12 范围外保留）。
+  三分类追加：旧行为登记 6 条/C-F6 新增要求归阶段二/本轮无新增尚待
+  确认源码问题。**下一步=阶段一实现（隔离副本内修提前完成：计数对账
+  +批次载荷+规定采样时序，接口须容纳后续错误抑制与锁定；仅签收
+  「提前完成修复」）**。
+- **F6 阶段一实现 DONE（2026-10-09，用户阶段一令：只验收「提前完成修复」，
+  错误抑制/通知/FAILED 锁定留阶段二）**，隔离副本 6 文件（全树 diff 正面
+  证据仅此：新增 smi_iq_lsu_complete_f6.v=SAMP 快照基线+C-PAYLOAD 载荷
+  捕获+C-DRAIN 计数对账完成条件；dly_queen/inst_queen 纯暴露与载荷寄存；
+  smi_iq/smi_top 布线+IQ24-27 换实例；IQ92 与 smi_iq_lsu_complete.v
+  40b4573d…149c 冻结不动）。
+  **TB-A fixed AS-EXPECTED**：C1 竞态转绿（done 22→32=末信用可见+2，NBA
+  最紧合法拍）；兼容 C2/C3/C4/C6 与 legacy 归档逐拍 bit 一致；C5 同拍错误
+  转阻断。钉拍勘误已记录（判据翻译偏差一拍，三重独立证明：契约 §4.3+归档
+  trace、NBA 不可能性、legacy 实测 2/3/2/2/2；期望矩阵不变）。
+  **TB-B fixed_p1 首跑 AS-EXPECTED**（对照首跑前冻结矩阵，fail 清单逐项
+  与推导一致）：B1 doneC 1→0/eidC 2→0/intid_prerstn 1→0（壳内竞态修复+
+  无假完成通知），遗留恰 interr_err（R6/E3）+iss_postcfgrst（E4）两
+  阶段二项；B4 intr 3374→3392 从早于旧信用 13 拍移至其后+5（机制：竞态
+  →计数闸住的归因假成功，E4 遗留）；B5 与 legacy 逐字段 bit 一致（本就
+  归因形态）；B2 bit 一致（ctrl_regs 内部退化路径不触达）；B3 判据字段
+  不变、信息项 intr_cyc +6（D 恢复批竞态→真信用完成）。
+  **归档三件套已封**（SHA256SUMS 0 non-OK）：f6_phase1_rtl_20261009
+  （diffs/指纹/范围证据）、f6a_unit_fixed_p1_20261009、
+  f6b_smi_fixed_p1_20261009；F6 文档 §11 落账。
+  **阶段二 RED 清单（不得计作 fixed 通过）**：E3/R6 int_err 不置位；E4
+  FAILED 锁存（挡新 START+归因假成功）；R10 系统恢复未证；crd>=cru 同拍
+  判据定向测试；R-DELAY-0 布线/off-by-one/executing 楔死未动。
+  **下一步=阶段二**（E1-E5+R-DELAY-0+恢复边界，然后完整 fixed 验收
+  TB-A/TB-B 全 PASS + 既定回归）。
+- **F6 阶段一复核补丁 DONE（2026-10-10，用户 diff 复核发现同拍漏洞→修复+
+  定向测试+复跑，签收候选）**：漏洞=原实现「重复载荷→arm_err<=1」与完成
+  判定同拍求值的 NBA 竞态（重复载荷恰逢计数达标时读 arm_err 旧值 0，同时
+  记异常又发 done）。修复=仅 smi_iq_lsu_complete_f6.v 一文件：
+  w_payload_anom_now=dispatch_closed_valid&&dispatch_closed 当拍显式并入
+  完成排除（协议异常明确优先），862faaf9…→a84d82d3…。
+  **定向测试 C7（判据首跑前冻结）**：重复载荷窗连开 3 拍覆盖完成判定首次
+  通过 posedge 两种口径+恢复批正控；**变异核验牙齿实证**（移除排除项的
+  变异 DUT 上 done1=218 漏洞原样复现 MISMATCH；补丁 DUT done1=−1 阻断∧
+  恢复批 done2=239/d2=2 不误锁死）。复跑全绿零意外回归：TB-A fixed 七用例
+  AS-EXPECTED（C1-C6 与 2026-10-09 归档逐拍一致）；TB-A legacy AS-EXPECTED
+  （C7=VIOLATION 复现，DUT 40b4573d 冻结）；TB-B fixed_p1 AS-EXPECTED 且
+  **FACT/INJ 与 2026-10-09 归档逐行 bit 一致**（壳级不触发该路径）；
+  run_f6b.sh provenance 段补记修复模块哈希。
+  **措辞勘误两条落实**（live 文档；2026-10-09 归档 README 封存不改）：
+  ①「永不完成=响亮失败」→「阻止完成；模块无 err 输出端口，对外只能由
+  host/外部超时机制发现」；②「物理最紧」→「在当前注册级数、接口与采样
+  约定下的最早合法拍」。F6 文档 §11.5 落账。
+  **归档 2026-10-10 三件套已封**（SHA256SUMS 0 non-OK）：
+  f6_phase1_rtl_20261010（含评审态→补丁态 diff，评审态从已封归档重建
+  哈希逐字节一致 862faaf9）、f6a_unit_fixed_p1_20261010（含变异证据）、
+  f6b_smi_fixed_p1_20261010。
+  **签收措辞（用户裁定）**：「隔离 RTL 中，IQ24–27 在已验证合法形态和
+  正常批次边界下，提前完成竞态修复通过定向验证」——不支持「完整 LSU
+  完成契约已修复」或「可替换原版上板」。
+  **下一步=F6 阶段二（预算 2-3 工作日检查点，范围锁死 IQ24-27：错误及时
+  检出传播+通知一次+FAILED 锁定挡排队/新写 START+cfg_rst 不单独解锁；
+  不含通用软恢复/IQ92/STORE B 对账）→ 真实单元回归（LDB L1/L2、M3-lite
+  正负控）→ scale_sum 统一入口自动完整案例 → 复杂结构案例（静态预检已
+  并行启动）**；STORE 最终完成保留现有验证屏障，不宣称 host 闭环已解决。
+- **F6 缺口修复轮 DONE（2026-10-10，第四轮复核裁定四缺口关闭）**：裁定
+  先将阶段二口径降级为「所列 TB 用例通过」（§13.5 errata），登记四缺口；
+  本轮全部定向关闭——#2 控制层错误同拍优先（done 登记包 `!lsu_err_any`，
+  批账务照常退役）、#3 通知遮蔽（lsu_err 1-bit OR→4-bit 逐源向量+逐源
+  边沿检出+lsu_err_evt 独立通知项）、#4a 协议异常上报（F6 模块
+  `proto_err_o=arm_err` 逐源并入，触发 E3+E4）、#4b crd>=cru 同拍边界
+  （信用源因果链行号钉死审计：conv 本地数组完成→链尾常数 0 无幻影注入
+  ⇒ 合法信用不误报；审计级非形式证明）。**判据 v3**（B1–B6 同 v2 + 新增
+  B7 T-ERRPRIO/B8 T-ERRMASK/B9 T-PROTOERR）先冻结后跑；**B7 激励首跑
+  未达真同拍**（接受拍间距 +2 实测 err 晚 1 拍注册）→ 修正融合任务
+  credit24_26_aligned（间距 +1，推导与绝对延迟无关）后复跑：fixed_p2
+  （=p2b）**B1–B9 全 PASS**，legacy/fixed_p1 对照矩阵不变、B9 SKIP，
+  三模式 exit 0；TB-A fixed 7/7 含 C7 扩展字段 proto=218（#4a 产生机制
+  端证据）。附带登记：0x004[2] FAILED 软件可见接口扩展语义与版本兼容
+  （PARAM_RTL_VERSION 未升，§14.3）；**运行器硬化**=run_f6a_unit.sh 补
+  rm -rf+tee+PIPESTATUS（归档前发现 10-09 旧 check.txt 滞留，差一刻误
+  归档）。p2→p2b 改动面恰 3 文件（重建 p2 态哈希逐项恰等 p2 归档指纹
+  后 diff；未触 4 文件不变式对账；累计仍恰 7 文件）。**归档三件套**：
+  f6_phase2b_rtl_20261010、f6b_smi_fixed_p2b_20261010（判据 v3 三模式+
+  TB-A 连续性）；F6 文档 §14 落账。**签收口径**：四缺口关闭证据齐；
+  是否恢复「E1–E5 全闭合」留用户裁定；仍不支持「完整契约已修复/可上板」。
+  **下一步=第③项真实单元回归**（全树沙箱已按裁定 5 步授权同步准备：
+  u280_sim_v422_f6full_20261010 rsync 完；待 overlay 7 文件+白名单核验+
+  路径审计+独立构建后按 LDB L1→L2→M3-lite 顺序）。
+
+- **2026-10-10｜F6 真实单元回归 DONE（五项令 #3，复核裁定步⑤）**：
+  p2b 全树沙箱（overlay 7 文件白名单核验通过、TB 3324a33b 未漂移、
+  工具链 M3_SBX 全转发）。LDB L1/L2 compare exit=0——**门② B5c 反例
+  关闭**（stock「通知≺写 31 拍」→ p2b 末写严格先于通知 gap=+5 ×2）；
+  M3-lite 五腿 ALL-LEGS-AS-EXPECTED 且与 stock 逐拍一致（RESPACCT
+  @12275000ps、to_wb @9495000ps、bp red=22、负控 red=6 全同值）；
+  第六腿 us3bp n=150 GREEN——注入链逐拍一致（inject1172<risen1192<
+  release1321≤drained1321，delay=129），**STORE 完成时序修正显形**：
+  stage_2 INTR stock@1159≺真信用@1184/1188（legacy 竞态真实路径实况）
+  → p2b@1191=末信用+3（契约时序），数据面零代价。归档
+  f6_realunit_regression_20261010（29 项 sha256）；F6 文档 §15 落账。
+  **签收**：信用注入结论获真实 LOAD/STORE 路径验证成立；E1–E5 全闭合
+  口径仍留用户裁定；不支持上板。**下一步=第④项**（scale_sum 统一入口
+  自动完整 LOAD→COMPUTE→STORE）与第⑤项静态预检接续。

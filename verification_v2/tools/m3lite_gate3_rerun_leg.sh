@@ -21,7 +21,8 @@ set -uo pipefail
 cd /home/juno1023/aiacc_compiler
 source vcs-env.sh
 PY=.venv/bin/python
-SBX=/home/juno1023/u280_sim_v422
+SBX="${M3_SBX:-/home/juno1023/u280_sim_v422}"   # 2026-10-10 沙箱化：M3_SBX 覆盖指向
+                                                # F6 全树沙箱；缺省=原树（默认行为不变）
 HBM_DIR="$SBX/data_engine/sram"
 TB_FILE="$SBX/sim_multi_stage/tb_aiacc_top_v04_f_multi_stage.v"
 CASE="${1:?usage: m3lite_gate3_rerun_leg.sh <case_name> [plusargs...]}"
@@ -72,4 +73,4 @@ EXTRA_PLUSARGS="$PLUSARGS" \
     "multi_inst_stage/$CASE/smc_0" -s 0
 echo "[rerun] vcs exit=$?"
 echo "[rerun] 比对请显式另跑，例："
-echo "  $PY verification_v2/tools/m3lite_gate3_compare.py $CASE_DIR --mode positive --tb-sha256 $TB_NOW"
+echo "  $PY verification_v2/tools/m3lite_gate3_compare.py $CASE_DIR --mode positive --tb-sha256 $TB_NOW --sandbox $SBX"

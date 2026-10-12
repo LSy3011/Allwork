@@ -106,6 +106,14 @@ CRD_STBAXI_RE = re.compile(r"\[GATE4\]\[CRD_STBAXI\] @probe_cycle (\d+)")
 BRESP_RE = re.compile(r"\[GATE4\]\[HBM_BRESP\] @probe_cycle (\d+)")
 BP_INJECT_RE = re.compile(r"\[GATE4\]\[BP\] inject @probe_cycle (\d+)")
 BP_RELEASE_RE = re.compile(r"\[GATE4\]\[BP\] release @probe_cycle (\d+)")
+US3BP_INJECT_RE = re.compile(r"\[GATE4\]\[US3BP\] inject @probe_cycle (\d+)")
+US3BP_RELEASE_RE = re.compile(r"\[GATE4\]\[US3BP\] release @probe_cycle (\d+)")
+US3BP_BVALID_RE = re.compile(r"\[GATE4\]\[US3BP\] bvalid risen @probe_cycle (\d+)")
+US3BP_DRAINED_RE = re.compile(r"\[GATE4\]\[US3BP\] drained @probe_cycle (\d+)")
+# 任务2收口（2026-10-08 裁决，ADR-060 errata 10）：矩阵 ds2 响应账目异常
+# 持续检查的专属失败标记。bp/to_s4 腿（边界注入负控）期望其命中；其余各腿
+# 出现即 RED 不发布；不得被「预期屏障超时」通道吸收。
+RESPACCT_RE = re.compile(r"\[G3_RESPACCT\]\[FATAL\]")
 
 
 class Report:
@@ -173,8 +181,11 @@ def main() -> int:
     ap.add_argument("case_dir")
     ap.add_argument("--mode", choices=["positive", "negative", "fatal_expected"],
                     default="positive")
-    ap.add_argument("--expect-timeout", choices=["wbarrier", "s4barrier"], default=None,
-                    help="fatal_expected 模式必填：哪道屏障应超时")
+    ap.add_argument("--expect-timeout", choices=["wbarrier", "s4barrier", "respacct"],
+                    default=None,
+                    help="fatal_expected 模式必填：期望的失败形态。"
+                         "wbarrier/s4barrier=屏障超时；respacct=边界注入负控"
+                         "期望命中响应账目异常检查（ADR-060 errata 10）")
     ap.add_argument("--sandbox", default=os.path.expanduser("~/u280_sim_v422"))
     ap.add_argument("--tb-sha256", default=None,
                     help="测试时刻 TB sha256（驱动在 sim 前记录）；与比对时刻现场"
@@ -187,7 +198,7 @@ def main() -> int:
     # ── fatal_expected：仅读 sim.log，断言「超时会失败退出」（用户要求⑤）───
     if args.mode == "fatal_expected":
         if args.expect_timeout is None:
-            print("[G3-CMP] fatal_expected 模式须指定 --expect-timeout wbarrier|s4barrier")
+            print("[G3-CMP] fatal_expected 模式须指定 --expect-timeout wbarrier|s4barrier|respacct")
             return 2
         sim_log_fe = os.path.join(args.sandbox, "arith_regression", "test_log",
                                   "multi_stage", "multi_inst_stage", case, "sim.log")
@@ -196,13 +207,32 @@ def main() -> int:
             return 2
         with open(sim_log_fe, encoding="utf-8", errors="replace") as f:
             log_fe = f.read()
-        tag = {"wbarrier": "[GATE4][WBARRIER][ERR] TIMEOUT",
-               "s4barrier": "[GATE4][S4BARRIER][ERR] TIMEOUT"}[args.expect_timeout]
-        pos = log_fe.find(tag)
-        rep.check(f"fatal_expected {args.expect_timeout} TIMEOUT 标记存在", pos >= 0)
-        dump_after = ("[GATE4][DUMP]" in log_fe[pos:]) if pos >= 0 else ("[GATE4][DUMP]" in log_fe)
-        rep.check("fatal_expected TIMEOUT 后无 [GATE4][DUMP]（未 dump/比对/结束）",
-                  not dump_after)
+        if args.expect_timeout == "respacct":
+            # 任务2收口（ADR-060 errata 10）：边界注入负控的新期望形态——
+            # 响应账目异常持续检查于幻影后第 16 个连续命中拍 $fatal，运行
+            # 提前结束（不再要求「旧死锁保持到原 S4 超时」）。历史长时间
+            # 死锁证据冻结保留于 round6/bpdbg 归档，不作回归基线。
+            hits = RESPACCT_RE.findall(log_fe)
+            # 真实日志 = TB $display 诊断行 + VCS $fatal 回显（两处）；故断言
+            # 存在性而非恰 1，位置取首现。
+            rep.check("fatal_expected respacct 专属标记存在（[G3_RESPACCT][FATAL]）",
+                      len(hits) >= 1, f"实际 {len(hits)} 处")
+            pos = log_fe.find("[G3_RESPACCT][FATAL]")
+            dump_after = ("[GATE4][DUMP]" in log_fe[pos:]) if pos >= 0 else ("[GATE4][DUMP]" in log_fe)
+            rep.check("fatal_expected respacct 后无 [GATE4][DUMP]（未 dump/比对/结束）",
+                      not dump_after)
+        else:
+            tag = {"wbarrier": "[GATE4][WBARRIER][ERR] TIMEOUT",
+                   "s4barrier": "[GATE4][S4BARRIER][ERR] TIMEOUT"}[args.expect_timeout]
+            pos = log_fe.find(tag)
+            rep.check(f"fatal_expected {args.expect_timeout} TIMEOUT 标记存在", pos >= 0)
+            dump_after = ("[GATE4][DUMP]" in log_fe[pos:]) if pos >= 0 else ("[GATE4][DUMP]" in log_fe)
+            rep.check("fatal_expected TIMEOUT 后无 [GATE4][DUMP]（未 dump/比对/结束）",
+                      not dump_after)
+            # 裁决③：专属标记不得被「预期屏障超时」通道吸收——屏障超时腿
+            # 出现 RESPACCT = 另一类失败，必须 RED 而非放行。
+            rep.check("fatal_expected 无 [G3_RESPACCT][FATAL]（专属标记不被超时通道吸收）",
+                      not RESPACCT_RE.search(log_fe))
         prov = tb_provenance(args.sandbox, args.tb_sha256, rep)
         print(f"[G3-CMP] case={case} mode=fatal_expected expect={args.expect_timeout}")
         for ln in rep.lines:
@@ -255,6 +285,11 @@ def main() -> int:
                   "[GATE3][BARRIER][ERR]" not in log and "[GATE3][BYPASS][ERR]" not in log)
         rep.check("C0 无 GATE4 WBARRIER/S4BARRIER ERR",
                   "[GATE4][WBARRIER][ERR]" not in log and "[GATE4][S4BARRIER][ERR]" not in log)
+        # 任务2收口（ADR-060 errata 10）：响应账目异常专属标记在本模式
+        # （positive/negative，含 us3_mode）出现即 RED 且不发布——合法反压与
+        # 正常运行不得误报，出现 = 真异常。
+        rep.check("C0 无 [G3_RESPACCT][FATAL]（响应账目异常检查不误报）",
+                  not RESPACCT_RE.search(log))
         intr = INTR_ASSERT_RE.findall(log)
         exp_intr = 1 if merged_neg else (3 if store else 2)
         rep.check(f"C0 INTR_ASSERT 恰 {exp_intr} 条"
@@ -306,6 +341,11 @@ def main() -> int:
         s4_e = S4_ENTER_RE.findall(log)
         s4_r = S4_RELEASE_RE.findall(log)
         dumps = DUMP_RE.findall(log)
+        # master 侧合法注入点（de_stb_bready[0]，ADR-060 errata 8，2026-10-08）
+        # 与 ds2 边界注入（+G3_AXI_BP_B）语义不同，由日志自描述分流：
+        # S4 bresp 计数 tap 在 ds2 边界、看不到 us3 停顿，§6.5 的
+        # S4-waited≥min_waited 语义对 us3 模式结构性不适用（TB 注释已落账）。
+        us3_mode = "[GATE4][US3BP] fault injection armed" in log
         if store and args.mode == "positive":
             wbx, s4x = expect["wbarrier"], expect["s4barrier"]
             rep.check("C0 WBARRIER enter/release 恰各 1", len(wb_e) == 1 and len(wb_r) == 1,
@@ -334,14 +374,49 @@ def main() -> int:
                           hw == s4x["writes"] == words and br == s4x["bresp"],
                           f"release hbm_writes={hw}/{s4x['writes']} bresp={br}/{s4x['bresp']}")
                 rep.note("C0 S4BARRIER 正向等待实测", f"waited={waited} 拍 @release {cyc}")
-                if fi is not None:
+                if fi is not None and not us3_mode:
                     rep.check("C0 BP 保持力：S4 waited >= fault_injection.min_waited"
                               "（ADR-060 §6.5）",
                               waited >= fi["min_waited"],
                               f"waited={waited} min_waited={fi['min_waited']}")
+                elif fi is not None and us3_mode:
+                    rep.note("C0 US3BP：S4 bresp tap 在 ds2 边界、不观测 us3 停顿",
+                             "§6.5 S4-waited 语义不适用（限制落账 2026-10-08）")
             elif fi is not None:
                 rep.check("C0 BP 保持力：S4 release 标记存在（否则 waited 无从核）", False)
-            if fi is not None:
+            if fi is not None and us3_mode:
+                # us3 合法注入的保持力/恢复语义（替代 ds2 的 S4-waited 判据）：
+                # 延迟半段 = B 于停顿窗内到达并被矩阵持有（inject < risen <
+                # release，AXI hold 规则实证）；恢复半段 = 释放后才交付
+                # （drained >= release，force 期间零泄漏）且确被推迟
+                # （delay = drained - risen > 0）。全部为事件序断言，
+                # 预注册语义，非按输出调期望。
+                ui = US3BP_INJECT_RE.findall(log)
+                ur = US3BP_RELEASE_RE.findall(log)
+                ub = US3BP_BVALID_RE.findall(log)
+                ud = US3BP_DRAINED_RE.findall(log)
+                rep.check("C0 US3BP 注入标记 inject/release 恰各 1",
+                          len(ui) == 1 and len(ur) == 1,
+                          f"inject={len(ui)} release={len(ur)}")
+                rep.check("C0 US3BP bvalid-risen/drained 标记恰各 1",
+                          len(ub) == 1 and len(ud) == 1,
+                          f"bvalid_risen={len(ub)} drained={len(ud)}")
+                if ui and ur and ub and ud:
+                    i0, r0 = int(ui[0]), int(ur[0])
+                    b0, d0 = int(ub[0]), int(ud[0])
+                    rep.check("C0 US3BP 延迟半段：inject < bvalid_risen < release"
+                              "（B 于停顿窗内到达并被持有）",
+                              i0 < b0 < r0, f"{i0} < {b0} < {r0}")
+                    rep.check("C0 US3BP 恢复半段：drained >= release"
+                              "（force 期间零泄漏）",
+                              d0 >= r0, f"drained={d0} release={r0}")
+                    rep.check("C0 US3BP 延迟量>0（B 确被推迟交付）",
+                              d0 > b0,
+                              f"delay={d0 - b0}（risen={b0} drained={d0}）")
+                    rep.note("C0 US3BP 延迟-恢复定量",
+                             f"inject={i0} risen={b0} release={r0} "
+                             f"drained={d0} delay={d0 - b0} stall={r0 - i0}")
+            elif fi is not None:
                 bp_i = BP_INJECT_RE.findall(log)
                 bp_r = BP_RELEASE_RE.findall(log)
                 rep.check("C0 BP 注入标记 inject/release 恰各 1",

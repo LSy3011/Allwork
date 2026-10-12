@@ -18,3 +18,7 @@ CLAUDE.md.local
 
 # Agent scratch / brain working artifacts
 artifacts/
+
+# VCS 仿真 work 目录（f6a_unit/f6b_smi 每轮全新重建；run evidence 冻结于 artifacts/）
+verification_v2/f6a_unit/work_*/
+verification_v2/f6b_smi/work_*/

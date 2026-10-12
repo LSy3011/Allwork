@@ -274,6 +274,11 @@ def main() -> int:
     ap.add_argument("--no-hbm-init", action="store_true", help="只生成 case，不写全局 memory_init")
     args = ap.parse_args()
 
+    # 2026-10-10 沙箱化（F6 全树沙箱裁定步③）：全局 HBM 预载目录跟随
+    # --sandbox，不再恒定写原树（原树只读纪律；默认行为不变）。
+    global HBM_INIT_DIR
+    HBM_INIT_DIR = os.path.join(args.sandbox, "data_engine", "sram")
+
     descs = [parse_desc(s) for s in args.desc]
     guard(args.name, descs, args.ur_bank, args.ur_offset, args.gr_base, args.smc_id_en)
 

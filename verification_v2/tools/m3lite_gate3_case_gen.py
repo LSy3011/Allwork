@@ -458,6 +458,11 @@ def main() -> int:
         raise SystemExit("[G3-GEN-GUARD] --fi-bp-b 与 --merge-stages 互斥"
                          "（负控不携带故障注入标签）")
 
+    # 2026-10-10 沙箱化（F6 全树沙箱裁定步③）：全局 HBM 预载目录跟随
+    # --sandbox（模块常量 g2.HBM_INIT_DIR 指向原树，原树只读纪律；默认不变）。
+    global HBM_INIT_DIR
+    HBM_INIT_DIR = os.path.join(args.sandbox, "data_engine", "sram")
+
     case_dir = os.path.join(args.sandbox, "test_atomic_ops", "multi_inst_stage", args.name)
     if os.path.exists(case_dir):
         raise SystemExit(f"[G3-GEN-GUARD] case 目录已存在：{case_dir}（先清理再生成，防混旧产物）")

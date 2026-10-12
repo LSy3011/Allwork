@@ -49,17 +49,27 @@ def _write(path: str, lines) -> None:
 
 
 def build_case(tmp_path, *, mode="positive", plant=None, merged=False,
-               store=False, fi=None, fatal=None):
+               store=False, fi=None, fi_us3=None, fatal=None, add_respacct=False):
     """合成最小 case；plant∈{None,'c1','c2aux','c3','c4_smc','c0_nobarrier',
     'c0_barrier_count','c0_barrier_waited2','c6_dup','c6_omit','c6_nontarget',
-    'c6_data','c6_strb','c7_dump_early','c8_bad','c3s_early','wb_zero','bp_short'}。
+    'c6_data','c6_strb','c7_dump_early','c8_bad','c3s_early','wb_zero','bp_short',
+    'us3_nodrain','us3_leak','us3_risen_late'}。
     merged=True：并段负控形态（仅 mode="negative"）——单 stage_0 清单、
     无 stage_1(/stage_2)、无 G3 标记、INTR_ASSERT 恰 1。
     store=True：步骤④三段形态（expect 增 store/wbarrier/s4barrier 段，
     增 hbm_write_trace/stb_ur_read_trace/iq_issue_trace 与 GATE4 标记）。
     fi=N：故障注入标签（expect.fault_injection.min_waited=N）+ BP 标记。
-    fatal='wbarrier'|'s4barrier'：fatal_expected 形态 sim.log（超时标记）。"""
+    fi_us3=N：master 侧合法注入形态（ADR-060 errata 8，2026-10-08）——
+    expect 同样带 fault_injection，但写 [GATE4][US3BP] 标记族
+    （inject<bvalid_risen<release<=drained 为绿基线）；
+    plant='us3_nodrain' 缺 drained / 'us3_leak' drained<release /
+    'us3_risen_late' risen>release。
+    fatal='wbarrier'|'s4barrier'|'respacct'：fatal_expected 形态 sim.log
+    （超时标记 / 任务2收口响应账目异常专属标记，errata 10）。
+    add_respacct=True：在任意形态 sim.log 末尾追加 [G3_RESPACCT][FATAL]
+    标记（测防吸收/防误报）。"""
     assert not (merged and mode != "negative")
+    assert not (fi is not None and fi_us3 is not None)
     case = tmp_path / "case"
     case.mkdir()
     exp = {
@@ -83,9 +93,10 @@ def build_case(tmp_path, *, mode="positive", plant=None, merged=False,
                            "timeout_cycles": 5000}
         exp["s4barrier"] = {"addr0": 0x2000 // 16, "writes": WORDS, "bresp": 1,
                             "timeout_cycles": 5000}
-        if fi is not None:
-            exp["fault_injection"] = {"type": "axi_w_backpressure", "cycles": fi,
-                                      "min_waited": fi}
+        if fi is not None or fi_us3 is not None:
+            n_bp = fi if fi is not None else fi_us3
+            exp["fault_injection"] = {"type": "axi_w_backpressure", "cycles": n_bp,
+                                      "min_waited": n_bp}
     if merged:
         exp["negative_control"] = "merged_single_stage"
         exp["barrier"]["unused"] = True
@@ -178,12 +189,21 @@ def build_case(tmp_path, *, mode="positive", plant=None, merged=False,
                / "multi_inst_stage" / "case")
     sim_dir.mkdir(parents=True)
     if fatal is not None:
-        tag = {"wbarrier": "[GATE4][WBARRIER][ERR] TIMEOUT after 1 cycles: "
-                           "landed 0/4 bank=2",
-               "s4barrier": "[GATE4][S4BARRIER][ERR] TIMEOUT after 50 cycles: "
-                            "hbm_writes=0/4 bresp=0/1 (crd_stb=1 crd_stbaxi=1 "
-                            "record-only)"}[fatal]
-        log = tag + "\n"
+        if fatal == "respacct":
+            # 真实形态 = TB $display 诊断行 + VCS $fatal 回显（两处专属标记）
+            log = ("[G3_RESPACCT][FATAL] response accounting anomaly: 16 consecutive "
+                   "hits @probe_cycle 1208 pending=1 bresp_cnt=0 bmc_ds2_bvalid=1 "
+                   "bmc_ds2_bready=0 pending_bid=0x0\n"
+                   "\"tb_aiacc_top_v04_f_multi_stage.v\", 3230: [G3_RESPACCT][FATAL] "
+                   "matrix ds2 response accounting anomaly sustained 16 consecutive "
+                   "cycles: fatal\n")
+        else:
+            tag = {"wbarrier": "[GATE4][WBARRIER][ERR] TIMEOUT after 1 cycles: "
+                               "landed 0/4 bank=2",
+                   "s4barrier": "[GATE4][S4BARRIER][ERR] TIMEOUT after 50 cycles: "
+                                "hbm_writes=0/4 bresp=0/1 (crd_stb=1 crd_stbaxi=1 "
+                                "record-only)"}[fatal]
+            log = tag + "\n"
         if plant == "dump_after":
             log += "[GATE4][DUMP] begin @probe_cycle 999 (gated by S4BARRIER)\n"
     elif mode == "positive":
@@ -210,7 +230,24 @@ def build_case(tmp_path, *, mode="positive", plant=None, merged=False,
                 f"[GATE4][S4BARRIER] release @probe_cycle 355: hbm_writes=4 bresp=1 "
                 f"(waited {s4_waited} cycles; crd_stb=1 crd_stbaxi=1 record-only)\n"
                 f"[GATE4][DUMP] begin @probe_cycle {dump_cyc} (gated by S4BARRIER)\n")
-            if fi is not None:
+            if fi_us3 is not None:
+                u_inj, u_rel = 331, 331 + fi_us3
+                u_risen, u_drain = 340, u_rel
+                if plant == "us3_risen_late":
+                    u_risen = u_rel + 1
+                if plant == "us3_leak":
+                    u_drain = u_rel - 1
+                log += ("[GATE4][US3BP] fault injection armed: de_stb_bready[0] "
+                        f"stall {fi_us3} cycles (synthetic fixture)\n"
+                        f"[GATE4][US3BP] inject @probe_cycle {u_inj}: force "
+                        f"de_stb_bready[0]=0 for {fi_us3} cycles\n"
+                        f"[GATE4][US3BP] bvalid risen @probe_cycle {u_risen} "
+                        "(B pending at us3 during stall; delay half of evidence)\n"
+                        f"[GATE4][US3BP] release @probe_cycle {u_rel}\n")
+                if plant != "us3_nodrain":
+                    log += (f"[GATE4][US3BP] drained @probe_cycle {u_drain} "
+                            "(engine-side us3 B handshake completed after release)\n")
+            elif fi is not None:
                 log += ("[GATE4][BP] inject @probe_cycle 331: force bmc_ds2_bready=0 "
                         f"for {fi} cycles\n"
                         f"[GATE4][BP] release @probe_cycle {331 + fi}\n")
@@ -225,6 +262,10 @@ def build_case(tmp_path, *, mode="positive", plant=None, merged=False,
                "WITHOUT credit barrier (negative control)\n"
                "[TB_MULTI_STAGE] INTR_ASSERT @probe_cycle 95\n"
                "[TB_MULTI_STAGE] INTR_ASSERT @probe_cycle 300\n")
+    if add_respacct:
+        log += ("[G3_RESPACCT][FATAL] response accounting anomaly: 16 consecutive "
+                "hits @probe_cycle 1208 pending=1 bresp_cnt=0 bmc_ds2_bvalid=1 "
+                "bmc_ds2_bready=0 pending_bid=0x0\n")
     (sim_dir / "sim.log").write_text(log, encoding="utf-8")
     return str(case), str(tmp_path / "sbx")
 
@@ -450,6 +491,31 @@ def test_g3_red_bp_waited_short(tmp_path):
     assert _run(case, sbx, "positive") == 1
 
 
+def test_g3_store_us3bp_delay_recover_green(tmp_path):
+    """master 侧合法注入（ADR-060 errata 8）：inject<risen<release<=drained
+    且 delay>0 → US3BP 语义全过；S4-waited 判据不适用（note 不门控）→ GREEN。"""
+    case, sbx = build_case(tmp_path, store=True, fi_us3=150)
+    assert _run(case, sbx, "positive") == 0
+
+
+def test_g3_red_us3bp_nodrain(tmp_path):
+    """缺 drained 标记（释放后 B 未交付=未恢复）→ RED。"""
+    case, sbx = build_case(tmp_path, store=True, fi_us3=150, plant="us3_nodrain")
+    assert _run(case, sbx, "positive") == 1
+
+
+def test_g3_red_us3bp_leak(tmp_path):
+    """drained<release（force 期间泄漏交付，违反零泄漏）→ RED。"""
+    case, sbx = build_case(tmp_path, store=True, fi_us3=150, plant="us3_leak")
+    assert _run(case, sbx, "positive") == 1
+
+
+def test_g3_red_us3bp_risen_late(tmp_path):
+    """risen>release（B 在释放后才到达，延迟半段不成立）→ RED。"""
+    case, sbx = build_case(tmp_path, store=True, fi_us3=150, plant="us3_risen_late")
+    assert _run(case, sbx, "positive") == 1
+
+
 def test_g3_fatal_expected_wbarrier_pass(tmp_path):
     """超时注入：WBARRIER TIMEOUT 标记在且其后无 DUMP → PASS（失败退出实证）。"""
     case, sbx = build_case(tmp_path, fatal="wbarrier")
@@ -465,6 +531,42 @@ def test_g3_fatal_expected_dump_after_is_red(tmp_path):
     """超时后仍出现 DUMP = 结束顺序被突破 → RED。"""
     case, sbx = build_case(tmp_path, fatal="s4barrier", plant="dump_after")
     assert _run(case, sbx, "fatal_expected", expect_timeout="s4barrier") == 1
+
+
+# ── 任务2收口（2026-10-08 用户裁决，ADR-060 errata 10）：响应账目异常持续检查 ──
+
+def test_g3_fatal_expected_respacct_pass(tmp_path):
+    """边界注入负控新期望：RESPACCT 专属标记在（$display+$fatal 回显两处）
+    且其后无 DUMP → PASS（负控准确命中新报警）。"""
+    case, sbx = build_case(tmp_path, fatal="respacct")
+    assert _run(case, sbx, "fatal_expected", expect_timeout="respacct") == 0
+
+
+def test_g3_fatal_expected_respacct_dump_after_is_red(tmp_path):
+    """RESPACCT 后仍出现 DUMP = 结束顺序被突破 → RED。"""
+    case, sbx = build_case(tmp_path, fatal="respacct", plant="dump_after")
+    assert _run(case, sbx, "fatal_expected", expect_timeout="respacct") == 1
+
+
+def test_g3_fatal_expected_respacct_missing_is_red(tmp_path):
+    """期望 respacct 但日志只有旧 S4 超时形态 = 未命中新报警 → RED
+    （不得沿用旧死锁持到原超时的期望）。"""
+    case, sbx = build_case(tmp_path, fatal="s4barrier")
+    assert _run(case, sbx, "fatal_expected", expect_timeout="respacct") == 1
+
+
+def test_g3_fatal_expected_barrier_absorbs_respacct_is_red(tmp_path):
+    """裁决③：屏障超时腿出现 RESPACCT 专属标记不得被「预期屏障超时」通道
+    吸收放行 → RED。"""
+    case, sbx = build_case(tmp_path, fatal="s4barrier", add_respacct=True)
+    assert _run(case, sbx, "fatal_expected", expect_timeout="s4barrier") == 1
+
+
+def test_g3_red_positive_respacct_marker(tmp_path):
+    """合法运行（positive store 绿基线 + RESPACCT 标记）= 误报/真异常 → RED
+    且不发布。"""
+    case, sbx = build_case(tmp_path, store=True, add_respacct=True)
+    assert _run(case, sbx, "positive") == 1
 
 
 def _ref_store_lines():

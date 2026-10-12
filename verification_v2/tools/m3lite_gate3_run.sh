@@ -7,23 +7,25 @@
 #        期望比对 GREEN（C0-C8）；
 #   [负] <case_base>_neg  --merge-stages --with-store = merged-3 并段单 trigger
 #        （无任何 G3 plusarg），期望 NEGATIVE-CONTROL LIVE（C1/C3/C3s/C6/C8 任红）；
-#   [故] <case_base>_bp   反压保持力：+G3_AXI_BP_B=400（明确标注的故障注入，
+#   [故] <case_base>_bp   反压负控：+G3_AXI_BP_B=400（明确标注的故障注入，
 #        B 通道 v2：首个 AWVALID 上升沿起押 bready=0 共 400 拍，写数据路不动）。
-#        ⚠ 期望已按实测改写（ADR-060 errata ⑥/⑦，用户 2026-10-07 措辞裁定）：
-#        「延迟→恢复→GREEN」预注册期望两轮未达成——当前测试配置及已试注入
-#        方式下 B 响应延迟后未恢复（注入器/桥模型/DUT 责任未分清，不得外推
-#        为硬件不可恢复）。本腿现行定位 = S4 持死形态证据：数据面应全绿、
-#        bresp 恒 0/1、S4 持满超时 $fatal、零 dump——比对跑双模式：
-#        positive（信息性：数据面绿 + bresp/S4 红）+ fatal_expected
-#        s4barrier（应 PASS）。
+#        ⚠ 期望再改写（2026-10-08 用户裁决，ADR-060 errata 10 / 任务2收口）：
+#        边界注入已实证为非法注入点（分裂视图+孤儿 B 死锁，errata ⑧/BPDBG），
+#        合法源端反压（us3bp n=150）已恢复通过。TB 新增常驻「响应账目异常
+#        持续检查」（pending&cnt_empty 连续 16 个有效采样拍 $fatal）后，本腿
+#        不再持死至 S4 超时——幻影后第 16 拍 [G3_RESPACCT][FATAL] 提前终结
+#        （~1208 vs 原 62385000ps）。本腿现行定位 = 负控准确命中新报警：
+#        比对跑双模式：positive（信息性，留痕不判）+ fatal_expected
+#        respacct（应 PASS）。历史长时间死锁证据冻结于 round6/bpdbg 归档。
 #        退役史：W 通道反压（+G3_AXI_BP_W）2026-10-07 首轮实测 300 拍
 #        wready 反压写路径未恢复（errata ⑤）；BVALID 沿武装同日退役——
 #        B 活窗仅 1 拍、force 结构性迟到（errata ⑥）。
 #   [超] <case_base>_to_wb  +G3_WBARRIER_TIMEOUT=1 → 期望 $fatal 失败退出，
 #        比对 --mode fatal_expected --expect-timeout wbarrier；
 #   [超] <case_base>_to_s4  +G3_S4_TIMEOUT=50 +G3_AXI_BP_B=400 → 期望 $fatal，
-#        比对 --mode fatal_expected --expect-timeout s4barrier
-#        （writes 齐 + bresp 缺 = 精确隔离 bresp 半条件）。
+#        比对 --mode fatal_expected --expect-timeout respacct
+#        （同为边界注入腿，RESPACCT 于 ~1208 提前终结，S4 超时不再到达；
+#        限制落账：S4BARRIER TIMEOUT 通道自此失去在套激发，通道保留未压实）。
 #   故障注入三段（bp/to_wb/to_s4）与正向/负控分别归档（round6_faultinjection）。
 # 纪律（ADR-059 D5 / ADR-060 §5，用户 2026-10-06 口径）：
 #   - 串行运行；跑前备份全局 memory_init1..8（副本 + sha256）；
@@ -49,9 +51,13 @@
 #       positive：vcs==0 且 compare(positive)==0；
 #       negative：compare(negative)==0（vcs 退出码留痕不判——stock
 #         compare 撞见预期非 0）；
-#       bp：vcs≠0（S4 持死 $fatal 确发）且 compare(fatal_expected)==0
+#       bp：vcs≠0（[G3_RESPACCT][FATAL] 确发）且
+#         compare(fatal_expected --expect-timeout respacct)==0
 #         （positive 信息性比对退出码留痕不判）；
-#       to_wb/to_s4：vcs≠0（$fatal 确发）且 compare(fatal_expected)==0；
+#       to_wb：vcs≠0（WBARRIER TIMEOUT $fatal 确发）且
+#         compare(fatal_expected wbarrier)==0；
+#       to_s4：vcs≠0（[G3_RESPACCT][FATAL] 确发）且
+#         compare(fatal_expected respacct)==0；
 #       任一腿预载门拒跑 = 该腿 FAIL 入汇总。
 # TB/脚本共享资产改动（透明呈报，全部 additive，默认关）：
 #   tb_aiacc_top_v04_f_multi_stage.v —— G3_BARRIER/G3_BYPASS plusargs（=1 形态，
@@ -68,7 +74,8 @@ set -uo pipefail
 cd /home/juno1023/aiacc_compiler
 source vcs-env.sh
 PY=.venv/bin/python
-SBX=/home/juno1023/u280_sim_v422
+SBX="${M3_SBX:-/home/juno1023/u280_sim_v422}"   # 2026-10-10 沙箱化：M3_SBX 覆盖指向
+                                                # F6 全树沙箱；缺省=原树（默认行为不变）
 HBM_DIR="$SBX/data_engine/sram"
 CASE="${1:?usage: m3lite_gate3_run.sh <case_base> [words=16] [seed=12345]}"
 WORDS="${2:-16}"
@@ -122,7 +129,7 @@ leg_preload_gate() {  # 任务 1：每腿 VCS 前从该 case 冻结快照恢复+
 }
 
 echo "=== [1/9] 生成正向 case：$CASE（words=$WORDS seed=$SEED，--with-store） ==="
-$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "$CASE" --words "$WORDS" --seed "$SEED" --with-store
+$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "$CASE" --words "$WORDS" --seed "$SEED" --sandbox "$SBX" --with-store
 GEN_POS=$?
 echo "gen(positive) exit=$GEN_POS"
 if [ "$GEN_POS" -ne 0 ] || [ ! -f "$SBX/test_atomic_ops/multi_inst_stage/$CASE/g3_expect.json" ]; then
@@ -156,7 +163,7 @@ if leg_preload_gate "$CASE"; then
     echo "=== [3/9] 比对正向（期望 GREEN，C0-C8） ==="
     $PY verification_v2/tools/m3lite_gate3_compare.py \
         "$SBX/test_atomic_ops/multi_inst_stage/$CASE" --mode positive \
-        --tb-sha256 "$TB_SHA"
+        --tb-sha256 "$TB_SHA" --sandbox "$SBX"
     CMP_POS=$?
     echo "compare(positive) exit=$CMP_POS"
     if [ "$VCS_POS" -eq 0 ] && [ "$CMP_POS" -eq 0 ]; then
@@ -171,7 +178,7 @@ else
 fi
 
 echo "=== [4/9] 生成负控 case：${CASE}_neg（merged-3 并段单 trigger，含 STORE） ==="
-$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_neg" --words "$WORDS" --seed "$SEED" --merge-stages --with-store
+$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_neg" --words "$WORDS" --seed "$SEED" --sandbox "$SBX" --merge-stages --with-store
 GEN_NEG=$?
 echo "gen(negative) exit=$GEN_NEG"
 if [ "$GEN_NEG" -ne 0 ] || [ ! -f "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_neg/g3_expect.json" ]; then
@@ -189,7 +196,7 @@ if leg_preload_gate "${CASE}_neg"; then
     echo "=== [6/9] 比对负控（期望 NEGATIVE-CONTROL LIVE） ==="
     $PY verification_v2/tools/m3lite_gate3_compare.py \
         "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_neg" --mode negative \
-        --tb-sha256 "$TB_SHA"
+        --tb-sha256 "$TB_SHA" --sandbox "$SBX"
     CMP_NEG=$?
     echo "compare(negative) exit=$CMP_NEG"
     if [ "$CMP_NEG" -eq 0 ]; then
@@ -204,11 +211,11 @@ else
 fi
 
 # ── 故障注入三段（用户要求⑤，明确标注，与正向证据分别归档）─────────────────
-BPN=400   # B 通道反压拍数：min_waited=BPN-100=300（100=注入点→S4 enter
-          # 重叠+模型重驱动余量上界，首轮实测重叠 28）；另受精确区间断言约束
+BPN=400   # B 通道反压拍数（errata 10 后：RESPACCT 于幻影后第 16 拍提前终结，
+          # BPN 只需覆盖幻影形成，400 保留沿用；旧 min_waited 语义已退役）
 
-echo "=== [7/9] 故障注入 a：BP 反压保持力（${CASE}_bp，+G3_AXI_BP_B=$BPN） ==="
-$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_bp" --words "$WORDS" --seed "$SEED" --with-store --fi-bp-b $BPN
+echo "=== [7/9] 故障注入 a：BP 边界注入负控（${CASE}_bp，+G3_AXI_BP_B=$BPN，期望 RESPACCT 命中） ==="
+$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_bp" --words "$WORDS" --seed "$SEED" --sandbox "$SBX" --with-store --fi-bp-b $BPN
 GEN_BP=$?
 echo "gen(bp) exit=$GEN_BP"
 if [ "$GEN_BP" -ne 0 ] || [ ! -f "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_bp/g3_expect.json" ]; then
@@ -220,22 +227,22 @@ if leg_preload_gate "${CASE}_bp"; then
         bash "$SBX/sim_multi_stage/run_sim_aiacc_top_f_multi_stage.sh" \
         "multi_inst_stage/${CASE}_bp/smc_0" -s 0 2>&1 | tee "$BK/run_bp.console.log"
     VCS_BP=${PIPESTATUS[0]}
-    echo "vcs(bp) exit=$VCS_BP（errata ⑥/⑦ 后预期非 0：S4 持死 \$fatal）"
-    # 双模式比对：positive=信息性（数据面应全绿 + bresp/S4 项红，持死形态）；
-    # fatal_expected=正式判定（S4 持满超时 $fatal、其后零 dump → PASS）。
+    echo "vcs(bp) exit=$VCS_BP（errata 10 后预期非 0：[G3_RESPACCT][FATAL] 提前终结）"
+    # 双模式比对：positive=信息性（留痕不判）；fatal_expected respacct=
+    # 正式判定（负控准确命中响应账目异常报警、其后零 dump → PASS）。
     $PY verification_v2/tools/m3lite_gate3_compare.py \
         "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_bp" --mode positive \
-        --tb-sha256 "$TB_SHA"
+        --tb-sha256 "$TB_SHA" --sandbox "$SBX"
     echo "compare(bp, positive 信息性) exit=$?（信息性，留痕不判）"
     $PY verification_v2/tools/m3lite_gate3_compare.py \
         "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_bp" \
-        --mode fatal_expected --expect-timeout s4barrier --tb-sha256 "$TB_SHA"
+        --mode fatal_expected --expect-timeout respacct --tb-sha256 "$TB_SHA" --sandbox "$SBX"
     CMP_BP_FE=$?
-    echo "compare(bp, fatal_expected 正式判定) exit=$CMP_BP_FE"
+    echo "compare(bp, fatal_expected respacct 正式判定) exit=$CMP_BP_FE"
     if [ "$VCS_BP" -ne 0 ] && [ "$CMP_BP_FE" -eq 0 ]; then
         echo "[G3-RUN] 腿判 bp：AS-EXPECTED"
     else
-        echo "[G3-RUN] 腿判 bp：UNEXPECTED（期望 vcs≠0 且 fatal_expected=0；若信息性变绿=恢复信号，须人工复核不得静默通过）"
+        echo "[G3-RUN] 腿判 bp：UNEXPECTED（期望 vcs≠0 且 fatal_expected respacct=0；若信息性变绿=恢复信号，须人工复核不得静默通过）"
         LEG_FAILS="$LEG_FAILS bp"
     fi
 else
@@ -244,7 +251,7 @@ else
 fi
 
 echo "=== [8/9] 故障注入 b：WBARRIER 超时（${CASE}_to_wb，+G3_WBARRIER_TIMEOUT=1） ==="
-$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_to_wb" --words "$WORDS" --seed "$SEED" --with-store
+$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_to_wb" --words "$WORDS" --seed "$SEED" --sandbox "$SBX" --with-store
 GEN_TOWB=$?
 echo "gen(to_wb) exit=$GEN_TOWB"
 if [ "$GEN_TOWB" -ne 0 ] || [ ! -f "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_to_wb/g3_expect.json" ]; then
@@ -261,7 +268,7 @@ if leg_preload_gate "${CASE}_to_wb"; then
     echo "vcs(to_wb) exit=$VCS_TOWB（预期非 0：\$fatal 超时失败退出）"
     $PY verification_v2/tools/m3lite_gate3_compare.py \
         "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_to_wb" \
-        --mode fatal_expected --expect-timeout wbarrier --tb-sha256 "$TB_SHA"
+        --mode fatal_expected --expect-timeout wbarrier --tb-sha256 "$TB_SHA" --sandbox "$SBX"
     CMP_TOWB=$?
     echo "compare(to_wb, fatal_expected) exit=$CMP_TOWB"
     if [ "$VCS_TOWB" -ne 0 ] && [ "$CMP_TOWB" -eq 0 ]; then
@@ -275,8 +282,8 @@ else
     LEG_FAILS="$LEG_FAILS to_wb(preload-gate)"
 fi
 
-echo "=== [9/9] 故障注入 c：S4 超时（${CASE}_to_s4，+G3_S4_TIMEOUT=50 +G3_AXI_BP_B=$BPN） ==="
-$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_to_s4" --words "$WORDS" --seed "$SEED" --with-store
+echo "=== [9/9] 故障注入 c：S4 超时（${CASE}_to_s4，+G3_S4_TIMEOUT=50 +G3_AXI_BP_B=$BPN，errata 10 后期望 RESPACCT 提前命中） ==="
+$PY verification_v2/tools/m3lite_gate3_case_gen.py --name "${CASE}_to_s4" --words "$WORDS" --seed "$SEED" --sandbox "$SBX" --with-store
 GEN_TOS4=$?
 echo "gen(to_s4) exit=$GEN_TOS4"
 if [ "$GEN_TOS4" -ne 0 ] || [ ! -f "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_to_s4/g3_expect.json" ]; then
@@ -289,16 +296,16 @@ if leg_preload_gate "${CASE}_to_s4"; then
         bash "$SBX/sim_multi_stage/run_sim_aiacc_top_f_multi_stage.sh" \
         "multi_inst_stage/${CASE}_to_s4/smc_0" -s 0 2>&1 | tee "$BK/run_to_s4.console.log"
     VCS_TOS4=${PIPESTATUS[0]}
-    echo "vcs(to_s4) exit=$VCS_TOS4（预期非 0：\$fatal 超时失败退出）"
+    echo "vcs(to_s4) exit=$VCS_TOS4（errata 10 后预期非 0：[G3_RESPACCT][FATAL] 提前终结，S4 超时不再到达）"
     $PY verification_v2/tools/m3lite_gate3_compare.py \
         "$SBX/test_atomic_ops/multi_inst_stage/${CASE}_to_s4" \
-        --mode fatal_expected --expect-timeout s4barrier --tb-sha256 "$TB_SHA"
+        --mode fatal_expected --expect-timeout respacct --tb-sha256 "$TB_SHA" --sandbox "$SBX"
     CMP_TOS4=$?
-    echo "compare(to_s4, fatal_expected) exit=$CMP_TOS4"
+    echo "compare(to_s4, fatal_expected respacct) exit=$CMP_TOS4"
     if [ "$VCS_TOS4" -ne 0 ] && [ "$CMP_TOS4" -eq 0 ]; then
         echo "[G3-RUN] 腿判 to_s4：AS-EXPECTED"
     else
-        echo "[G3-RUN] 腿判 to_s4：UNEXPECTED（期望 vcs≠0 且 fatal_expected=0）"
+        echo "[G3-RUN] 腿判 to_s4：UNEXPECTED（期望 vcs≠0 且 fatal_expected respacct=0）"
         LEG_FAILS="$LEG_FAILS to_s4"
     fi
 else

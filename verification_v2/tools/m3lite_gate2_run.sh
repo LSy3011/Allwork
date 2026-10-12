@@ -9,7 +9,8 @@ set -uo pipefail
 cd /home/juno1023/aiacc_compiler
 source vcs-env.sh
 PY=.venv/bin/python
-SBX=/home/juno1023/u280_sim_v422
+SBX="${M3_SBX:-/home/juno1023/u280_sim_v422}"   # 2026-10-10 沙箱化：M3_SBX 覆盖指向
+                                                # F6 全树沙箱；缺省=原树（默认行为不变）
 HBM_DIR="$SBX/data_engine/sram"
 CASE="${1:?usage: m3lite_gate2_run.sh <case_name> [gen args...]}"
 shift
@@ -49,7 +50,7 @@ restore_hbm() {
 trap restore_hbm EXIT
 
 echo "=== [1/4] 生成 case（写全局 memory_init，副本留存 case） ==="
-$PY verification_v2/tools/ldb_review_case_gen.py --name "$CASE" "${GEN_ARGS[@]}"
+$PY verification_v2/tools/ldb_review_case_gen.py --name "$CASE" --sandbox "$SBX" "${GEN_ARGS[@]}"
 echo "gen exit=$?"
 
 echo "=== [2/4] VCS ==="
