@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **addcmul 第二复杂案例·步①：静态确认通过（三因子乘积结合序分歧首发实证 + U9 关闭）** | 遗留文本 ((value·t1)·t2) vs DFG ((t1·t2)·value) 结合序分歧正面鉴别（fp32 乘结合不安全；horner 全二元乘无此类）→ 处置=配置级公式文本对齐（x+t1*t2*value 三层签名互等，零代码零特判）；II=3 复现、fpmul 双槽 U9【推断】→【实测】、容量构造预测 n_max≈152（未校准禁准入）；遗留域 SUBNORMAL_BAND ×6、候选安全域双过；求解器放置漂移登记（II 稳定/放置随进程漂移，校准锚=发射产物实测）；生产代码零改动 | docs/addcmul_static_confirmation_20261012.md；artifacts/addcmul_static_20261012/（gitignored，sha256 锚） |
 | 2026-10-12 | **horner_v3 步④：统一 LCS 集成通过（经一次公式化通用规则修复，按用户立法序）** | 首跑暴露 C-H 独立参考 scale_sum 硬编码（RED 留档）→ 6 项鉴别性测试 → 公式驱动修复（零名称特判，commit bd2ed7b）→ n=8/n=72 统一链全 GREEN+published；scale_sum/add 回归全 GREEN；pytest 577；提交态 n=8 复验闭合（dirty=false、包内报告一致） | docs/horner_v3_step4_unified_lcs_20261012.md；releases/horner_v3u_hv3u_step4fix_n8_committed_20261012、…_n72_20261012_codex_r2 |
 | 2026-10-12 | **horner_v3 步③：自动分段验证通过（容量边界 VCS 校准 + 尾段/地址/中间状态 + 响拒两点）** | 单段 n_max=68 经 VCS 校准（七队列恰 128 行 GREEN）；n=72 分段 17+1 全 GREEN，尾段写 ADDR=17 经 payload+hex 位级双证、三路 x 流滞后 0/2/3 结构解释死读绕回、段间 C1/C2/C3 全过；n=72 stage_0 与 n=68 单段 18/18 hex 逐字节一致；n=70/n=1028 config_check 响亮早拒；生产代码零改动 | docs/horner_v3_step3_segmentation_20261012.md；releases/horner_v3u_hv3u_step3_n{68,72}_20261012 |
 | 2026-10-12 | **复杂结构首证 horner_v3 步①②：静态确认 + 小规模 VCS 全 GREEN** | II=6 Horner 6 级链（fpadd/fpmul 各 3 有效槽，计算队列多槽首证）经等价目的新配置 horner_v3u 过通用准入，n=4/8/60 三规模 V1 链 GREEN+published、逐拍 18/18 队列 ok、三区全绿；有序浮点语义三层机器比对 MATCH；生产代码零改动；注册表 v3 冻结留裁定 | docs/horner_v3_static_confirmation_20261012.md；docs/horner_v3_step2_smallscale_20261012.md；releases/horner_v3u_hv3u_step2_n{4,8,60}_20261012 |
@@ -1119,3 +1120,30 @@
   TB 3324a33b…、RTL 0x00042200、GREEN+published、包内报告逐字节一致）。
   n=72 条件复跑条款列入步⑤跟踪。
 - 详见 docs/horner_v3_step4_unified_lcs_20261012.md。
+
+## 2026-10-12｜addcmul 第二复杂案例·步①：静态确认通过
+
+- **用户令（2026-10-12）**：addcmul 为第二复杂结构案例，走五步序；步①并入
+  precheck U9（addcmul 逐槽结构【推断】）补探针。方法模板 = horner_v3 步①。
+- **核心结构发现（三因子乘积结合序分歧，首发实证）**：编译器 DFG 消费 SymPy
+  树（configurable.py:213）而非有序 AST；`value*t1*t2` 三因子乘积被 SymPy
+  按规范序 `(t1,t2,value)` 平坦化、经 lower_mul 左折叠 → DFG 实算
+  `((t1·t2)·value)`，与遗留文本序 `((value·t1)·t2)` 结合序不同——fp32 乘
+  结合不安全 ⇒ 遗留 addcmul.yaml **名义语义与编译语义分歧**（存量配置缺陷
+  登记；该配置从未过 V2 验收，无已发布错误产物）。**处置 = 配置级公式文本
+  对齐**：等价文本 `x + t1 * t2 * value` sympify 同一树、共享同一 DFG，而
+  文本序 == 折叠序 → 三层签名互等（A/B 剥 NARY3 标记/C 全 MATCH）。
+  零生产代码改动、零名称特判。
+- **U9 关闭**：fpmul 双计算槽【推断】→【实测（求解器）】（两实例 [0,2]/[0,1]，
+  双槽属性稳定）；II=3 复现 census；17 队列无满槽。
+- **容量构造预测** n_max=152（m_max=38，四实例数值稳定；束缚队列身份
+  ur-r2/vin0 漂移 span 均 4）——未校准、禁用于准入，步③ VCS 校准。
+- **域闸**：遗留 x[-1,1]/t1[-2,2]/t2[0,5] 跨 0 → SUBNORMAL_BAND ×6 复核成立
+  （机制=区间-带相交规则 reference_generator.py:230-237）；候选安全域
+  cand-A（全正）/cand-B（含负）静态双过（正式值步②定案）；value=0.5 恰可表。
+- **方法学发现**：Z3 模型挑选随进程状态/代码路径漂移（同脚本三连跑逐字节
+  一致），II 稳定、放置不稳；D-control 口径改为「II 复现断言 + span/L
+  观察量」，校准锚 = 发射产物实测（ADR-056 步⑤）。详见
+  artifacts/addcmul_static_20261012/VARIANCE.md。附带修复：两静态探针
+  `d.path`→`.node_path` 潜在崩溃字段（horner 探针未重跑，归档不动）。
+- 生产代码零改动。详见 docs/addcmul_static_confirmation_20261012.md。

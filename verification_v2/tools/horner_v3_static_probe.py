@@ -293,7 +293,7 @@ def main() -> int:
             domains[name] = (float(entry[0]), float(entry[0]))
     st = rg.static_domain_check(root, domains)
     emit(f"static_domain_check: ok={st.ok}；诊断 = "
-         f"{[(d.kind, d.path) for d in st.diagnostics] or '无'}")
+         f"{[(d.kind, d.node_path) for d in st.diagnostics] or '无'}")
 
     emit("\n=== E2. 有序参考点检（n=4，动态道 + 求值锚）===")
     import numpy as np
