@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **复杂结构首证 horner_v3 步①②：静态确认 + 小规模 VCS 全 GREEN** | II=6 Horner 6 级链（fpadd/fpmul 各 3 有效槽，计算队列多槽首证）经等价目的新配置 horner_v3u 过通用准入，n=4/8/60 三规模 V1 链 GREEN+published、逐拍 18/18 队列 ok、三区全绿；有序浮点语义三层机器比对 MATCH；生产代码零改动；注册表 v3 冻结留裁定 | docs/horner_v3_static_confirmation_20261012.md；docs/horner_v3_step2_smallscale_20261012.md；releases/horner_v3u_hv3u_step2_n{4,8,60}_20261012 |
 | 2026-10-10 | **ADR-061：scale_sum 统一 LOAD→COMPUTE→STORE 链路验收（五项令 #4）** | 公式链 COMPUTE + 布局驱动自动 LOAD/STORE 统一入口串通：n16/60/240 三段、n244 四段全 GREEN+published；证据限已测布局/单 SMC/TB 辅助同步/RTL 0x00042200，不支持上板或任意公式 | ADR-061 §4/§5；`releases/scale_sum_adr061_accept_n{16,60,240,244}` |
 | 2026-10-10 | **F6 阶段二：错误检出/通知/FAILED 锁定定向验证通过（五项令 #2）** | TB-B 三模式（legacy 原树/重建 p1/阶段二 p2）判据 v2 全 AS-EXPECTED，fixed_p2 B1–B6 首跑全 PASS；签收=「隔离 RTL 中 IQ24–27 定向验证通过」，**不支持完整契约已修复/可上板** | F6 文档 §13；`artifacts/f6_phase2_rtl_20261010`、`f6b_smi_fixed_p2_20261010` |
 | 2026-10-10 | F6 阶段一复核补丁（用户复核裁定） | 重复载荷同拍 NBA 漏洞→当拍协议异常并入完成排除；C7 定向+变异核验（移除排除项即复现）；签收措辞限定为隔离 RTL 定向验证 | F6 文档 §11.5 |
@@ -1038,3 +1039,35 @@
   恢复能力不扩大到通用软恢复或上板。commit `3657c59`。
 - 里程碑性质更新：ADR-061 由「功能验收通过」升为「功能验收通过 +
   交付证据完整（accept2 起自包含）」。
+
+## 2026-10-12｜复杂结构首证 horner_v3：步①静态确认 + 步②小规模 VCS 全 GREEN
+
+- **用户令（2026-10-12）**：ADR-061 按「功能验收＋交付证据完整（accept2 起）」
+  收口；E1–E5 登记为「在已列明范围与用例内完成实现、测试和证据对账」（不简写
+  为全闭合）。下一执行目标 = **优先核查 horner_v3 作复杂结构首证**（五步表：
+  静态确认→小规模计算验证→自动分段验证→统一 LCS 集成→收口）；使用前确认有序
+  浮点语义；配置不满足通用入口则新增等价目的配置、不走手写 lowering；**禁名称
+  特判**，规则改动须先记失败形态+有鉴别力测试+回归 add/scale_sum。
+- **步① 静态确认**（docs/horner_v3_static_confirmation_20261012.md +
+  tools/horner_v3_static_probe.py + artifacts/horner_v3_static_20261012/）：
+  有序语义三层机器比对全 MATCH（文本有序 AST ↔ SymPy 规范化树 ↔ DFG 计算树，
+  交换律层规范化签名）；II=6 复现 census；**fpadd[0,2,4]/fpmul[1,3,5] 三有效槽
+  = 计算队列多槽首证**（add/scale_sum 恒单槽）；rtovr-14/vin0 满槽 6/6；
+  span_q 定义钉死 assembler.py:218/395-396 原式，scale_sum 对照 L(240)=128
+  PASS。两个新发现：①动态域闸拒遗留单值参数（0.1/-0.2/0.3/-0.4 非 fp32 恰可表，
+  4 项 OUT_OF_DECLARED_RANGE；预检只跑静态道未覆盖）；②统一入口 case-gen
+  bank 交叠闸拒 c0..c3 共 bank1。
+- **步② 小规模计算验证**（docs/horner_v3_step2_smallscale_20261012.md）：
+  等价目的新配置 `horner_v3u.yaml`（公式逐字不变；参数分置 bank1/3/4/5 +
+  恰可表值 0.125/-0.25/0.375/-0.5；flag+length），守卫测试名单随配置更新
+  （语料 38→39）。准入干跑：n=4..68 单段全过、**n=68 七队列恰 128 行顶格**、
+  n=72 分段器 17+1（门级证据，容量 VCS 校准归步③）。真实 VCS：**n=4/8/60
+  三规模全 GREEN+published**，逐拍仲裁 18/18 队列 ok（fpadd issue
+  39/45/123 = ISSUE_TOTAL 公式逐项吻合，TERM +1 拍勘误在 II=6 成立）、
+  三区全 GREEN、写账零非法——**II=6 形态一轮通过，零生产代码改动**。
+- **治理待裁定**：注册表 v2 边界表述覆盖 II=2 已证形态；本次 II=6 三规模
+  GREEN 计为探索证据，v3 追加冻结（含 II 独立性论证要点）留用户裁定，
+  冻结前不宣称该形态协议模型正式已证边界扩张。
+- 回归：pytest 571 passed / 7 skipped / 11 xfailed / 148 subtests 全绿；
+  生产代码零改动（diff = 新 yaml + 守卫名单 + 探针/文档）。commits：
+  `610009e`（步①）+ 当次（步②）。

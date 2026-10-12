@@ -1,0 +1,30 @@
+name: "horner_v3u"
+# 复杂结构首证（2026-10-12 用户令五步②）：y = ((c0*x + c1)*x + c2)*x + c3
+# ——3 乘 + 3 加 6 级串行链，II=6，fpadd/fpmul 各 3 有效槽（计算队列多槽首证）。
+# 与 horner_v3.yaml 的关系 = add_v1 之于 add：公式逐字相同的等价目的新配置
+#（horner_v3 原样保留以守护 census 归档快照可复现性），两处配置面适配：
+#  ① bank 布局：c0..c3 由共 bank1（offsets 0-3）改为分置 bank1/3/4/5——
+#     ADR-061 统一入口 case-gen 一 bank 一张量闸（unified_lcs_case_gen.py:111）
+#     要求；x=bank0、y=bank2、constants 显式 bank7（add/scale_sum 同型）。
+#  ② test_data 参数值：0.1/-0.2/0.3/-0.4 非 fp32 恰可表，动态域闸
+#     OUT_OF_DECLARED_RANGE 响拒（horner_v3 静态确认 §4 实测）——改恰可表
+#     二进分数 0.125/-0.25/0.375/-0.5；x 域 [0.1,1.0] 不动（量化方向向内）。
+# 2026-10-12（步②接入）：补 §B.1 准入标记 experimental_unroll + §F.5 必填
+# length（各张量 offset=0 独占其 bank → 取满 bank_depth=256，与 add/scale_sum
+# 同构；参数 stride=0 驻留，各消耗 1 word）。
+formula: "((c0 * x + c1) * x + c2) * x + c3"
+experimental_unroll: true
+tensors:
+  x:         { bank: 0, role: "input",    offset: 0, length: 256 }
+  c0:        { bank: 1, role: "param",    offset: 0, length: 256 } # 驻留标量（stride=0，消耗 1 word）
+  c1:        { bank: 3, role: "param",    offset: 0, length: 256 }
+  c2:        { bank: 4, role: "param",    offset: 0, length: 256 }
+  c3:        { bank: 5, role: "param",    offset: 0, length: 256 }
+  y:         { bank: 2, role: "output",   offset: 0, length: 256 }
+  constants: { bank: 7, role: "constant", offset: 0, length: 256 }
+test_data:
+  x: { range: [0.1, 1.0] }   # 与 horner_v3 遗留域一致（静态/动态道实测均过）
+  c0: [0.125]
+  c1: [-0.25]
+  c2: [0.375]
+  c3: [-0.5]
