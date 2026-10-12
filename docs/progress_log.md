@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **horner_v3 步③：自动分段验证通过（容量边界 VCS 校准 + 尾段/地址/中间状态 + 响拒两点）** | 单段 n_max=68 经 VCS 校准（七队列恰 128 行 GREEN）；n=72 分段 17+1 全 GREEN，尾段写 ADDR=17 经 payload+hex 位级双证、三路 x 流滞后 0/2/3 结构解释死读绕回、段间 C1/C2/C3 全过；n=72 stage_0 与 n=68 单段 18/18 hex 逐字节一致；n=70/n=1028 config_check 响亮早拒；生产代码零改动 | docs/horner_v3_step3_segmentation_20261012.md；releases/horner_v3u_hv3u_step3_n{68,72}_20261012 |
 | 2026-10-12 | **复杂结构首证 horner_v3 步①②：静态确认 + 小规模 VCS 全 GREEN** | II=6 Horner 6 级链（fpadd/fpmul 各 3 有效槽，计算队列多槽首证）经等价目的新配置 horner_v3u 过通用准入，n=4/8/60 三规模 V1 链 GREEN+published、逐拍 18/18 队列 ok、三区全绿；有序浮点语义三层机器比对 MATCH；生产代码零改动；注册表 v3 冻结留裁定 | docs/horner_v3_static_confirmation_20261012.md；docs/horner_v3_step2_smallscale_20261012.md；releases/horner_v3u_hv3u_step2_n{4,8,60}_20261012 |
 | 2026-10-10 | **ADR-061：scale_sum 统一 LOAD→COMPUTE→STORE 链路验收（五项令 #4）** | 公式链 COMPUTE + 布局驱动自动 LOAD/STORE 统一入口串通：n16/60/240 三段、n244 四段全 GREEN+published；证据限已测布局/单 SMC/TB 辅助同步/RTL 0x00042200，不支持上板或任意公式 | ADR-061 §4/§5；`releases/scale_sum_adr061_accept_n{16,60,240,244}` |
 | 2026-10-10 | **F6 阶段二：错误检出/通知/FAILED 锁定定向验证通过（五项令 #2）** | TB-B 三模式（legacy 原树/重建 p1/阶段二 p2）判据 v2 全 AS-EXPECTED，fixed_p2 B1–B6 首跑全 PASS；签收=「隔离 RTL 中 IQ24–27 定向验证通过」，**不支持完整契约已修复/可上板** | F6 文档 §13；`artifacts/f6_phase2_rtl_20261010`、`f6b_smi_fixed_p2_20261010` |
@@ -1071,3 +1072,20 @@
 - 回归：pytest 571 passed / 7 skipped / 11 xfailed / 148 subtests 全绿；
   生产代码零改动（diff = 新 yaml + 守卫名单 + 探针/文档）。commits：
   `610009e`（步①）+ 当次（步②）。
+
+## 2026-10-12｜horner_v3 步③：自动分段验证通过
+
+- **容量边界 VCS 校准**：步①构造预测 n_max=68 升级为 VCS 校准——n=68 单段
+  七队列（fpadd/rtovr-3/4/5/6/14/vin0）恰 128 行 GREEN；n=72 由 ADR-057
+  分段器切 17+1 两段 GREEN；n=1024（bank 恰满 256 行）干跑准入 16 段。
+- **尾段**：stage_1 恰覆盖迭代 [17,18)，L=32=6·(1+4)+2，issue 计数与 n=4
+  同型；写值三区 bit-exact。
+- **地址（payload+hex 位级双证）**：y 写两段 0..16/{17} 连续不相交；
+  三路 x 流滞后 0/2/3（mul1/mul2/mul3 各一份 x），stage_1 活读全 ADDR=17；
+  死读（prologue 模 256 绕回 253..255 / epilogue 18..20）由活性排除，
+  每流读数恰 R_q=span+m；UR_WRITE row3 位级解码 BANK=2/ADDR=17/WBE=0xFFFF。
+- **中间状态**：C1 次序/C2 零残留（同拍空窗 errata 沿用登记）/C3 写集相等
+  全过；**跨案例一致性：n=72 stage_0 ≡ n=68 单段，18/18 hex sha256 相同**。
+- **响亮拒绝**：n=70（不整除 4）与 n=1028（257>256 行）均 RED@config_check、
+  零产物发布、原因明确；容量界夹在 256/257 行之间。
+- 生产代码零改动。详见 docs/horner_v3_step3_segmentation_20261012.md。
