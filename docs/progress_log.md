@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-12 | **addcmul 步④：统一 LCS 集成零规则改动通过（C-H 通用化首个正面实证）** | n=8/n=160 统一 LCS 链双双首轮 GREEN+published（公式驱动 C-H 直接消费 x+t1*t2*value，立法序未启动）；程序段时序全录（n8 三段 ack@4107、n160 四段 ack@37870）；附随观察=统一链两进程发射实例 C（17 队列、ur-r2 span=4 束缚→分段 38+2），分段边界为求解实例相关量（38–39 两侧均 VCS 实测），「n=160 唯一分段形态」禁称；全程提交态 74cf64b 干净树 | docs/addcmul_step4_unified_lcs_20261013.md；releases/addcmulu_acu_step4_ulcs_n{8,160}_20261012 |
 | 2026-10-12 | **addcmul 步③：容量 VCS 校准 n_max=156 + 分段链验证通过** | 单段 n_max=156 经 VCS 校准（rtovr-14/vin0 恰 128 行 GREEN，近壁形状跨 5 进程稳定）；n=160 分段 39+1 全 GREEN（段间 C1/C2/C3 全过、尾段写址恰 bank4 row39、stage_0 与 n=156 十八队列逐字节一致）；n=158（不整除）/n=1028（静态消耗越界）config_check 响亮早拒；预测-实测算账全闭合（构造预测保守方向）；GREEN 运行全提交态（c0ba5f3b dirty=false） | docs/addcmul_step3_capacity_20261012.md；releases/addcmulu_acu_step3_n{156,160}_20261012 |
 | 2026-10-12 | **addcmul 步②：小规模计算验证通过（II=3 双槽首个 VCS 证据）+ 发射层放置漂移实证** | n=4/8/60 三规模 V1 链全 GREEN+published，逐拍 18/18 队列 ok、三区全绿、写账零非法；发射链 span=3（L_q=3(m+3)+2 五档成立），干跑实测 n=156 单段恰 128 行顶格（构造预测 152 保守已修正）；**方法学实证：放置漂移可达真实发射产物**（n=4 同配置两进程两合法变体 1/8；近壁 n=156 跨 5 进程逐字节稳定）——步①开放问题关闭，「跨进程确定性」口径收缩；生产代码零改动 | docs/addcmul_step2_smallscale_20261012.md；releases/addcmulu_acu_step2_n{4,8,60}_20261012；VARIANCE.md 当日补遗 |
 | 2026-10-12 | **addcmul 第二复杂案例·步①：静态确认通过（三因子乘积结合序分歧首发实证 + U9 关闭）** | 遗留文本 ((value·t1)·t2) vs DFG ((t1·t2)·value) 结合序分歧正面鉴别（fp32 乘结合不安全；horner 全二元乘无此类）→ 处置=配置级公式文本对齐（x+t1*t2*value 三层签名互等，零代码零特判）；II=3 复现、fpmul 双槽 U9【推断】→【实测】、容量构造预测 n_max≈152（未校准禁准入）；遗留域 SUBNORMAL_BAND ×6、候选安全域双过；求解器放置漂移登记（II 稳定/放置随进程漂移，校准锚=发射产物实测）；生产代码零改动 | docs/addcmul_static_confirmation_20261012.md；artifacts/addcmul_static_20261012/（gitignored，sha256 锚） |
@@ -1197,3 +1198,24 @@
 - **provenance**：GREEN 运行全提交态（git_head=c0ba5f3b dirty=false，
   yaml/TB/simv/注册表四锚互符）；RED 探针早拒无 provenance 块属预期。
 - 生产代码零改动；详见 docs/addcmul_step3_capacity_20261012.md。
+
+## 2026-10-12｜addcmul 步④：统一 LCS 集成零规则改动通过
+
+- **零规则改动首轮通过**：n=8（三段 LOAD[12,494]+COMPUTE[494,3909]+STORE
+  ack@4107）与 n=160（四段 LOAD[12,1058]+COMPUTE×2+STORE ack@37870）统一
+  LCS 链双双首轮 GREEN+published；program_manifest 记录公式原文
+  `x + t1 * t2 * value` 被通用 C-H 消费——horner 步④公式化修复对第二
+  复杂公式的适用性首个正面实证；立法序未启动、回归触发条件未达。
+- **逐拍与比对**：两 COMPUTE 段 17/17 队列逐拍 ok；写账 16/304+16 零非法
+  （wbe 全 0xffff、smc 0..7）；unified_lcs_compare 双 GREEN；C-L/C2
+  同拍-空窗诚实注记照录（硬断言承载次序）。
+- **附随方法学观察（实例 C）**：统一链两进程发射 17 队列变体（ur-r2
+  span=4 束缚）→ 分段 m_max=38（38+2），与步③ V1 链实例 A 的 39+1
+  不同；stage_manifest queue_spans 与发射行数逐行自洽（seg0 ur-r2=128
+  恰顶格）。**分段边界 = 求解实例相关量**：n=160 不得宣称唯一分段形态；
+  正确性判据（C1/C2/C3、bit-exact）实例不变。容量墙 128 行/段为硬件
+  常数；单段迭代容量实测区间 38–39（两值均 VCS 验证）。注册表 v3 开放
+  问题追加「分段决策实例相关性与公式冻结的关系」。
+- **provenance**：两运行 git_head=74cf64b1 dirty=false（提交态）；
+  yaml/TB/注册表三锚与步②③一致。生产代码零改动。
+- 详见 docs/addcmul_step4_unified_lcs_20261013.md。
