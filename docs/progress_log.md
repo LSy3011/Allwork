@@ -1250,6 +1250,13 @@
   核实仅在非 dry-run 路径执行，dry-run 不触任何设备节点。
 - **封存**：`~/u280_fpga_packages/scale_sum_ulcs_n16_v422_compiler_onboard_prepared_20261013/`
   （60 文件）+ `.tar.gz`（sha256 3cc3191a47dacd00…，唯一命名未覆盖历史包）。
+- **r2 修订（当日，用户 zwz 首跑发现）**：README §5 命令把 runner 路径错写为
+  `tools/../aiacc_u280_case_runner.py`（zwz 不存在；runner 不属 XDMA tools 树，
+  系路径猜测错误）→ r2 起 runner 随包携带（单文件纯 stdlib，
+  sha256 5f173003bb4ee382…，与 dry-run 校验同一文件；meta_v3 契约耦合故禁混用
+  zwz 历史副本）+ 命令改相对路径 + §0 修订注。包内 runner 对包内 case dry-run
+  exit=0 复验。r1 包保留不覆盖、作废以 r2 为准：
+  `…_prepared_20261013_r2/` + `.tar.gz`（sha256 06a2b6366b4492dd…）。
 - **不扩大清单**（README §7）：板端若通过 = 该产物此规模此三段形态的实际输出证据；
   不外推任意规模/多 SMC/其他算子；VCS 侧 sync_model=tb_assisted，host 完成协议闭环
   仍是 F6 开放问题；不触及 F6 修复 RTL/新 bitstream/尾块扩展。
