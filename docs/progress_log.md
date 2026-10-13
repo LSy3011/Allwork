@@ -16,11 +16,16 @@
   IQ 墙 `smi_top.v:22 SMI_IQ_INSTQ_DEPTH=128`）；n=244 → `STATIC_ADMISSION_REJECTED`。
 - **证据等级声明**：本仓库编译器产物的最强证据 = **VCS RTL 级**（无任何上板记录；
   上板证据仅手写微码线有，见 [[memory:u280-llama-r2-onboard-pass]]）。
+  **（2026-10-13 更新：编译器产物首个板端证据已取得——scale_sum n=16 统一 LCS
+  上板 `CASE PASS compared_smc=1`，HBM 64B 与独立参考锚 bit-exact；范围限
+  本产物本形态单 SMC，详见里程碑表当日行与
+  `artifacts/onboard_scale_sum_n16_20261013/`。）**
 
 ## 2. 里程碑时间线（倒序；每项 = 日期 / 结论 / 证据指针）
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-13 | **编译器产物首个板端实际输出证据：scale_sum n16 统一 LCS 上板 CASE PASS（上板档第 1 例）** | r3 包 zwz 实跑（`sudo ./run_one_case.sh`，板证 runner d8e6be6d…）：版本门 0x00042200+IQP1 过、软复位 PASS、8 路 HBM 预载、三段 DONE（intid delta 全 1 无 WARN）、HBM 输出窗 64B 回读与 golden bit-exact（golden 锚=VCS 侧独立 fp32 参考）→ `smc_0 PASS` → `CASE PASS compared_smc=1`；判据=数据面非 DONE 时序（F6 措辞裁定：host ms 遮蔽解释流程顺畅、不构成竞态无害证明）；不扩大=本产物本形态单 SMC、host 完成协议闭环仍 F6 开放 | artifacts/onboard_scale_sum_n16_20261013/（board_log.txt 实录+README+SHA256SUMS）；包 ~/u280_fpga_packages/…_r3.tar.gz（22bfad6a…） |
 | 2026-10-13 | **上板实验包备妥（首个编译器产物上板包；备而不跑，dry-run exit=0）** | 按用户裁定「小规模、明确硬件版本和等待策略、不扩多 SMC/复杂尾块/F6 新 bitstream」：选 scale_sum n=16 统一 LCS（ADR-061 accept2 提交态复跑发布，最保守已证形态）打包——case（meta_v3.json out_bank=2/store_byte_base=20480/out_words=4 + hbm_data 8 路镜像 + 三段 IQ + 仅 smc_0 golden 镜像 VCS 单 SMC 范围）+ evidence 审计锚 + README（版本门 0x00042200/IQP1、等待策略明文=DONE 轮询 10ms/10s 但判据=HBM 64B bit-exact 数据面、停止条件、不扩大清单）；runner dry-run 全程走通 exit=0（软复位→8 路预载 stride 0x10000000→三段加载 stage_1 228 写→回读窗 0x5000→smc_1..7 按设计 SKIP）；tar+sha256 唯一命名封存；**未接触板卡**，板端执行留用户在 zwz 手动进行 | ~/u280_fpga_packages/scale_sum_ulcs_n16_v422_compiler_onboard_prepared_20261013{,.tar.gz,.tar.gz.sha256}（sha256 3cc3191a…） |
 | 2026-10-13 | **注册表 v3 追加冻结 DONE（用户裁定五行表 + 独立论证先行，常数零改动）** | 独立论证 docs/registry_v3_argument_20261013.md 先行（II 独立性=RTL 文本归约：硬件无 II 寄存器、l_init/行数以编码值进入，smi_iq_iic.v:253/:828-838/:1202-1203/:841-862 + emit:159 + stage_partition:88；公式语义=三层签名互等+ordered_ast 机检；两必答项=漂移分层/分段实例相关）；v3 文件 17 条（9 携入：5 边界扩展+2 仅出处+2 逐字；8 新增=公式语义×4+漂移政策+分段规则+容量口径+已证范围），--seal 500c539e…，默认切换 v3（v1/v2 零改动存档+测试锁定）；「不冻结 n=160 唯一形状/mul 单列不入边界/不外推任意同 II 程序」逐字入记录；pytest 578 | verification_v2/tools/protocol_registry_v3.yaml；docs/registry_v3_argument_20261013.md |
 | 2026-10-13 | **覆盖矩阵 II 锚点勘误（用户裁定触发）：add=II=2，mul 单列不入四算子集** | 用户核对四算子表统计对象（「II=1 对应哪个算子、哪次运行必须有锚点」）→ 正面取证：II 普查 add 解出 II=2，三份 add V1 实跑 compiler_schedule.json 全 II=2/unroll——两份步⑤文档 add=II=1 系事实性错误；II=1 唯一 VCS 证据=mul（ADR-054 阶段2-M1，2026-09-12，2048/2048 bit-exact），属前 V1 准入链证据类（且 II=1 flat 保留 ISSUE 实证债务），按裁定单列不混入；四算子 V1 链实证 II 值集={2,3,6} | docs/addcmul_step5_closure_20261013.md §2 表下勘误注（已修正）；docs/horner_v3_step5_closure_20261012.md §6 errata E1 |
@@ -66,7 +71,7 @@
 | 容量边界与响亮拒绝（工程严谨性案例） | 步⑤ n=240 顶格 + n=244 拒绝 + 失败码传递缺陷修复 | VCS + 契约测试 | — |
 | 搬运路径（LDB/STB） | ADR-050（LDB 取证史）/ADR-052（STB 阶段1） | LDB 有 VCS；**STB 仅编码层** | M3 端到端未做 |
 | F6：完成协议缺陷「发现—复现—修复—定向验证」闭环（问题驱动验证案例） | F6 契约 v3 + TB-A/TB-B 三模式（legacy/重建 p1/p2）+ 判据演进 v1→v2 记录 + 变异核验 | 仿真（VCS TB 定向；隔离 RTL） | 门②门③真实单元回归未在修复 RTL 上执行；不支持上板/完整契约宣称 |
-| 上板闭环 | **编译器产物无**；手写线 llama r2 PASS | 上板（手写线） | 编译器上板 = 最大缺口（已降级为周期抽验，不阻塞主线） |
+| 上板闭环 | **编译器产物首例（2026-10-13）**：scale_sum n16 统一 LCS 上板 CASE PASS compared_smc=1（artifacts/onboard_scale_sum_n16_20261013/）；手写线 llama r2 PASS | 上板 | 范围限本产物本形态单 SMC；多 SMC/他算子/任意规模未覆盖；host 完成协议闭环仍 F6 开放 |
 
 ## 4. 遗留债务登记（随验收保留，不豁免）
 
@@ -1223,6 +1228,31 @@
 - **provenance**：两运行 git_head=74cf64b1 dirty=false（提交态）；
   yaml/TB/注册表三锚与步②③一致。生产代码零改动。
 - 详见 docs/addcmul_step4_unified_lcs_20261013.md。
+
+## 2026-10-13｜编译器产物首个板端实际输出证据（scale_sum n16 上板 CASE PASS）
+
+- **结论（限定口径）**：编译器产物（scale_sum n=16 统一 LCS 三段，II=2 单槽）在
+  zwz U280（4.22 bitstream）取得板端实际输出证据——三段 DONE、HBM 输出窗 64B
+  与 golden 逐行 bit-exact、`CASE PASS compared_smc=1`。golden 锚 = VCS 侧独立
+  fp32 参考（adr061_accept2_n16 evidence），非同源自证。**上板档第 1 例**
+  （此前仅手写微码线有板端证据）。
+- **实录**（artifacts/onboard_scale_sum_n16_20261013/board_log.txt，用户终端
+  粘贴逐字归档）：版本门 0x00042200+IQP1 过 → 软复位 PASS（CFG/INT/DONE=0、
+  PACKER_STATUS=1）→ 8 路预载（smc_0 真实输入 28672B valid=24640；smc_1..7
+  哨兵 65536B）→ stage_0（LDB 26/27，16 写，INT=0x…0101）→ stage_1（16 文件
+  228 写，INT=0x…0201）→ stage_2（STB 24/25，4 写，INT=0x…0301），三段
+  intid_hw delta 全 1 无 WARN → 回读 0x5000 → smc_0 bit-exact PASS，
+  smc_1..7 按设计 SKIP。
+- **判据纪律**：判据 = HBM readback bit-exact（数据面），非 DONE 时序；
+  host ms 轮询对 ns 级完成竞态有 5–6 数量级遮蔽——解释流程顺畅，不构成
+  竞态无害证明；intid delta=1 为竞态与正确完成共有表现（必要非充分）。
+  板端 DONE→落位时序未做探针观测，不断言。
+- **不扩大**：范围 = 本产物本规模本形态单 SMC；不外推任意规模/多 SMC/
+  他算子/任意公式；host 完成协议闭环仍 F6 开放问题；VCS 侧 sync_model
+  =tb_assisted 不变。
+- **包链**：r1（路径勘误作废）→ r2（runner 入包）→ r3（对齐 09-21 实跑包：
+  板证 runner + run_one_case.sh + PACKAGE_INFO + SHA256SUMS 63/63 OK；
+  执行 `sudo ./run_one_case.sh`）。r3.tar.gz sha256 22bfad6ad7773bb3…。
 
 ## 2026-10-13｜上板实验包备妥（备而不跑；首个编译器产物上板包）
 
