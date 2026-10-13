@@ -1257,6 +1257,17 @@
   zwz 历史副本）+ 命令改相对路径 + §0 修订注。包内 runner 对包内 case dry-run
   exit=0 复验。r1 包保留不覆盖、作废以 r2 为准：
   `…_prepared_20261013_r2/` + `.tar.gz`（sha256 06a2b6366b4492dd…）。
+- **r3 修订（当日，用户指示参照 09-21 板端实跑包 rh_real2tile_slots_fpga_20260921）**：
+  ①runner 换为板证 v2 副本（09-21 包内文件 sha256 d8e6be6dbdcc6385…，zwz 实跑同源；
+  为 r2 所携副本超集——多出 multitile/stage-range/hbm_extra_regions 路径对本 case
+  全不激活（meta 无对应键），两 runner 对本 case dry-run 段迹逐行一致 16/228/4
+  packer 写、exit=0；版本门 0x00042200+IQP1 双处俱在）；
+  ②对齐实跑包封装惯例：新增 run_one_case.sh 入口（XDMA_TOOLS_DIR 双路径回退，
+  入口脚本 dry-run exit=0 实证）+ PACKAGE_INFO.txt（provenance/版本门/等待策略
+  key=value）+ PACKAGE_SHA256SUMS.txt（63 行，`sha256sum -c` 63/63 OK）；
+  ③§5 补设备节点权限步骤（2026-10-13 zwz 首跑实证 /dev/xdma0_user EACCES：
+  sudo 或 chmod a+rw，临时）。r2 包保留不覆盖，以 r3 为准：
+  `…_prepared_20261013_r3/` + `.tar.gz`（sha256 22bfad6ad7773bb3…）。
 - **不扩大清单**（README §7）：板端若通过 = 该产物此规模此三段形态的实际输出证据；
   不外推任意规模/多 SMC/其他算子；VCS 侧 sync_model=tb_assisted，host 完成协议闭环
   仍是 F6 开放问题；不触及 F6 修复 RTL/新 bitstream/尾块扩展。
