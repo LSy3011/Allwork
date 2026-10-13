@@ -1,0 +1,102 @@
+# 论文实验表：编译器产物验证结果统一对比（数据截止 2026-10-13）
+
+> 用途：毕业论文实验章节的统一对比表底稿。每个数字都带锚（run ID / release /
+> 归档 sha256），口径分级标签【实测】【源码】【归档】【推断】【未校准】不混称；
+> 四档覆盖纪律（可调度/可发射/VCS/上板）逐行适用。
+> 权威细节永远在被指向的 ADR / 步⑤收口文档 / 归档里，本表是索引层不复制数据。
+
+## 1. 统一对比主表（V1 配置-only 准入链四算子 + 板端首例）
+
+全部 VCS 行为【实测】：TB sha256 `3324a33b…`（RESPACCT 常驻版），RTL 源树
+4.22（板端 CSR 期望 `0x00042200`）；统一 LCS 链 provenance 见 §6。
+
+| 算子 | 公式（求值序） | II（锚） | 计算槽结构 | 输入流/参数 | 单段 n_max（校准锚） | 超容量分段实例 | 统一 LCS 程序链 | VCS 结果 | 板端结果 |
+|---|---|---|---|---|---|---|---|---|---|
+| add | `x + other` | **2**（普查 + 3 实跑 compiler_schedule.json） | fpadd 单槽 | 2 流式，无参数 | 【未校准】准入层既有上限 240（非顶格 VCS 校准）；n=256 响亮拒绝（回归锚 `test_g3_add_overcapacity_refuses_loudly`） | 无（未超上限运行） | 未跑 | 4/8/60 全 GREEN+published（5 运行枚举 §6） | 未跑 |
+| scale_sum | `alpha * (x + other)`（加后乘驻留标量） | **2** | fpadd 单槽 | 2 流式 + 1 驻留标量 | **240**（rtovr-14 恰 128 行顶格 GREEN；n=244 单段响亮拒绝） | 244/480 两段（ADR-057 验收②正式链 GREEN+published） | n16/60/240 三段、n244 四段（ADR-061 accept2 复跑全 GREEN+published） | 全 GREEN | **n16 上板 `CASE PASS compared_smc=1`（HBM 64B bit-exact，板端档首例，§4）** |
+| horner_v3u | `((c0·x + c1)·x + c2)·x + c3`（Horner 6 级链） | **6** | fpadd 3 槽 + fpmul 3 槽（三槽双单元，计算队列多槽首证） | 1 流式 + 4 参数 + 常量 bank | **68**（七队列恰 128 行顶格 GREEN；n=70 响亮早拒） | 72 两段 17+1（尾段写址 17 payload+hex 双证） | n8 三段、n72 四段 GREEN+published | 全 GREEN | 未跑 |
+| addcmulu | `x + t1*t2*value`（m1=t1·t2；m2=m1·value；y=x+m2） | **3** | fpmul 双槽单单元 | 3 流式 + 1 驻留标量 | **156**（rtovr-14/vin0 恰 128 行顶格 GREEN；n=158/1028 响亮早拒） | 160 两段：**V1 39+1 与统一链 38+2 两实例均 GREEN**（§3） | n8 三段、n160 四段 GREEN+published | 全 GREEN | 未跑 |
+
+- II 锚点总注：四算子 V1 链实证 II 值集 = **{2,3,6}**；II=1 唯一 VCS 证据 = mul
+  （前 V1 证据类，§2 单列）。勘误史见 addcmul 步⑤ §2 表下注与 horner 步⑤ §6 E1。
+- 公式文本锚：`alpha * (x + other)` 出自 `verification_v2/ops/scale_sum.yaml:8`
+  ——r1–r3 上板包 README/PACKAGE_INFO 曾误写 `alpha*x + other`（纯文档错误，
+  执行链与 golden 未受影响；勘误已登记 artifacts/onboard_scale_sum_n16_20261013/README.md）。
+- 求值序冻结：四算子逐节点 fp32 求值序已入注册表 v3 `FORMULA_SEMANTICS_*`
+  （records_sha256 `500c539e…`）——「代数等价」不足为凭，addcmulu 的
+  ((t1·t2)·value) 与遗留 ((value·t1)·t2) 逐位可区分。
+- 容量数字纪律：n_max 均为 VCS 顶格校准值（恰 128 行 = `smi_top.v:22
+  SMI_IQ_INSTQ_DEPTH` 硬件常数），非构造预测；add 行例外已标【未校准】。
+- 放置漂移注记：addcmulu 三个放置实例（A 18 队列/span≤3、B 17 队列 ur-r3 重、
+  C 17 队列 ur-r2 span=4）各自全链 GREEN，正确性判据实例不变；
+  「发射产物跨进程逐字节确定性」禁全称（步⑤ §2 第二档第 12 条）。
+
+## 2. mul 单列（前 V1 证据类，不混入四算子集合）
+
+| 算子 | 公式 | II | 证据 | 口径 |
+|---|---|---|---|---|
+| mul | `x * other`（flat 单槽） | **1** | ADR-054 阶段2-M1（2026-09-12）：`multi_inst_stage/compiler_mul/smc_0` COMPARE PASSED，8 bank×256 行 = **2048/2048 bit-exact**，独立 python 复核 mismatch=0 | 先于 V1 配置-only 准入链（未经准入/容量分段/统一 LCS machinery）；「II=1 flat 保留 ISSUE 实证债务」既有口径不变；板端另有手写微码线 llama r2 mul_scalar PASS（非编译器产物，不并账） |
+
+## 3. 分段实例详表（容量墙 128 行/段 = 硬件常数；边界 = f(实际调度, span_q, 墙)）
+
+| 算子 | n | 分段形态 | 链 | 结果 | 锚 |
+|---|---|---|---|---|---|
+| scale_sum | 244 | 两段 COMPUTE | V1 正式链（ADR-057 验收②） | GREEN+published | releases/scale_sum_adr057_* |
+| scale_sum | 480 | 两段 COMPUTE | 同上 | GREEN+published | 同上 |
+| scale_sum | 244 | 四段程序（LOAD+2×COMPUTE+STORE） | 统一 LCS（ADR-061 accept2） | GREEN+published | releases/scale_sum_adr061_accept2_n244 |
+| horner_v3u | 72 | 17+1 | 统一 LCS | GREEN+published（尾段写址 17 双证） | releases/horner_v3u_hv3u_step4fix_n72_20261012_codex_r2 |
+| addcmulu | 160 | **39+1** | V1 链 | GREEN+published | releases/addcmulu_acu_step3_n160_20261012 |
+| addcmulu | 160 | **38+2** | 统一 LCS | GREEN+published（放置实例 C，ur-r2 span=4 束缚） | releases/addcmulu_acu_step4_ulcs_n160_20261012 |
+
+钉死句（注册表 v3 `SEGMENTATION_DECISION_RULE`）：冻结的是**决策规则与实例
+证据**——同一 n=160 存在 39+1 与 38+2 两种合法分段，均经全链验证；
+**禁称「n=160 必须切成某一种形状」**；容量墙 128 行/段是硬件常数，单段迭代
+容量为实例相关区间（addcmulu 实测 38–39）。
+
+## 4. 板端证据（上板档第 1 例，2026-10-13）
+
+- scale_sum n=16 统一 LCS，zwz U280（4.22 bitstream）：版本门
+  `0x00042200`+IQP1 过 → 软复位 PASS → 8 路预载 → 三段 DONE（intid delta
+  全 1）→ HBM 输出窗 64B 与 golden（锚 = VCS 侧独立 fp32 参考）逐行
+  bit-exact → **`CASE PASS compared_smc=1`**。
+- 判据 = 数据面 bit-exact，非 DONE 时序；host ms 轮询对 ns 级完成竞态有
+  5–6 数量级遮蔽（解释流程顺畅，不构成竞态无害证明；F6 措辞裁定）。
+- 范围：本产物本规模本三段形态、单 SMC（smc_0；smc_1..7 按设计 SKIP，
+  镜像 VCS 证据范围）。不外推任意规模/多 SMC/他算子/任意公式；
+  host 完成协议闭环仍 F6 开放问题。
+- 归档：`artifacts/onboard_scale_sum_n16_20261013/`（board_log.txt 逐字实录
+  sha256 `4c55563c…` + README + SHA256SUMS）；包
+  `~/u280_fpga_packages/…_r3.tar.gz`（sha256 `22bfad6a…`，板证 runner
+  `d8e6be6d…`）。
+
+## 5. 可宣称 / 不外推（口径转引，权威在两份步⑤收口文档 §2 第三档）
+
+**可宣称**：在 ADR-056 §A 公式子集内，「新公式 = 新 yaml 配置」即可经同一
+通用链路（无算子名/张量名特判）完成准入、调度、分段、程序装配与 VCS 验证；
+II 实证值集 {2,3,6}（V1 链）；多槽谱系三档（单槽/双槽单单元/三槽双单元）；
+≥3 因子乘积结合序分歧可用配置级文本对齐消解（一例实证）；C-H 公式化独立
+参考跨案例零改动复用（一例实证）；编译器产物已有 1 例板端实际输出证据
+（本表 §4 范围限定内）。
+
+**明确不外推**：任意 II（实测 2/3/6）；任意多槽/多单元组合（实测三档）；
+任意参数个数与布局（≤4 参数 + 1 常量 bank）；多 SMC、ragged tail、归约/
+矩阵/原地更新；host 自主完成闭环；发射产物跨进程逐字节确定性；分段边界
+实例不变性；任意 ≥3 因子公式结合序对齐可行性；上板推广（仅 §4 一例范围）。
+
+## 6. 锚点清单（数据 → 证据位置）
+
+| 数据 | 锚 |
+|---|---|
+| 四算子覆盖矩阵（管辖版） | docs/addcmul_step5_closure_20261013.md §2（含 II 勘误注）；horner 步⑤ §2/§6 |
+| II=2 add 锚 | census3_progress.txt + build/v1_runs/add/{20261010_102442_d036c3, adr057_closure_add_reg, hv3u_regress_add_frozen_20261012_codex} compiler_schedule.json |
+| add 运行枚举（全 4/8/60 GREEN+published） | build/v1_runs/add/ 5 运行：20260930_021905_b0a304、20260930_034720_d28bfb、20261010_102442_d036c3、adr057_closure_add_reg、hv3u_regress_add_frozen_20261012_codex |
+| add n=256 响亮拒绝回归锚 | tests/…`test_g3_add_overcapacity_refuses_loudly`（ADR-057 :84 修订史） |
+| scale_sum n_max=240 / n=244 拒 | ADR-056 步⑤（rtovr-14 恰 128 行）；`verification_v2/artifacts/v1_step5_scale_sum_acceptance_20260930/` |
+| scale_sum 244/480 两段 | ADR-057 验收②（销号 e83bc8c） |
+| scale_sum 统一 LCS 四规模 | ADR-061 accept + accept2（commit A=7911103/B=0792941；e76592b/3657c59/268be91）；run_report git_head e76592b（dirty=true 按实）、registry v2 973861aa…、manifest 86f48037… |
+| horner_v3u 全链 | docs/horner_v3_step{1..5}_20261012；releases/horner_v3u_hv3u_step{2,3,4fix}_* |
+| addcmulu 全链 | docs/addcmul_{static,step2,step3,step4,step5}_2026101{2,3}；releases/addcmulu_acu_step{2,3,4}_* |
+| 注册表 v3（求值序/分段规则/容量口径冻结） | verification_v2/tools/protocol_registry_v3.yaml（records_sha256 500c539e…）+ docs/registry_v3_argument_20261013.md |
+| 板端首例 | artifacts/onboard_scale_sum_n16_20261013/（SHA256SUMS）；包 r3 tarball 22bfad6a… |
+| mul 单列证据 | memory compiler-rtovr-dense-vs-sparse-mismatch（ADR-054 阶段2-M1 条） |
+| pytest 基线 | 578 passed（7 skipped，11 xfailed，148 subtests）@ 2026-10-13 |
