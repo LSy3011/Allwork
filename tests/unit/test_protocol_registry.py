@@ -38,13 +38,18 @@ class TestRegistryIntegrity(unittest.TestCase):
 
     def test_default_registry_loads_and_seal_consistent(self):
         reg = pr.load_default()
-        self.assertEqual(reg.version, 2)
+        self.assertEqual(reg.version, 3)
         self.assertEqual(len(reg.records_digest), 64)   # sha256 hex
         # 冻结对象枚举齐备（§D.3：INIT 公式/TERM 公式/残尾语义/断言形式/投影×2/全局监测
-        #   + v2 勘误新增 ISSUE_PHASE_OFFSET/ISSUE_TOTAL_FORMULA）
+        #   + v2 勘误新增 ISSUE_PHASE_OFFSET/ISSUE_TOTAL_FORMULA
+        #   + v3 追加冻结：公式语义×4/漂移政策/分段规则/容量口径/已证范围）
         for name in ("INIT_PAD_FORMULA", "TERM_PHASE_FORMULA", "PROBES_TAIL_SEMANTICS",
                      "ASSERT_FORMS_I_IV", "PROJ_FETCH_UNROLL", "PROJ_ISSUE_UNROLL",
-                     "GLOBAL_MONITOR_RULE", "ISSUE_PHASE_OFFSET", "ISSUE_TOTAL_FORMULA"):
+                     "GLOBAL_MONITOR_RULE", "ISSUE_PHASE_OFFSET", "ISSUE_TOTAL_FORMULA",
+                     "FORMULA_SEMANTICS_ADD", "FORMULA_SEMANTICS_SCALE_SUM",
+                     "FORMULA_SEMANTICS_HORNER_V3U", "FORMULA_SEMANTICS_ADDCMULU",
+                     "PLACEMENT_DRIFT_POLICY", "SEGMENTATION_DECISION_RULE",
+                     "CAPACITY_MEASURED_SCOPE", "PROVEN_SCOPE_V3"):
             rec = reg.get(name)
             self.assertEqual(rec["status"], "frozen")
             self.assertTrue(rec["provenance"], f"{name} 出处不得为空")
@@ -56,6 +61,17 @@ class TestRegistryIntegrity(unittest.TestCase):
         self.assertEqual(len(reg.records_digest), 64)
         # v1 的 PROJ_ISSUE_UNROLL 保留旧文本（勘误不追溯改史）
         self.assertIn("TERM 无 ISSUE", reg.get("PROJ_ISSUE_UNROLL")["value"])
+
+    def test_v2_archive_preserved_untouched(self):
+        """v3 追加冻结同规：v2 文件仍可加载、封印完好、边界文本未被追溯改写。"""
+        reg = pr.ProtocolRegistry(REG_PATH)
+        self.assertEqual(reg.version, 2)
+        self.assertEqual(len(reg.records_digest), 64)
+        # v2 的 INIT_PAD 边界仍为「A1 已证形态：add，II=2」（v3 扩展不追溯改史）
+        self.assertIn("A1 已证形态：add，II=2",
+                      reg.get("INIT_PAD_FORMULA")["proven_boundary"])
+        # v2 无 v3 新增记录（追加冻结只进新文件）
+        self.assertNotIn("PROVEN_SCOPE_V3", reg._records)
 
     def test_tampered_record_breaks_seal_and_reseal_recovers(self):
         with tempfile.TemporaryDirectory() as td:
@@ -177,7 +193,7 @@ class TestEmitEvents(unittest.TestCase):
             self.assertTrue(out.exists(), "重建侧无违例时期望事件必须落盘")
             d = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(d["schema"], "adr056_d4_expected_events_v1")
-            self.assertEqual(d["registry"]["version"], 2)
+            self.assertEqual(d["registry"]["version"], 3)
             self.assertEqual(len(d["registry"]["records_sha256"]), 64)
             self.assertEqual(d["union_queues"], ["fpadd"])
             q = d["queues"]["fpadd"]

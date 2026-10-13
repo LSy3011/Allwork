@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-13 | **注册表 v3 追加冻结 DONE（用户裁定五行表 + 独立论证先行，常数零改动）** | 独立论证 docs/registry_v3_argument_20261013.md 先行（II 独立性=RTL 文本归约：硬件无 II 寄存器、l_init/行数以编码值进入，smi_iq_iic.v:253/:828-838/:1202-1203/:841-862 + emit:159 + stage_partition:88；公式语义=三层签名互等+ordered_ast 机检；两必答项=漂移分层/分段实例相关）；v3 文件 17 条（9 携入：5 边界扩展+2 仅出处+2 逐字；8 新增=公式语义×4+漂移政策+分段规则+容量口径+已证范围），--seal 500c539e…，默认切换 v3（v1/v2 零改动存档+测试锁定）；「不冻结 n=160 唯一形状/mul 单列不入边界/不外推任意同 II 程序」逐字入记录；pytest 578 | verification_v2/tools/protocol_registry_v3.yaml；docs/registry_v3_argument_20261013.md |
 | 2026-10-13 | **覆盖矩阵 II 锚点勘误（用户裁定触发）：add=II=2，mul 单列不入四算子集** | 用户核对四算子表统计对象（「II=1 对应哪个算子、哪次运行必须有锚点」）→ 正面取证：II 普查 add 解出 II=2，三份 add V1 实跑 compiler_schedule.json 全 II=2/unroll——两份步⑤文档 add=II=1 系事实性错误；II=1 唯一 VCS 证据=mul（ADR-054 阶段2-M1，2026-09-12，2048/2048 bit-exact），属前 V1 准入链证据类（且 II=1 flat 保留 ISSUE 实证债务），按裁定单列不混入；四算子 V1 链实证 II 值集={2,3,6} | docs/addcmul_step5_closure_20261013.md §2 表下勘误注（已修正）；docs/horner_v3_step5_closure_20261012.md §6 errata E1 |
 | 2026-10-13 | **addcmul 步⑤：第二复杂案例五步序收口（覆盖矩阵四算子口径）** | 五步序全闭合：零生产代码、零通用规则改动（C-H 通用化跨案例效益首个正面实证）；覆盖矩阵第一档加 addcmulu 行（II=3 双槽单单元、n_max=156 VCS 校准、统一链分段 38–39 实例相关）；第二档新增 5 条（双槽单单元/结合序文本对齐法/含负单符号域/漂移下正确性稳定性/C-H 复用）；第三档新增三不外推（发射逐字节确定性/分段边界实例不变/任意多因子对齐可行）；注册表 v3 两案例素材齐备留裁定 | docs/addcmul_step5_closure_20261013.md |
 | 2026-10-12 | **addcmul 步④：统一 LCS 集成零规则改动通过（C-H 通用化首个正面实证）** | n=8/n=160 统一 LCS 链双双首轮 GREEN+published（公式驱动 C-H 直接消费 x+t1*t2*value，立法序未启动）；程序段时序全录（n8 三段 ack@4107、n160 四段 ack@37870）；附随观察=统一链两进程发射实例 C（17 队列、ur-r2 span=4 束缚→分段 38+2），分段边界为求解实例相关量（38–39 两侧均 VCS 实测），「n=160 唯一分段形态」禁称；全程提交态 74cf64b 干净树 | docs/addcmul_step4_unified_lcs_20261013.md；releases/addcmulu_acu_step4_ulcs_n{8,160}_20261012 |
@@ -1221,6 +1222,45 @@
 - **provenance**：两运行 git_head=74cf64b1 dirty=false（提交态）；
   yaml/TB/注册表三锚与步②③一致。生产代码零改动。
 - 详见 docs/addcmul_step4_unified_lcs_20261013.md。
+
+## 2026-10-13｜注册表 v3 追加冻结（用户裁定五行表 + 独立论证先行）
+
+- **裁定依据**：用户 2026-10-13「注册表 v3：进入追加冻结，范围绑定已验证
+  形态」+ 五行冻结内容表（公式语义/调度漂移/分段决策/容量结论/已证范围）
+  +「冻结决策规则和实例证据，不冻结 n=160 必须切成某一种形状」+「冻结
+  调整后的公式、逐步 fp32 运算顺序及独立参考，不能只写代数等价」。
+- **独立论证先行**（docs/registry_v3_argument_20261013.md）：①II 独立性=
+  RTL 文本归约——smi_iq_iic.v 无 II 寄存器/参数/分支（参数表 :33-35 仅
+  EN_LOOPS/BITS_LOOPS/LOOPS_MSB_BIT）；l_init 以 LOOPS 字段编码值进入
+  硬件（:253 译码、:828-838 计数回放、:1202-1203 退出清零；发射侧
+  emit_expected_fire_sequence.py:159 写入）；II·R_q 以行数形态进入
+  （:841-862 每行一拍；L_q=II·R_q+2，stage_partition.py:88 + manifest
+  自洽机检）；TERM 补拍/ISSUE 偏移为结构常量（:96 output reg、
+  :662/:671/:693）——II 仅进入编码值与行数，扩展非数值外推。
+  ②公式语义=最终文本+有序 AST+逐节点舍入序+独立参考（三层签名互等 +
+  ordered_ast canonical digest 验包机检）——「代数等价」不足为凭
+  （addcmulu ((t1·t2)·value) vs 遗留 ((value·t1)·t2) 逐位可区分）。
+  ③必答项①漂移与公式冻结分层（公式是队列级 f(skip,II,R_q)，放置改变
+  t 集合而非 f；期望逐实例独立生成）。④必答项②分段=发射后处理，
+  边界=f(实际调度, span_q, 容量墙)，39+1/38+2 两实例同合法。
+  探索证据（II=6 六运行、II=3 七运行逐拍仲裁全 GREEN）严格单列、
+  不作论证依据。
+- **v3 文件**（verification_v2/tools/protocol_registry_v3.yaml，v1/v2
+  零改动）：17 条 = 9 携入（INIT_PAD/TERM_PHASE/ISSUE_PHASE_OFFSET/
+  ISSUE_TOTAL/ASSERT_FORMS 五边界扩展至 II∈{2,3,6} 多槽形态；PROJ_FETCH/
+  PROJ_ISSUE 仅出处追加；PROBES_TAIL/GLOBAL_MONITOR 逐字）+ 8 新增
+  （FORMULA_SEMANTICS×4 含各算子求值序与 sha256 锚/PLACEMENT_DRIFT_
+  POLICY/SEGMENTATION_DECISION_RULE/CAPACITY_MEASURED_SCOPE/
+  PROVEN_SCOPE_V3）。--seal → records_sha256=500c539e3ed6ce88…；
+  --check 冒烟通过。
+- **默认切换**：_DEFAULT_PATH → v3（注释链 v1→v2→v3）；
+  emit_expected_fire_sequence.py 两处唯一来源注释同步；历史包复验须
+  显式加载旧版文件（v1→v2 既有模式）。测试：默认版断言 2→3 +
+  枚举 17 条 + 新增 test_v2_archive_preserved_untouched；
+  **pytest 578**（+1，7 skipped，11 xfailed）。
+- **常数零改动**：全部既有记录 value 逐字保留；「不为匹配实测改常数」
+  无施行对象。禁称清单入档（论证 §7）：n=160 唯一形状/任意 II/跨进程
+  逐字节确定性/容量外推/mul 入边界/任意公式文本语义保留/host 闭环/上板。
 
 ## 2026-10-13｜addcmul 步⑤：第二复杂案例五步序收口
 

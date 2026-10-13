@@ -1,0 +1,210 @@
+# ADR-056 §D.3 协议模型注册表 v3（版本化冻结清单）
+#
+# v3 来源（勘误史链，v1/v2 文件零改动保留）：用户 2026-10-13 裁定「注册表 v3：
+#   进入追加冻结，范围绑定已验证形态」，五行冻结内容表（公式语义/调度漂移/
+#   分段决策/容量结论/已证范围）+「冻结决策规则和实例证据，不冻结 n=160 必须
+#   切成某一种形状」+「冻结调整后的公式、逐步 fp32 运算顺序及独立参考，不能只
+#   写代数等价」。冻结前置要件 = 独立论证 docs/registry_v3_argument_20261013.md
+#   （II 独立性 RTL 文本论证、公式语义机器检查、两必答项；探索证据与论证依据
+#   严格分列）。**常数零改动**：全部既有记录 value 逐字保留，仅扩展
+#   proven_boundary/provenance + 新增 8 条语义记录。
+#
+# v2 来源（勘误史链，v1 文件零改动保留）：步④-2 设施自验中仲裁器对 n4 真实探针日志
+#   裁决 RED（16/16 队列 ISSUE 层 uniform +1 拍 + TERM fetch+1 处多 1 拍，FETCH/G4 全绿）。
+#   RTL 行级取证与真实日志互证后判定为**期望模型勘误**（非硬件异常、非按输出调期望）：
+#   提案 verification_v2/artifacts/arbitrate_add_n4_20260929/PROJ_ISSUE_UNROLL_ERRATA_PROPOSAL.md，
+#   用户 2026-09-29 复核批准（四项限定：①「+1」绑定探针采样语义；② TERM 结论限定为该
+#   编码与分支条件且≠算术操作；③ 仲裁逻辑不变、过时文字同步修正、生成器补针对性测试；
+#   ④ 旧封印与 RED 记录保留、新模型单独版本化、复用旧日志须标注「新模型重新仲裁」）。
+#
+# 定位：协议模型常数与断言形式（**非硬件事实**），故不放 hw_config（§D.3 hco notes-1）。
+#   v3 起按用户裁定追加「已验证形态的公式语义/调度漂移/分段决策/容量口径」语义记录。
+# 冻结语义（§D.3 用户修约③）：
+#   * 期望由「调度 + 本注册表协议延迟模型」在**仿真前**生成；禁止从 trace 读常数当期望。
+#   * trace 与冻结值不符 → PER_BEAT_PROTOCOL_MISMATCH，**不得回改常数拟合**；
+#     同样不得改动 schedule 侧输入拟合（对称规则）。
+#   * 新形态上的首个常数值只能走「探索 → 独立论证（RTL 文本/不变量，非被验 trace）→
+#     追加冻结」，不得直接引用已有冻结值外推。
+# 完整性：records_sha256 = 对 records 的 canonical JSON（sort_keys, 紧凑分隔符, utf-8）
+#   的 sha256；任何记录改动不重算本值 → 加载器 RED。重算用 infra/protocol_registry.py --seal。
+registry: protocol_model
+version: 3
+frozen_at: "2026-10-13"
+governing: "ADR-056 v4 §D.3（用户修约③）/ §D.4（hco M4 + 待决项③）；hco notes-1 载体裁决；v2：PROJ_ISSUE_UNROLL 勘误（用户 2026-09-29 批准，限时事项①–④逐条落实）；v3：用户 2026-10-13 裁定五行表追加冻结 + docs/registry_v3_argument_20261013.md 独立论证（常数零改动）"
+records:
+  # ---------- §D.3 冻结对象①：INIT 垫拍公式 ----------
+  - name: INIT_PAD_FORMULA
+    kind: formula
+    value: "skip*II + 1"
+    binds: {skip: "t_min//II（本队列 IQ 局部）", II: "队列发射 II"}
+    result: l_init
+    provenance:
+      - "ADR-055 M7：+1 拍来源（无 HDR 占位拍，多垫 1 拍）"
+      - "A1 实测：INIT fetch c0 与首 BODY fetch c1 满足 c1−c0 = l_init+1 = 4（II=2, skip=1）"
+      - "RTL：smi_iq_iic.v INIT 行回放（§D.4 表 INIT 行 ISSUE 层 l_init+1 拍）"
+      - "v3 II 独立性论证（docs/registry_v3_argument_20261013.md §2）：l_init 以 LOOPS 字段编码值进入硬件（smi_iq_iic.v:253 译码、:828-838 计数回放、:1202-1203 退出清零；emit_expected_fire_sequence.py:159 写入），硬件无 II 寄存器/参数/分支——II 仅进入编码值与行数，公式 II 依赖归约为发射不变量机检"
+      - "v3 探索证据（仅 exercised 记录，非论证依据）：II=6 horner_v3u 六运行 18 队列、II=3 addcmulu 七运行 17–18 队列（含放置实例 A/C 与统一 LCS 分段程序）逐拍仲裁全 GREEN，registry_digest=973861aa…（v2）"
+    proven_boundary: "已证形态（unroll 展开、EN_EMBED=1 默认参数、无反压）：add II=2 单槽(ur-r0)与两槽(ur-r3)队列；horner_v3u II=6 三槽双单元（fpadd[0,2,4]/fpmul[1,3,5]）；addcmulu II=3 双槽单单元（fpmul）及其余单槽队列；「垫拍与槽数无关」为已证结构命题，新队列继承该命题；II=1/flat/压缩形态不在已证边界内（mul II=1 属前 V1 证据类，单列，见 PROVEN_SCOPE_V3）"
+    status: frozen
+  # ---------- §D.3 冻结对象②：TERM 相位公式 ----------
+  - name: TERM_PHASE_FORMULA
+    kind: formula
+    value: "l_init + 1 + II*R_q"
+    binds: {l_init: "INIT_PAD_FORMULA", II: "队列发射 II", R_q: "(t_max//II + N_eff) − skip"}
+    result: term_abs_t
+    provenance:
+      - "ADR-055 (iii)：TERM 落在 l_init+1+II·R_q 拍（A1 三规模探针实证）"
+      - "v3：II·R_q 以行数形态进入硬件（普通行每行一拍，smi_iq_iic.v:841-862；行数不变量 L_q=II·R_q+2，stage_partition.py:88 + manifest 自洽机检）——II 独立性论证同 INIT_PAD_FORMULA（§2 ②③）"
+    proven_boundary: "同 INIT_PAD_FORMULA（II∈{2,3,6} 展开形）"
+    status: frozen
+  # ---------- §D.3 冻结对象②-补：ISSUE 相位偏移（v2 勘误新增） ----------
+  - name: ISSUE_PHASE_OFFSET
+    kind: formula
+    value: "1"
+    binds: {}
+    result: issue_phase_offset
+    provenance:
+      - "结构性寄存器边界：dly_data_valid 为 output reg（smi_iq_iic.v:96），全文件 24 处赋值均在时钟块内非阻塞 <=（:644,657,663,693,806,831,836,842,856,875,879,945,989,1101,1115,1118,1196,1199,1204,1215,1223 等），无组合直通；解码消费 FETCH 字于 cycle t，采样可见为 t+1"
+      - "采样语义（用户限定①）：TB 探针在 always @(posedge clk) 块内以 IQP_ISSUE_HOOK 对 w_dly_data_valid 采样（tb_aiacc_top_v04_f_multi_stage.v 探针块）——边沿对齐挂载到拍计数 iq_probe_cycle 共同基准"
+      - "n4 真实日志 16/16 队列三族全同实测（arbitrate_add_n4_20260929/arbitrate_report.json：逐拍 obs = exp+1）"
+      - "v3：寄存器边界为结构常量、与 II 无关（论证 §2 ④）；II=6/II=3 各运行 ISSUE 层 issue_expected==issue_observed 逐队列成立（探索证据 §6）"
+    proven_boundary: "当前 RTL + TB posedge 采样约定 + 无反压（dly_queen afull 未触发）的 unroll 展开路径（EN_EMBED=1 默认参数）；II∈{2,3,6} 已证（add 16 队列 n4 + horner_v3u 六运行 + addcmulu 七运行）；非任意配置普适律（用户限定④）"
+    status: frozen
+  # ---------- §D.3 冻结对象②-补：ISSUE 总拍数公式（v2 勘误新增） ----------
+  - name: ISSUE_TOTAL_FORMULA
+    kind: formula
+    value: "l_init + 1 + II*R_q + 1"
+    binds: {l_init: "INIT_PAD_FORMULA", II: "队列发射 II", R_q: "(t_max//II + N_eff) − skip"}
+    result: issue_total_beats
+    provenance:
+      - "INIT 回放 l_init+1 拍 + 每展开行 1 拍（II·R_q）+ TERM 1 拍（v2 勘误：旧式无 TERM 项，经 smi_iq_iic.v embed-0 路径 :662→:671→:693 实证后 +1）"
+      - "用户限定③锁式：总 ISSUE 拍数 = l_init+1+II·R_q+1"
+      - "n4 真实日志 16/16 队列逐拍实证（arbitrate_add_n4_20260929）"
+      - "v3：三项各自 II-无感/行数归约（论证 §2 ②③④）；II=6/II=3 逐拍仲裁全 GREEN（探索证据 §6）"
+    proven_boundary: "同 ISSUE_PHASE_OFFSET（II∈{2,3,6} 展开路径）；flat 形 ISSUE 层仍为实证缺口（§D.4 mul flat 无 VCS 探针证据——II=1 形态不得引用本条，列入步④-5 自验清单与 §F.1 门槛）"
+    status: frozen
+  # ---------- §D.3 冻结对象③：残尾取指 __probes 语义 ----------
+  - name: PROBES_TAIL_SEMANTICS
+    kind: semantics
+    value: "TERM/JUMP 行取指之后，TB 探针（__probes）允许出现残尾取指事件；裁决只覆盖至 TERM（含），残尾不计违例；本语义仅限并集内队列（并集外队列任何取指即 RED，见 GLOBAL_MONITOR_RULE）"
+    provenance:
+      - "A1 已证（add 三规模 iq_probe_trace.log 残尾观测，check_iq_probe_trace.py 沿用）"
+    proven_boundary: "仅 TERM/JUMP 之后的尾部；BODY 段任何额外取指仍属违例（断言 (ii) 严格连续 + (e0) 行数 L_q 双重锁死）"
+    status: frozen
+  # ---------- §D.3 冻结对象④：(i)–(iv) 断言形式 ----------
+  - name: ASSERT_FORMS_I_IV
+    kind: assertion
+    value: "(i) c1−c0 == l_init+1（首 BODY 相位）；(ii) BODY 段严格连续 c_{k+1}−c_k == 1；(iii) TERM 相位 c_last−c0 == l_init+1+II·R_q；(iv) 单槽与多 op 队列同法成立（垫拍与槽数无关）"
+    provenance:
+      - "ADR-055 D4(b-2) 验收四点；A1 add 三规模全绿"
+      - "v3：断言形式在 II=6（fpadd/fpmul 三槽）与 II=3（fpmul 双槽单单元）队列逐拍成立（探索证据 §6）；II 独立性论证 §2 ⑤——形式继承 + 常数值经独立论证后本条冻结"
+    proven_boundary: "已证形态 II∈{2,3,6} 展开形（单槽/双槽单单元/三槽双单元）；断言*形式*可继承，常数值在新形态仍须独立论证后冻结"
+    status: frozen
+  # ---------- §D.4 事件投影规则（FETCH 层） ----------
+  - name: PROJ_FETCH_UNROLL
+    kind: projection
+    value: "展开形（level=0, loops=0）队列：INIT 1 次取指 + 有效/气泡行各 1 次（严格连续）+ TERM 1 次；FETCH rel_cycle = abs_t（INIT=0，BODY=l_init+1+k+j*II，TERM=TERM_PHASE_FORMULA）；行数恒等式 L_q = II*R_q + 2"
+    provenance:
+      - "§D.4 逐形态映射表行1/行3（A1 (i)(ii) 实证：1 次/行、严格连续）"
+      - "smi_iq.v:165-166 信号锚 w_rdi_addr_valid / w_rdi_addr"
+      - "v3 探索证据（§6）：II=6 horner_v3u 六运行、II=3 addcmulu 七运行 FETCH 层逐队列 fetch_expected/observed 相符（残尾按 PROBES_TAIL_SEMANTICS 计）"
+    proven_boundary: "unroll 分支（II≥2 展开；v3 已证 II∈{2,3,6}）；flat（II=1）与压缩行（loops≥1）FETCH 投影为不同规则，不在本条"
+    status: frozen
+  # ---------- §D.4 事件投影规则（ISSUE 层，v2 勘误修订） ----------
+  - name: PROJ_ISSUE_UNROLL
+    kind: projection
+    value: "展开形队列 ISSUE 层（信号锚 w_dly_data_valid, smi_iq.v:170）：每 ISSUE 拍 = 对应执行拍 + ISSUE_PHASE_OFFSET(=1)——结构性寄存器边界（dly_data_valid 为 output reg，smi_iq_iic.v:96 + 全文件 24 处时钟块 <=，无组合直通；TB posedge 采样）。INIT 行回放 l_init+1 拍（cycle = rel+1，即 1..l_init+1）；每展开行 1 拍（cycle = rel+1）；TERM 1 拍（见下）；ISSUE 总拍数 = ISSUE_TOTAL_FORMULA。TERM 补拍限定（用户限定②）：仅对该编码成立——VLD=1·JUMP=1·EMBED=0·LOOPS=0 的 TERM 行经 FETCH_DECODE 时钟路径 if(EN_EMBED && ~(&w_embed))（smi_iq_iic.v:662）进入 case(w_embed) 3'd0（:671），dly_data_valid <= 1'b1（:693），在 TERM fetch+1 拍产恰 1 拍；这是 IQ **内部发射事件**，不构成一次有效算术操作或写回。JUMP&&VALID 抑制路径（:805-806 dly<=0）仅在 EN_EMBED=1 前提下 EMBED==7 哨兵行经组合层 :441/:471 分流后进入，与 TERM 无涉"
+    provenance:
+      - "v1 来源：§D.4 逐形态映射表：展开行 1 拍/行；INIT 行 l_init+1 拍（A1 实测 c1−c0=4 的 RTL 级解释）"
+      - "v2 行级取证（2026-09-29）：smi_iq_iic.v:96（output reg）/ :662（embed≠7 进入）/ :671（case 3'd0）/ :693（dly<=1）/ :805-806（仅 EMBED==7 的 JUMP&&VALID 分支，:441/:471 组合守卫）；INIT 字字段解码 = LOOPS[39:30]=11=l_init（smi_iq.v:26-56 头布局 + smi_iq_cru_widths.vh:60）"
+      - "n4 真实日志 16/16 队列（显式×5 + RtoVR gen×8 + bridge×3）ISSUE 逐拍 obs = exp+1，且尾部恰 1 拍 = TERM fetch+1（arbitrate_add_n4_20260929/arbitrate_report.json + PROJ_ISSUE_UNROLL_ERRATA_PROPOSAL.md §3）"
+      - "用户 2026-09-29 复核批准：本条为源码依据的模型纠错，非按实际输出调期望；四项限定逐条落实"
+      - "v3 探索证据（§6）：II=6/II=3 各运行 ISSUE 层 issue_expected==issue_observed 逐队列成立（含 addcmulu 统一链两 COMPUTE 段各 17/17）"
+    proven_boundary: "当前 RTL + TB posedge 采样约定 + 无反压（dly_queen afull 未触发）的 unroll 展开路径；EN_EMBED=1 默认参数。II∈{2,3,6} 已证（v3）；非任意配置普适律。flat 形 ISSUE 层为实证缺口（mul flat 无 VCS 探针证据）——II=1 形态不得引用本条，列入步④-5 自验清单与 §F.1 门槛（独立挂账）"
+    status: frozen
+  # ---------- §D.4 全局活动监测规则 ----------
+  - name: GLOBAL_MONITOR_RULE
+    kind: semantics
+    value: "以 FETCH 层信号常开监测全部 IQ 实例（SMI_IQ_CNT=94 减 stub；stub 位 67、71-91 显式排除并记录）：内部回放不取指，任何队列首拍活动必然先取指 → 并集外队列出现取指脉冲即 RED；复位后公共 cycle 基准（TB iq_probe_cycle）为共同启动锚，跨队列相对相位在该锚下检查，不允许逐队列独立平移后宣布一致"
+    provenance:
+      - "§D.4（hco M4 + 用户裁示④-a）；smi_top.v:21 SMI_IQ_CNT=94；布针三族 u_iq_0..27/92/93、gen_iq[28..66]、gen_iq_bridge[68..70]（tb:2442-2485 现探针属第一族）"
+    proven_boundary: "监测逻辑在步④-2 泛化探针时实例化；自验含对抗用例（人为触发一次并集外 fetch 须被 RED 捕获）"
+    status: frozen
+  # ---------- v3 新增（用户 2026-10-13 裁定五行表·行1）：公式语义冻结 ----------
+  - name: FORMULA_SEMANTICS_ADD
+    kind: semantics
+    value: "最终公式文本：y = x + other（单节点：一次 fp32 加，一次舍入）。有序 AST = Add(x, other)；求值序 = [add]。独立参考 = C-H 公式驱动（manifest 录公式原文 → 有序 AST fp32 重算）；三方对账 HBM 窗 == golden UR == AST 重算"
+    provenance:
+      - "op yaml 唯一源：verification_v2/ops/add.yaml sha256 f78cd42e686d6ac1…（提交态）"
+      - "ordered_ast canonical digest 入 stage_manifest hashes、验包重算比对（check_stage_manifest.py:147-150）——公式/张量名漂移即 RED"
+      - "验收：ADR-056 步⑤（n_max=240）/ ADR-057（n=244/480 两段）/ ADR-061（统一 LCS 16/60/240/244）"
+    proven_boundary: "该 yaml 配置 × 已测规模集合（4/8/60/240 单段；244/480 两段；统一 LCS 16/60/240/244）；不覆盖同名算子的其他文本变体"
+    status: frozen
+  - name: FORMULA_SEMANTICS_SCALE_SUM
+    kind: semantics
+    value: "最终公式文本：y = alpha * (x + other)。求值序：s = x + other（一次 fp32 加，舍入）；y = alpha * s（一次 fp32 乘，舍入）——加先乘后。有序 AST = Mul(alpha, Add(x, other))；求值序 = [add, mul]；alpha = 驻留标量（stride0）。独立参考 = C-H 公式驱动；三方对账同 FORMULA_SEMANTICS_ADD"
+    provenance:
+      - "op yaml 唯一源：verification_v2/ops/scale_sum.yaml sha256 e17f4a24c9a9ef96…（提交态）"
+      - "ordered_ast 机检链同 ADD 条"
+      - "验收：ADR-056 步⑤（n_max=240，rtovr-14 恰 128 行）/ ADR-057（244/480）/ ADR-061（统一 LCS）"
+    proven_boundary: "该 yaml 配置 × 已测规模集合（同 ADD 条列举）；不覆盖同名其他文本变体"
+    status: frozen
+  - name: FORMULA_SEMANTICS_HORNER_V3U
+    kind: semantics
+    value: "最终公式文本：y = ((c0*x + c1)*x + c2)*x + c3。求值序（6 节点严格串行，每节点一次 fp32 舍入）：m1 = c0·x；a1 = m1 + c1；m2 = a1·x；a2 = m2 + c2；m3 = a2·x；y = m3 + c3。有序 AST = Add(Mul(Add(Mul(Add(Mul(c0,x),c1),x),c2),x),c3)；求值序 = [mul,add,mul,add,mul,add]。独立参考 = C-H 公式驱动；三方对账同 FORMULA_SEMANTICS_ADD"
+    provenance:
+      - "op yaml 唯一源：verification_v2/ops/horner_v3u.yaml sha256 05ed73398339ed13…（提交态）"
+      - "有序浮点语义三层机器比对 MATCH（docs/horner_v3_static_confirmation_20261012.md 步①）"
+      - "ordered_ast 机检链同 ADD 条；验收：docs/horner_v3_step5_closure_20261012.md（n=68 顶格/72 两段/统一 LCS 8/72）"
+    proven_boundary: "该 yaml 配置 × 已测规模集合（4/8/60 V1；68 单段；72 两段；统一 LCS 8/72）；不覆盖同名其他文本变体"
+    status: frozen
+  - name: FORMULA_SEMANTICS_ADDCMULU
+    kind: semantics
+    value: "最终公式文本：y = x + t1*t2*value（配置级结合序对齐后文本）。求值序（3 节点，每节点一次 fp32 舍入）：m1 = t1·t2；m2 = m1·value；y = x + m2——结合序 ((t1·t2)·value)，文本序 == 调度折叠序 == 参考求值序（三层签名互等机检）。有序 AST = Add(x, Mul(Mul(t1,t2),value))；求值序 = [mul,mul,add]。⚠ 与遗留 addcmul.yaml 的 ((value·t1)·t2) 序在 fp32 下逐位可区分，两序不得互称「代数等价」——本记录冻结的是该特定求值序，非等价类。独立参考 = C-H 公式驱动；三方对账同 FORMULA_SEMANTICS_ADD"
+    provenance:
+      - "用户 2026-10-13 裁定：「应冻结调整后的公式、逐步 fp32 运算顺序及独立参考，不能只写代数等价」"
+      - "op yaml 唯一源：verification_v2/ops/addcmulu.yaml sha256 a66aa9da10842e58…8239（提交 c0ba5f3）；遗留 addcmul.yaml 冻结登记不修改、不入本边界"
+      - "三层签名互等机检（sympify 同树 ∧ 共享 DFG ∧ 文本序==折叠序，docs/addcmul_static_confirmation_20261012.md 步①）"
+      - "ordered_ast 机检链同 ADD 条；验收：docs/addcmul_step5_closure_20261013.md（156 顶格/160 两段两实例/统一 LCS 8/160）"
+    proven_boundary: "该 yaml 配置 × 已测规模集合（4/8/60 V1；156 单段；160 两段（39+1/38+2 两实例）；统一 LCS 8/160）；不覆盖同名其他文本变体；「任意公式文本语义均被保留」不成立（前端表达与 lowering 间仍有约束，三因子结合序对齐即反例）"
+    status: frozen
+  # ---------- v3 新增（五行表·行2）：调度漂移政策 ----------
+  - name: PLACEMENT_DRIFT_POLICY
+    kind: semantics
+    value: "允许资源放置变化（求解器实例相关；addcmulu 登记实例 A=18 队列全 span≤3 / B=17 队列单进程 / C=17 队列 ur-r2 span=4）。期望与判据由该次实际调度逐实例独立生成：每队列 skip/l_init/R_q 从其 t 集合独立重算（emit_expected_fire_sequence.py:14 明示不读产物常数），协议公式经本注册表求值。正确性判据（逐拍公式/三区比对/写账/C1C2C3/ISSUE 计数）实例不变。一致性陈述限已实测进程集合（近壁例：addcmulu n=156 五进程逐字节一致 sha256 de7f00bc3d1055a9）；「跨进程/跨代码路径逐字节确定性」不得全称宣称。trace 与冻结值不符 → PER_BEAT_PROTOCOL_MISMATCH，不得以漂移为由回改常数"
+    provenance:
+      - "用户 2026-10-13 裁定五行表·行2：「允许资源放置变化；每个实例独立生成期望并验证」"
+      - "独立论证 docs/registry_v3_argument_20261013.md §4（必答项①：漂移与公式冻结分层）"
+      - "实例登记与频率：verification_v2/artifacts/addcmul_static_20261012/VARIANCE.md 2026-10-12 补遗；docs/addcmul_step2_smallscale_20261012.md、docs/addcmul_step4_unified_lcs_20261013.md"
+    proven_boundary: "已登记实例集合（A/B/C）及其已实测进程；未来新实例按本规则逐实例生成期望并验证——规则可继承，实测一致性结论不自动延伸"
+    status: frozen
+  # ---------- v3 新增（五行表·行3）：分段决策规则 ----------
+  - name: SEGMENTATION_DECISION_RULE
+    kind: semantics
+    value: "分段边界由该次实际调度、队列跨度 span_q 与容量墙（128 行/队列/段，smi_top.v:22 IQ 深度）共同决定；分段是发射后处理，每段为独立程序（各有 INIT/BODY/TERM，协议公式段内适用）。合法判据（用户 2026-10-13 裁定三点）：①各段并集覆盖同一逻辑迭代集合；②段间地址接续正确（C3 写集对账）；③各段容量合法。实证两合法实例：n=160 V1 链 39+1（放置实例 A）与统一链 38+2（实例 C，ur-r2 span=4）均全链 GREEN。本条冻结决策规则与实例证据；**不得冻结或宣称「n=160 必须切成某一种形状」**"
+    provenance:
+      - "用户 2026-10-13 裁定：「39+1 与 38+2 都可以正确（关键是覆盖同一逻辑迭代集合、地址接续正确、各段容量合法）。应冻结决策规则和实例证据，不冻结 n=160 必须切成某一种形状」"
+      - "独立论证 docs/registry_v3_argument_20261013.md §5（必答项②）"
+      - "实例证据：docs/addcmul_step3_capacity_20261012.md（39+1）/ docs/addcmul_step4_unified_lcs_20261013.md（38+2）；L_q=3·(m+span_q)+2 两实例逐字节成立"
+    proven_boundary: "已验证实例（addcmulu 39+1/38+2；horner_v3u 72=17+1；scale_sum 244/480）；新规模/新实例按判据重新决策，不继承具体形状"
+    status: frozen
+  # ---------- v3 新增（五行表·行4）：容量结论口径 ----------
+  - name: CAPACITY_MEASURED_SCOPE
+    kind: semantics
+    value: "单段迭代容量为已校准实例的 VCS 实测：add 240 / scale_sum 240（rtovr-14 恰 128 行）/ horner_v3u 68（七队列恰 128 行）/ addcmulu 156（rtovr-14/vin0 恰 128 行，V1 链）；统一链分段边界实例相关（addcmulu 实测 38–39/段）。容量墙 128 行/段 = 硬件常数（smi_top.v:22）。以上数字限已校准实例的结果；更广适用性（其他公式/布局/放置实例）须有额外依据；构造预测（如 152）未校准，禁用于准入"
+    provenance:
+      - "用户 2026-10-13 裁定五行表·行4：「n_max=156 是本次已校准实例的结果；更广适用性须有额外依据」"
+      - "VCS 校准：docs/horner_v3_step3_segmentation_20261012.md、docs/addcmul_step3_capacity_20261012.md、ADR-056 步⑤（240）"
+    proven_boundary: "列举的四算子已校准实例；其余公式/布局/实例须额外依据"
+    status: frozen
+  # ---------- v3 新增（五行表·行5）：已证范围 ----------
+  - name: PROVEN_SCOPE_V3
+    kind: semantics
+    value: "已证范围（v3）：①槽结构 = fpadd 单槽（add/scale_sum）、fpmul 双槽单单元（addcmulu）、fpadd 3 槽 + fpmul 3 槽双单元（horner_v3u）；②II ∈ {2,3,6} unroll 展开形（EN_EMBED=1 默认参数、无反压）；③地址与同步前提 = 单 SMC 列、单 chunk、顺序执行、TB 辅助同步（非 host 自主闭环）；④环境 = RTL 0x00042200 源树 + TB sha256 3324a33b…f7c5 的 posedge 采样约定。不外推：任意同 II 程序、flat（II=1）、压缩行（loops≥1）、多 SMC、ragged tail、归约/矩阵/原地更新、host 闭环、上板。mul（II=1）属前 V1 证据类（ADR-054 阶段2-M1，2026-09-12，compiler_mul/smc_0 COMPARE PASSED 2048/2048 bit-exact），单列不入本边界"
+    provenance:
+      - "用户 2026-10-13 裁定五行表·行5：「具体槽结构、II、地址与同步前提，不外推任意同 II 程序」"
+      - "覆盖矩阵：docs/addcmul_step5_closure_20261013.md §2（四算子口径 + II 锚点勘误注：add=II=2，mul 单列）"
+      - "槽结构实证：horner_v3u 步①（U 系列关闭）/ addcmulu 步①（U9 fpmul 双槽）"
+    proven_boundary: "本记录即 v3 边界本身的总述；各具体记录 proven_boundary 为准"
+    status: frozen
+records_sha256: "500c539e3ed6ce88db27ab6ba60cff85c6141e6443524308057cda43cd7fa8df"

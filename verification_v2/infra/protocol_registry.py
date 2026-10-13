@@ -139,9 +139,11 @@ class ProtocolRegistry:
         return self._eval_node(ast.parse(expr, mode="eval"), int_binds)
 
 
-# v2 = 2026-09-29 PROJ_ISSUE_UNROLL 勘误（用户批准生效版）；v1 文件保留未动，
-# 历史产物（封存期望/RED 报告）仍可经 ProtocolRegistry(v1_path) 显式加载复验。
-_DEFAULT_PATH = _REPO / "verification_v2" / "tools" / "protocol_registry_v2.yaml"
+# v3 = 2026-10-13 追加冻结（用户裁定五行表；独立论证 docs/registry_v3_argument_20261013.md；
+# 常数零改动，仅扩展已证边界 II∈{2,3,6} + 新增 8 条语义记录）；v2 = 2026-09-29
+# PROJ_ISSUE_UNROLL 勘误（用户批准生效版）；v1/v2 文件保留未动，历史产物（封存期望/
+# RED 报告/内嵌旧 digest 的 manifest）仍可经 ProtocolRegistry(旧版path) 显式加载复验。
+_DEFAULT_PATH = _REPO / "verification_v2" / "tools" / "protocol_registry_v3.yaml"
 
 
 def load_default() -> ProtocolRegistry:

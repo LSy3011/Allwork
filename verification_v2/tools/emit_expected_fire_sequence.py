@@ -15,8 +15,9 @@
   INIT 行、**不读** assembler 的 `loops_val`。
 
 契约（ADR-055 D2；§D.3：下列常数公式的**机器唯一来源是注册表**
-`verification_v2/tools/protocol_registry_v2.yaml`（v2，2026-09-29 PROJ_ISSUE_UNROLL
-勘误版；v1 文件保留未动），本文件一律经 `ProtocolRegistry.evaluate(...)` 求值，
+`verification_v2/tools/protocol_registry_v3.yaml`（v3，2026-10-13 追加冻结版；
+v2 = 2026-09-29 PROJ_ISSUE_UNROLL 勘误版；v1/v2 文件保留未动），本文件一律经
+`ProtocolRegistry.evaluate(...)` 求值，
 **禁止在本文件重写公式**——注册表与 trace 不符走 PER_BEAT_PROTOCOL_MISMATCH 诊断，
 不得回改常数拟合）
 ------------------------------------------------------------------------------------------
@@ -135,8 +136,8 @@ def derive_queue_rows(ii: int, ops_of_iq: List[Dict[str, Any]], num_iterations: 
     """独立重建单队列的全部待发射行（顺序 = 发射序）。
 
     §D.3 铁律：INIT 垫拍 / TERM 相位常数**只**经注册表 `evaluate` 求得
-    （唯一来源 `protocol_registry_v2.yaml`）；本函数不得内联公式，亦不得从
-    trace/产物回读常数当期望（读出即比对失效）。
+    （唯一来源 `protocol_registry_v3.yaml`，经 load_default）；本函数不得内联公式，
+    亦不得从 trace/产物回读常数当期望（读出即比对失效）。
     """
     reg = _registry(reg)
     meta = _queue_meta(ii, ops_of_iq, num_iterations, iq_name, reg)
