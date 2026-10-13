@@ -118,3 +118,22 @@ TB sha256 3324a33b…，RTL 0x00042200 源树）
 | 429a054 | 步③分段验证报告 + progress_log |
 | bd2ed7b | 步④ C-H 公式化 + manifest provenance 修复（5 文件）+ ADR-061 §7 errata |
 | （本次） | 步④报告 + progress_log 步④条目 + 步⑤收口（本文档） |
+
+## 6. errata（2026-10-13）
+
+**E1（事实性错误：add 的 II 记值）**：§2 第一档表格 add 行 II 误记为 1；
+同源错误四处——§2-二档第 2 条「II=1/2/6 三值实测」、§2-三档「实测仅
+1/2/6」、§3 表「II | 1 | 2 | 6」、§3 支撑句「覆盖了 II=1/2/6」。
+正面取证（用户核对覆盖矩阵统计对象触发）：II 普查
+（artifacts/census_iq_shapes_20260926_a1/census3_progress.txt）add 解出
+**II=2**；三份 add V1 实跑（20261010_102442_d036c3、
+adr057_closure_add_reg、hv3u_regress_add_frozen_20261012_codex）的
+compiler_schedule.json 全部 II=2、unroll 分支。**II=1 的唯一 VCS 证据
+是 mul**（ADR-054 阶段2-M1，2026-09-12，
+`multi_inst_stage/compiler_mul/smc_0` COMPARE PASSED，2048/2048 行
+bit-exact，独立 python 复核 mismatch=0）——属前 V1 准入链的另一证据类
+（未经准入/分段/统一 LCS machinery；progress_log 既有口径「II=1 flat
+保留 ISSUE 实证债务」），按用户裁定**单列、不混入算子覆盖集合**。
+本矩阵三算子 V1 链实证 II 值集应为 **{2,6}**；四算子口径以
+docs/addcmul_step5_closure_20261013.md §2（已修正并加锚点注）为准。
+原文表行保留不删，以本 errata 为准。
