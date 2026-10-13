@@ -21,6 +21,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-13 | **上板实验包备妥（首个编译器产物上板包；备而不跑，dry-run exit=0）** | 按用户裁定「小规模、明确硬件版本和等待策略、不扩多 SMC/复杂尾块/F6 新 bitstream」：选 scale_sum n=16 统一 LCS（ADR-061 accept2 提交态复跑发布，最保守已证形态）打包——case（meta_v3.json out_bank=2/store_byte_base=20480/out_words=4 + hbm_data 8 路镜像 + 三段 IQ + 仅 smc_0 golden 镜像 VCS 单 SMC 范围）+ evidence 审计锚 + README（版本门 0x00042200/IQP1、等待策略明文=DONE 轮询 10ms/10s 但判据=HBM 64B bit-exact 数据面、停止条件、不扩大清单）；runner dry-run 全程走通 exit=0（软复位→8 路预载 stride 0x10000000→三段加载 stage_1 228 写→回读窗 0x5000→smc_1..7 按设计 SKIP）；tar+sha256 唯一命名封存；**未接触板卡**，板端执行留用户在 zwz 手动进行 | ~/u280_fpga_packages/scale_sum_ulcs_n16_v422_compiler_onboard_prepared_20261013{,.tar.gz,.tar.gz.sha256}（sha256 3cc3191a…） |
 | 2026-10-13 | **注册表 v3 追加冻结 DONE（用户裁定五行表 + 独立论证先行，常数零改动）** | 独立论证 docs/registry_v3_argument_20261013.md 先行（II 独立性=RTL 文本归约：硬件无 II 寄存器、l_init/行数以编码值进入，smi_iq_iic.v:253/:828-838/:1202-1203/:841-862 + emit:159 + stage_partition:88；公式语义=三层签名互等+ordered_ast 机检；两必答项=漂移分层/分段实例相关）；v3 文件 17 条（9 携入：5 边界扩展+2 仅出处+2 逐字；8 新增=公式语义×4+漂移政策+分段规则+容量口径+已证范围），--seal 500c539e…，默认切换 v3（v1/v2 零改动存档+测试锁定）；「不冻结 n=160 唯一形状/mul 单列不入边界/不外推任意同 II 程序」逐字入记录；pytest 578 | verification_v2/tools/protocol_registry_v3.yaml；docs/registry_v3_argument_20261013.md |
 | 2026-10-13 | **覆盖矩阵 II 锚点勘误（用户裁定触发）：add=II=2，mul 单列不入四算子集** | 用户核对四算子表统计对象（「II=1 对应哪个算子、哪次运行必须有锚点」）→ 正面取证：II 普查 add 解出 II=2，三份 add V1 实跑 compiler_schedule.json 全 II=2/unroll——两份步⑤文档 add=II=1 系事实性错误；II=1 唯一 VCS 证据=mul（ADR-054 阶段2-M1，2026-09-12，2048/2048 bit-exact），属前 V1 准入链证据类（且 II=1 flat 保留 ISSUE 实证债务），按裁定单列不混入；四算子 V1 链实证 II 值集={2,3,6} | docs/addcmul_step5_closure_20261013.md §2 表下勘误注（已修正）；docs/horner_v3_step5_closure_20261012.md §6 errata E1 |
 | 2026-10-13 | **addcmul 步⑤：第二复杂案例五步序收口（覆盖矩阵四算子口径）** | 五步序全闭合：零生产代码、零通用规则改动（C-H 通用化跨案例效益首个正面实证）；覆盖矩阵第一档加 addcmulu 行（II=3 双槽单单元、n_max=156 VCS 校准、统一链分段 38–39 实例相关）；第二档新增 5 条（双槽单单元/结合序文本对齐法/含负单符号域/漂移下正确性稳定性/C-H 复用）；第三档新增三不外推（发射逐字节确定性/分段边界实例不变/任意多因子对齐可行）；注册表 v3 两案例素材齐备留裁定 | docs/addcmul_step5_closure_20261013.md |
@@ -1222,6 +1223,36 @@
 - **provenance**：两运行 git_head=74cf64b1 dirty=false（提交态）；
   yaml/TB/注册表三锚与步②③一致。生产代码零改动。
 - 详见 docs/addcmul_step4_unified_lcs_20261013.md。
+
+## 2026-10-13｜上板实验包备妥（备而不跑；首个编译器产物上板包）
+
+- **裁定依据**：2026-10-13 用户令「上板实验包现在值得作为下一项主要交付——先交付小规模、
+  明确硬件版本和等待策略的实验包，取得板端实际输出证据；不立即扩大到多 SMC、
+  复杂尾块或 F6 新 bitstream」。本包交付边界 = 文件齐备 + 本地 dry-run 通过 +
+  等待策略/判据/停止条件明文；**未接触板卡**（standing 约束：不自动连接/烧录，
+  板端执行由用户在 zwz 手动进行）。
+- **用例选择**：scale_sum n=16 统一 LCS（`ulcs_scale_sum_adr061_accept2_n16_n16`）——
+  V1 链最保守已证形态（II=2 单槽、ADR-056/057/061 验收史、accept2 提交态复跑
+  GREEN+published）。provenance 锚：compiler_repo git_head e76592b（dirty=true 按实）、
+  registry v2 973861aa…（run 先于 v3；v3 常数零改动故 v2 期望继续有效）、
+  TB 3324a33b…、manifest 86f48037…、op_yaml e17f4a24…。
+- **包构造**：`case/`（meta_v3.json {num_smc:8, out_bank:2, out_words:4, word_bytes:16,
+  store_byte_base:20480}——全部取自 manifest hbm_layout.y 实测值；hbm_data=8 路
+  memory_init 镜像；smi_iq_inst 三段；golden 仅 smc_0/output_bank/bank2_final.hex，
+  smc_1..7 故意缺席 → runner SKIP 与 VCS 单 SMC 证据范围一致，不预测哨兵窗输出）
+  + `evidence/`（manifest/run_report/compare/reference 审计锚）+ README.md。
+- **等待策略明文**（README §4）：DONE 轮询 10ms/10s 上限每段；**DONE 置位 ≠ 数据落位**
+  （F6 已证 legacy 竞态）→ 判据 = HBM 输出窗 64B 与独立 fp32 参考 bit-exact（数据面）；
+  int_delta≠1 仅 WARN；err 位置位即 FAIL；超时不自动重试不自动复位。
+- **dry-run 实证**：exit=0；软复位→8 路 HBM 预载（stride 0x10000000）→stage_0/1/2
+  依次加载（stage_1 = 16 IQ 文件 228 packer 写）→回读窗地址 0x5000=20480 与
+  meta 一致→smc_1..7 SKIP→收尾。版本门（RTL_VERSION=0x00042200 + IQP1 cap）经源码
+  核实仅在非 dry-run 路径执行，dry-run 不触任何设备节点。
+- **封存**：`~/u280_fpga_packages/scale_sum_ulcs_n16_v422_compiler_onboard_prepared_20261013/`
+  （60 文件）+ `.tar.gz`（sha256 3cc3191a47dacd00…，唯一命名未覆盖历史包）。
+- **不扩大清单**（README §7）：板端若通过 = 该产物此规模此三段形态的实际输出证据；
+  不外推任意规模/多 SMC/其他算子；VCS 侧 sync_model=tb_assisted，host 完成协议闭环
+  仍是 F6 开放问题；不触及 F6 修复 RTL/新 bitstream/尾块扩展。
 
 ## 2026-10-13｜注册表 v3 追加冻结（用户裁定五行表 + 独立论证先行）
 
