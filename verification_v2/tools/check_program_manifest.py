@@ -38,7 +38,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import ldb_review_case_gen as g2  # noqa: E402
 import stb_solo_case_gen as s1    # noqa: E402
 from unified_lcs_case_gen import (  # noqa: E402
-    PROGRAM_MANIFEST_SCHEMA, EXPECT_SCHEMA, LOAD_ROLES, OUTPUT_ROLE,
+    PROGRAM_MANIFEST_SCHEMA, PROGRAM_MANIFEST_SCHEMA_V2, EXPECT_SCHEMA,
+    LOAD_ROLES, OUTPUT_ROLE, SMC_COUNT,
     HBM_REGION_BYTES, HBM_FIRST_BASE, UR_BANKS, UR_BANK_DEPTH, LINE_BYTES,
     chunk_descs, _sha256_file, _read_hex_lines)
 
@@ -64,11 +65,18 @@ class Checker:
             return self._finish()
         man = json.loads(man_p.read_text(encoding="utf-8"))
         exp = json.loads(exp_p.read_text(encoding="utf-8"))
-        if man.get("schema_version") != SCHEMA:
-            self.err(f"schema_version={man.get('schema_version')!r} != {SCHEMA!r}")
+        schema = man.get("schema_version")
+        if schema == SCHEMA:
+            is_v2 = False
+        elif schema == PROGRAM_MANIFEST_SCHEMA_V2:
+            is_v2 = True
+        else:
+            self.err(f"schema_version={schema!r} 未识别（v1/v2 均不符）")
             return self._finish()
         if exp.get("schema") != EXPECT_SCHEMA:
             self.err(f"g3_expect schema={exp.get('schema')!r} != {EXPECT_SCHEMA!r}")
+        if is_v2:
+            return self._run_v2_body(man, exp)
 
         n = man.get("n")
         if not isinstance(n, int) or n % 4 != 0:
@@ -206,8 +214,9 @@ class Checker:
                 if len(_read_hex_lines(p)) != fm.get("lines"):
                     self.err(f"IQ 文件行数不符: {p.name}")
 
-    # ③b 指令再发射逐字节比对
-    def _check_reemit(self, man: dict, stages: list, n_lines: int) -> None:
+    # ③b 指令再发射逐字节比对（v2：en=7 广播；v1：en=0 单 SMC）
+    def _check_reemit(self, man: dict, stages: list, n_lines: int,
+                      en: int = 0) -> None:
         descs = chunk_descs(n_lines)
         lay = man.get("hbm_layout") or []
         h2d = [e for e in lay if e.get("direction") == "h2d"]
@@ -220,11 +229,12 @@ class Checker:
             ldb_all: list[str] = []
             axi_all: list[str] = []
             for e in h2d:
-                ls, xs = g2.build_and_emit(descs, e["bank"], 0, e["byte_base"], 0)
+                ls, xs = g2.build_and_emit(descs, e["bank"], 0, e["byte_base"],
+                                           en)
                 ldb_all += ls
                 axi_all += xs
             stb, stbaxi = s1.build_and_emit(descs, d2h[0]["bank"], 0,
-                                            d2h[0]["byte_base"], 0)
+                                            d2h[0]["byte_base"], en)
         finally:
             os.chdir(cwd)
         s0 = self.case / "smi_iq_inst" / "stage_0"
@@ -360,6 +370,205 @@ class Checker:
         if exp.get("stage_count") != len(stages):
             self.err(f"g3_expect stage_count={exp.get('stage_count')} "
                      f"!= manifest 段数 {len(stages)}")
+
+    # ==================== v2（equal_8smc_v1）主体：M1-M5 ====================
+    def _run_v2_body(self, man: dict, exp: dict) -> int:
+        # M5 规模与分片块
+        part = man.get("partition")
+        if not isinstance(part, dict) or part.get("scheme") != "equal_8smc_v1":
+            self.err("(M5) partition 块缺失或 scheme 非 equal_8smc_v1")
+            return self._finish()
+        n_total, n_per = part.get("n_total"), part.get("n_per")
+        if man.get("n") != n_total:
+            self.err(f"(M5) manifest n={man.get('n')} != partition.n_total="
+                     f"{n_total}")
+        if not isinstance(n_total, int) or n_total % (4 * SMC_COUNT) != 0:
+            self.err(f"(M5) n_total={n_total!r} 非 {4 * SMC_COUNT} 的倍数")
+            return self._finish()
+        if n_per != n_total // SMC_COUNT or part.get("smc_count") != SMC_COUNT:
+            self.err(f"(M5) partition n_per={n_per}/smc_count="
+                     f"{part.get('smc_count')} 与 n_total={n_total} 不一致")
+            return self._finish()
+        n_lines = n_per // 4
+        if man.get("n_lines") != n_lines:
+            self.err(f"(M5) manifest n_lines={man.get('n_lines')} != n_per//4="
+                     f"{n_lines}")
+        # M1 结构面：全段 active_smcs == [0..7]，无旧单值键
+        stages = man.get("stages") or []
+        for st in stages:
+            if st.get("active_smcs") != list(range(SMC_COUNT)):
+                self.err(f"(M1) stage_{st.get('stage_id')} active_smcs="
+                         f"{st.get('active_smcs')} != [0..{SMC_COUNT - 1}]")
+            if "active_smc" in st:
+                self.err(f"(M1) stage_{st.get('stage_id')} 残留旧键 active_smc")
+        self._check_layout(man, n_lines)
+        K = self._check_stage_chain(man, stages, n_lines)
+        if K is None:
+            return self._finish()
+        self._check_iq_files(stages)
+        self._check_reemit(man, stages, n_lines, SMC_COUNT - 1)
+        self._check_m1_enablement(man, stages)
+        self._check_v2_preloads(man, n_lines)
+        self._check_v2_hbm_golden(man, exp, n_lines)
+        self._check_barrier_params(man, exp, stages, n_lines)
+        return self._finish()
+
+    # M1 manifest.active_smcs ↔ 解码指令使能
+    def _check_m1_enablement(self, man: dict, stages: list) -> None:
+        """LOAD/STORE 段：每个队列 body VALID=1 行 smc_id_en 全集 == {7}（8 目
+        标广播）且非空（缺席须正面取证，不许无证据放行）；COMPUTE 段：产物=build
+        字节拷贝已由③哈希锚定，此处只否决反证（可解码 body 行出现 en≠7 即 RED）。"""
+        import decode_case_smc_enablement as dec
+        try:
+            rep = dec.decode_case(str(self.case))
+        except Exception as exc:  # noqa: BLE001——解码失败须响亮入档
+            self.err(f"(M1) case 使能解码异常: {exc}")
+            return
+        n_st = len(rep.get("stages", []))
+        if n_st != len(stages):
+            self.err(f"(M1) 解码段数 {n_st} != manifest 段数 {len(stages)}")
+            return
+        want = SMC_COUNT - 1
+        for i, st in enumerate(rep["stages"]):
+            is_ls = i in (0, n_st - 1)
+            for q in st["queues"]:
+                vals = q.get("smc_id_en_vld1") or []
+                if is_ls:
+                    if not vals:
+                        self.err(f"(M1) {st['stage']}/{q['file']} 无 body VALID "
+                                 f"行——使能无法正面取证")
+                    elif set(vals) != {want}:
+                        self.err(f"(M1) {st['stage']}/{q['file']} body "
+                                 f"smc_id_en={sorted(set(vals))} != {{{want}}}")
+                else:
+                    bad = [v for v in vals if v != want]
+                    if bad:
+                        self.err(f"(M1) COMPUTE {st['stage']}/{q['file']} body"
+                                 f" smc_id_en 出现 {sorted(set(bad))} != "
+                                 f"{want}")
+
+    # ④v2 预载形态（8 通道对称：LOAD bank 哨兵 / 输出 bank 全零）
+    def _check_v2_preloads(self, man: dict, n_lines: int) -> None:
+        lay = man.get("hbm_layout") or []
+        load_banks = {e["bank"] for e in lay if e.get("direction") == "h2d"}
+        out = [e for e in lay if e.get("direction") == "d2h"]
+        out_bank = out[0]["bank"] if out else None
+        for k in range(SMC_COUNT):
+            for b in range(UR_BANKS):
+                p = self.case / f"smc_{k}" / "ur_data" / f"bank{b}.hex"
+                if not p.is_file():
+                    self.err(f"(M2) 缺预载文件: smc_{k}/ur_data/bank{b}.hex")
+                    continue
+                ls = _read_hex_lines(p)
+                if b in load_banks:
+                    want = [g2.sentinel_line(b, i) for i in range(UR_BANK_DEPTH)]
+                    if ls != want:
+                        self.err(f"(M2) smc_{k} bank{b} 预载 != 行索引哨兵"
+                                 f"（LOAD 承重纪律破坏）")
+                elif b == out_bank:
+                    if any(int(x, 16) != 0 for x in ls):
+                        self.err(f"(M2) smc_{k} 输出 bank{b} 预载非全零")
+
+    # M2 输入文件+哈希 / M3 golden 枚举+哈希 / M4 可区分 / ⑤⑥ 逐通道互校
+    def _check_v2_hbm_golden(self, man: dict, exp: dict, n_lines: int) -> None:
+        import hashlib as _hl
+        snap = self.case / "memory_init_snapshot"
+        lay = man.get("hbm_layout") or []
+        d2h = [e for e in lay if e.get("direction") == "d2h"]
+        out_bank = d2h[0]["bank"] if d2h else None
+        rh = man.get("hbm_region_sha256") or {}
+        imgs: dict[int, list[str]] = {}
+        for k in range(SMC_COUNT):
+            p = snap / f"memory_init{k + 1}.hex"
+            if not p.is_file():
+                self.err(f"(M2) 缺镜像文件: memory_init{k + 1}.hex")
+                continue
+            imgs[k] = _read_hex_lines(p)
+        spans = [(e["byte_base"] // LINE_BYTES,
+                  e["byte_base"] // LINE_BYTES + e["lines"]) for e in lay]
+        # M2：逐通道区域哈希 ↔ manifest 锚 + 输出预填 + 窗外 canary + 双锚
+        hp = (exp.get("hbm_preload") or {}).get("files") or {}
+        for k, img in imgs.items():
+            for e in lay:
+                l0 = e["byte_base"] // LINE_BYTES
+                if l0 + e["lines"] > len(img):
+                    self.err(f"(M2) smc_{k} HBM 区 {e['name']} 越出镜像行数")
+                    continue
+                region = img[l0:l0 + e["lines"]]
+                sha = _hl.sha256(("\n".join(region) + "\n").encode()).hexdigest()
+                per = rh.get(e["name"])
+                if not isinstance(per, dict) or per.get(f"smc_{k}") != sha:
+                    self.err(f"(M2) smc_{k} HBM 区 {e['name']} sha256 与 "
+                             f"manifest per-SMC 锚不符")
+                if e["direction"] == "d2h" \
+                        and any(int(x, 16) != 0 for x in region):
+                    self.err(f"(M2) smc_{k} 输出区 {e['name']} 预填非全零")
+            for i, ln in enumerate(img):
+                if any(a <= i < b for a, b in spans):
+                    continue
+                if ln != g2.preload_pattern_line(i):
+                    self.err(f"(M2) memory_init{k + 1} 行 {i} 非 canary 图案"
+                             f"（泄漏检测面破坏）")
+                    break
+            p = snap / f"memory_init{k + 1}.hex"
+            if hp.get(p.name) != _sha256_file(p):
+                self.err(f"(M2) {p.name} 与 g3_expect 冻结哈希不符")
+        # ⑤ 逐通道：LOAD 终态 == 哨兵底 + 本通道 HBM 源窗；输出终态形态
+        for k in range(SMC_COUNT):
+            if k not in imgs:
+                continue
+            for e in lay:
+                b = e["bank"]
+                fin_p = self.case / f"smc_{k}" / "output_bank" \
+                    / f"bank{b}_final.hex"
+                if not fin_p.is_file():
+                    continue  # 缺文件由 M3 记
+                fin = _read_hex_lines(fin_p)
+                l0 = e["byte_base"] // LINE_BYTES
+                if e["direction"] == "h2d":
+                    want = [g2.sentinel_line(b, i) for i in range(UR_BANK_DEPTH)]
+                    want[:e["lines"]] = imgs[k][l0:l0 + e["lines"]]
+                    if fin != want:
+                        self.err(f"(M2) smc_{k} bank{b} 终态 != 哨兵底+本通道"
+                                 f"HBM 源窗（LOAD 送达互校失败）")
+                else:
+                    if any(int(x, 16) == 0 for x in fin[:e["lines"]]):
+                        self.err(f"(M4-sup) smc_{k} 输出 bank{b} 终态窗口存在"
+                                 f"全零行（与零预填不可区分）")
+                    if any(int(x, 16) != 0 for x in fin[e["lines"]:]):
+                        self.err(f"(M4-sup) smc_{k} 输出 bank{b} 终态窗外"
+                                 f"[行{e['lines']}..) 非零")
+        # M3：golden_files 显式枚举 8×8 bank + 逐文件 sha256
+        gf = man.get("golden_files")
+        if not isinstance(gf, list):
+            self.err(f"(M3) golden_files 缺失或非列表: {type(gf).__name__}")
+        else:
+            if len(gf) != SMC_COUNT * UR_BANKS:
+                self.err(f"(M3) golden_files 枚举 {len(gf)} != "
+                         f"{SMC_COUNT}×{UR_BANKS}")
+            for ent in gf:
+                rel = ent.get("file") if isinstance(ent, dict) else None
+                p = self.case / rel if rel else None
+                if p is None or not p.is_file():
+                    self.err(f"(M3) 缺 golden 文件: {rel}——缺/不符即拒收")
+                    continue
+                if _sha256_file(p) != ent.get("sha256"):
+                    self.err(f"(M3) golden 文件哈希不符: {rel}")
+        # M4：8 份 golden 输出窗两两不全等（可区分性硬要求）
+        if out_bank is not None:
+            wins: list[tuple[int, list[str]]] = []
+            for k in range(SMC_COUNT):
+                p = self.case / f"smc_{k}" / "output_bank" \
+                    / f"bank{out_bank}_final.hex"
+                if p.is_file():
+                    wins.append((k, _read_hex_lines(p)[:n_lines]))
+            if len(wins) == SMC_COUNT:
+                for x in range(len(wins)):
+                    for y in range(x + 1, len(wins)):
+                        if wins[x][1] == wins[y][1]:
+                            self.err(f"(M4) smc_{wins[x][0]} 与 smc_{wins[y][0]}"
+                                     f" golden 输出窗全等——可区分性破坏，"
+                                     f"配置无效（拒收）")
 
     def _finish(self) -> int:
         if self.bad:

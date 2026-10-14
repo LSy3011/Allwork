@@ -53,6 +53,9 @@ MAX_BURST_LINES = 16                 # brst<=15 → 单描述符 <=16 行
 BARRIER_TIMEOUT = 5000               # 与门③同款缺省（超时即 RED，不调大消红）
 
 PROGRAM_MANIFEST_SCHEMA = "adr061_program_manifest_v1"
+PROGRAM_MANIFEST_SCHEMA_V2 = "ulcs_program_manifest_v2_8smc"
+PARTITION_SCHEMES = ("equal_8smc",)  # 规格：docs/8smc_equal_partition_spec_20261014.md
+SMC_COUNT = 8                        # PARAM_SMC_NUM（hw_params.yaml）
 EXPECT_SCHEMA = "adr061.unified_expect/v1"
 
 LOAD_ROLES = ("input", "param", "constant")
@@ -188,11 +191,91 @@ def chunk_descs(n_lines: int) -> list[dict]:
 
 
 # ----------------------------------------------------------------------
+# equal_8smc_v1 分片数据面（规格：docs/8smc_equal_partition_spec_20261014.md）
+# ----------------------------------------------------------------------
+def _lanes_of(ln: str) -> list[int]:
+    v = int(ln, 16)
+    return [(v >> (32 * i)) & 0xFFFFFFFF for i in range(4)]
+
+
+def _pack_lanes(lanes) -> str:
+    v = 0
+    for i, w in enumerate(lanes):
+        v |= (int(w) & 0xFFFFFFFF) << (32 * i)
+    return f"{v:032x}"
+
+
+def _derive_slices(load_src_lines: dict, loads: list, n_lines: int) -> dict:
+    """slice 0 = build 数据原样；slice k>=1 = 逐 input 张量确定性仿射派生
+    （fp32 语义：v*(1+0.5k+0.25i) + (±0.125k)，i=LOAD 声明序张量下标，
+    奇张量取负偏置）。param/constant 全通道同源。可区分性由 golden 两两
+    不全等的构造后检查兜底（M4），派生式本身不作可区分性证明。"""
+    import numpy as np
+    channels = {0: {b: list(ls) for b, ls in load_src_lines.items()}}
+    for k in range(1, SMC_COUNT):
+        ch = {}
+        for i, t in enumerate(loads):
+            bank = t["bank"]
+            if t["role"] != "input":
+                ch[bank] = list(load_src_lines[bank])
+                continue
+            vals: list[int] = []
+            for ln in load_src_lines[bank]:
+                vals.extend(_lanes_of(ln))
+            arr = np.asarray(vals, dtype=np.uint32).view(np.float32)
+            a = np.float32(1.0 + 0.5 * k + 0.25 * i)
+            b = np.float32(0.125 * k if i % 2 == 0 else -0.125 * k)
+            out = (arr * a + b).astype(np.float32).view(np.uint32)
+            ch[bank] = [_pack_lanes(out[4 * r:4 * r + 4])
+                        for r in range(n_lines)]
+        channels[k] = ch
+    return channels
+
+
+def _reference_window(formula: str, hbm_layout: list,
+                      channel_region: dict, n_lines: int) -> list[str]:
+    """公式有序 AST fp32 独立参考（与 unified_lcs_compare C-H 同 machinery）：
+    输入按 role 从通道 HBM 区重建（input=全行流；param=stride0 标量驻留，
+    形态正面取证），返回 golden 输出窗 hex 行（n_lines 行）。"""
+    import numpy as np
+    from verification_v2.reference.ordered_ast import parse_ordered_formula
+    from verification_v2.reference import reference_generator as rg
+    load_entries = [e for e in hbm_layout if e["role"] in ("input", "param")]
+    reserved = [e["name"] for e in hbm_layout
+                if e["role"] in ("output", "constant")]
+    root = parse_ordered_formula(formula, [e["name"] for e in load_entries],
+                                 reserved)
+    inputs: dict = {}
+    for e in load_entries:
+        lines = channel_region[e["name"]]
+        vals: list[int] = []
+        for ln in lines:
+            vals.extend(_lanes_of(ln))
+        arr = np.asarray(vals, dtype=np.uint32).view(np.float32)
+        if e["role"] == "input":
+            inputs[e["name"]] = arr
+        else:
+            if any(v != 0 for v in arr[4:]):
+                _die(f"param {e['name']} line1.. 非零——非 stride0 驻留形态")
+            lanes0 = arr[:4].tolist()
+            if len(set(lanes0)) != 1:
+                _die(f"param {e['name']} line0 四 lane 不全等——非标量驻留形态")
+            inputs[e["name"]] = np.asarray([lanes0[0]], dtype=np.float32)
+    ev = rg.evaluate(root, inputs)
+    y = np.asarray(ev.y, dtype=np.float32).reshape(-1)
+    if y.size != 4 * n_lines:
+        _die(f"参考求值元素数 {y.size} != 4*n_lines={4 * n_lines}")
+    y_u = y.view(np.uint32)
+    return [_pack_lanes(y_u[4 * k:4 * k + 4]) for k in range(n_lines)]
+
+
+# ----------------------------------------------------------------------
 # 装配主流程
 # ----------------------------------------------------------------------
 def build_unified_case(build_copy: Path, case_dir: Path, n: int,
                        tb_path: Path, *, op_name: str, formula: str,
-                       generated_at: str | None = None) -> dict:
+                       generated_at: str | None = None,
+                       partition: str | None = None) -> dict:
     build_copy = Path(build_copy)
     case_dir = Path(case_dir)
     if not isinstance(op_name, str) or not op_name:
@@ -201,6 +284,9 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
         _die("formula 缺失——manifest 须自包含记录公式串（C-H 独立参考之源）")
     if case_dir.exists():
         _die(f"case 目录已存在: {case_dir}（拒绝沿用/覆盖旧产物，先人工清理）")
+    is8 = partition is not None
+    if is8 and partition not in PARTITION_SCHEMES:
+        _die(f"partition={partition!r} 未知（已定义: {PARTITION_SCHEMES}），响亮拒绝")
     lay = parse_layout(build_copy, n)
     n_lines, segs = lay["n_lines"], lay["segments"]
     K = len(segs)
@@ -258,16 +344,17 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
                                      for ln in bl[:n_lines]]
 
     # ---- 指令发射（真 LIRPacker，门①/门② VCS 实证形态） ----
+    en = 7 if is8 else 0   # equal_8smc_v1：LOAD/STORE 广播 8 目标（守卫已复核 {0,7}）
     ldb_lines_all: list[str] = []
     ldbaxi_lines_all: list[str] = []
     for t in loads:
         base = next(e["byte_base"] for e in hbm_layout if e["name"] == t["name"])
-        g2.guard("unified-ldb", descs, t["bank"], 0, base, 0)
-        ldb_ls, axi_ls = g2.build_and_emit(descs, t["bank"], 0, base, 0)
+        g2.guard("unified-ldb", descs, t["bank"], 0, base, en)
+        ldb_ls, axi_ls = g2.build_and_emit(descs, t["bank"], 0, base, en)
         ldb_lines_all += ldb_ls
         ldbaxi_lines_all += axi_ls
-    s1.guard("unified-stb", descs, out_bank, 0, out_base, 0)
-    stb_lines, stbaxi_lines = s1.build_and_emit(descs, out_bank, 0, out_base, 0)
+    s1.guard("unified-stb", descs, out_bank, 0, out_base, en)
+    stb_lines, stbaxi_lines = s1.build_and_emit(descs, out_bank, 0, out_base, en)
 
     # ---- 物化 ----
     stage_dirs: list[tuple[int, str, list[tuple[str, list[str] | Path]]]] = []
@@ -294,7 +381,11 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
                           "sha256": _sha256_file(dst)})
         entry: dict = {"stage_id": sid, "kind": kind,
                        "predecessor": (sid - 1) if sid > 0 else None,
-                       "active_smc": 0, "iq_files": fmeta}
+                       "iq_files": fmeta}
+        if is8:
+            entry["active_smcs"] = list(range(SMC_COUNT))
+        else:
+            entry["active_smc"] = 0
         if kind == "LOAD":
             entry["covers"] = [
                 {"tensor": t["name"], "bank": t["bank"], "line0": 0,
@@ -330,63 +421,104 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
                 "adr061.store.tb_barrier(wbarrier+s4)+fixed_wait(实验)"
         manifest_stages.append(entry)
 
-    # UR 预载 / 期望终态
-    for b in range(UR_BANKS):
-        if b in load_banks:
-            pre = [g2.sentinel_line(b, k) for k in range(UR_BANK_DEPTH)]
-            fin = list(pre)
-            fin[:n_lines] = load_src_lines[b]
-        elif b == out_bank:
-            pre = [g2.ZERO_LINE] * UR_BANK_DEPTH
-            fin = norm_fin  # build golden 原样（尾部全零已核验）
-        else:
-            pre = [ln.lower().removeprefix("0x")
-                   for ln in _read_hex_lines(ur_src / f"bank{b}.hex")]
-            fin = [ln.lower().removeprefix("0x")
-                   for ln in _read_hex_lines(ob_src / f"bank{b}_final.hex")]
-        g2.write_hex_lines(str(case_dir / "smc_0" / "ur_data" / f"bank{b}.hex"), pre)
-        g2.write_hex_lines(str(case_dir / "smc_0" / "output_bank"
-                               / f"bank{b}_final.hex"), fin)
-    for i in range(1, 8):
+    # equal_8smc_v1 数据面：切片推导 + 逐通道 golden（v1 恒等：仅 smc_0）
+    if is8:
+        channels = _derive_slices(load_src_lines, loads, n_lines)
+        gold_out: dict[int, list[str]] = {0: list(norm_fin)}
+        for k in range(1, SMC_COUNT):
+            ch_region = {e["name"]: channels[k][e["bank"]]
+                         for e in hbm_layout if e["direction"] == "h2d"}
+            win = _reference_window(formula, hbm_layout, ch_region, n_lines)
+            if any(int(ln, 16) == 0 for ln in win):
+                _die(f"smc_{k} 参考 golden 窗存在全零行——与零预填不可区分，拒绝")
+            gold_out[k] = win + [g2.ZERO_LINE] * (UR_BANK_DEPTH - n_lines)
+        # M4 构造自检：8 份 golden 输出窗两两不全等（可区分性硬要求，
+        # 不满足即配置无效——拒收而非降级；防 8 路复制假绿）
+        for i in range(SMC_COUNT):
+            for j in range(i + 1, SMC_COUNT):
+                if gold_out[i][:n_lines] == gold_out[j][:n_lines]:
+                    _die(f"smc_{i} 与 smc_{j} golden 输出窗全等——8 路复制形态，"
+                         f"跨片错置不可检出，配置无效（M4/C2）")
+    else:
+        channels = {0: load_src_lines}
+        gold_out = {0: list(norm_fin)}
+
+    # UR 预载 / 期望终态（equal_8smc_v1：8 通道对称同构——同 bank 同窗形、
+    # 内容=本通道切片；单 SMC 模式保持 smc_0 承载 + smc_1..7 哨兵′ 既有形态）
+    smc_range = range(SMC_COUNT) if is8 else range(1)
+    for k in smc_range:
         for b in range(UR_BANKS):
-            g2.write_hex_lines(
-                str(case_dir / f"smc_{i}" / "ur_data" / f"bank{b}.hex"),
-                [g2.sentinel_aux_line(i, b, k) for k in range(UR_BANK_DEPTH)])
+            if b in load_banks:
+                pre = [g2.sentinel_line(b, kk) for kk in range(UR_BANK_DEPTH)]
+                fin = list(pre)
+                fin[:n_lines] = channels[k][b]
+            elif b == out_bank:
+                pre = [g2.ZERO_LINE] * UR_BANK_DEPTH
+                fin = gold_out[k]  # smc_0 = build golden；k>=1 = 独立参考窗
+            else:
+                pre = [ln.lower().removeprefix("0x")
+                       for ln in _read_hex_lines(ur_src / f"bank{b}.hex")]
+                fin = [ln.lower().removeprefix("0x")
+                       for ln in _read_hex_lines(ob_src / f"bank{b}_final.hex")]
+            g2.write_hex_lines(str(case_dir / f"smc_{k}" / "ur_data"
+                                   / f"bank{b}.hex"), pre)
+            g2.write_hex_lines(str(case_dir / f"smc_{k}" / "output_bank"
+                                   / f"bank{b}_final.hex"), fin)
+    if not is8:
+        for i in range(1, 8):
+            for b in range(UR_BANKS):
+                g2.write_hex_lines(
+                    str(case_dir / f"smc_{i}" / "ur_data" / f"bank{b}.hex"),
+                    [g2.sentinel_aux_line(i, b, k) for k in range(UR_BANK_DEPTH)])
 
     # HBM 镜像：窗口外 canary（g2.preload_pattern_line），输入窗=源数据，
     # 输出窗=全零。总长 = 输出区末 + 256 行 canary 尾。
+    # equal_8smc_v1：8 通道同偏移不同内容（输入窗=本通道切片，
+    # param/constant 全通道同源）；单 SMC 模式保持 init1 真数据 +
+    # init2..8 泄漏标记的既有形态。
     out_line0 = out_base // LINE_BYTES
     total_hbm_lines = out_line0 + (n_lines) + 256
-    region_of_line: dict[int, list[str]] = {}
-    for e in hbm_layout:
-        l0 = e["byte_base"] // LINE_BYTES
-        if e["direction"] == "h2d":
-            region_of_line[e["name"]] = load_src_lines[e["bank"]]
-    init1: list[str] = []
-    for k in range(total_hbm_lines):
-        byte0 = k * LINE_BYTES
-        hit = next((e for e in hbm_layout
-                    if e["byte_base"] <= byte0
-                    < e["byte_base"] + e["bytes"]), None)
-        if hit is None:
-            init1.append(g2.preload_pattern_line(k))
-        elif hit["direction"] == "h2d":
-            init1.append(load_src_lines[hit["bank"]][k - hit["byte_base"] // LINE_BYTES])
-        else:
-            init1.append(g2.ZERO_LINE)
+    init_imgs: dict[int, list[str]] = {}
+    for k in (range(SMC_COUNT) if is8 else range(1)):
+        img: list[str] = []
+        for kk in range(total_hbm_lines):
+            byte0 = kk * LINE_BYTES
+            hit = next((e for e in hbm_layout
+                        if e["byte_base"] <= byte0
+                        < e["byte_base"] + e["bytes"]), None)
+            if hit is None:
+                img.append(g2.preload_pattern_line(kk))
+            elif hit["direction"] == "h2d":
+                img.append(channels[k][hit["bank"]]
+                           [kk - hit["byte_base"] // LINE_BYTES])
+            else:
+                img.append(g2.ZERO_LINE)
+        init_imgs[k] = img
     snap = case_dir / "memory_init_snapshot"
     snap.mkdir(parents=True, exist_ok=False)
-    g2.write_hex_lines(str(snap / "memory_init1.hex"), init1)
-    for i in range(2, 9):
-        g2.write_hex_lines(str(snap / f"memory_init{i}.hex"),
-                           [g2.mark_pattern_line(k) for k in range(g2.HBM_MARK_LINES)])
+    for k, img in init_imgs.items():
+        g2.write_hex_lines(str(snap / f"memory_init{k + 1}.hex"), img)
+    if not is8:
+        for i in range(2, 9):
+            g2.write_hex_lines(str(snap / f"memory_init{i}.hex"),
+                               [g2.mark_pattern_line(k)
+                                for k in range(g2.HBM_MARK_LINES)])
 
     # 区域源哈希（manifest 锚定，检查器复核篡改）
+    # v2：每 tensor per-SMC 8 值（{tensor: {smc_k: sha}}）——通道同偏移不同
+    # 内容，输入张量哈希必须可区分（M2，与 C2 互证）；v1 保持单值。
     region_hashes = {}
     for e in hbm_layout:
         l0 = e["byte_base"] // LINE_BYTES
-        region_hashes[e["name"]] = _sha256_bytes(
-            ("\n".join(init1[l0:l0 + e["lines"]]) + "\n").encode())
+        if is8:
+            region_hashes[e["name"]] = {
+                f"smc_{k}": _sha256_bytes(
+                    ("\n".join(init_imgs[k][l0:l0 + e["lines"]]) + "\n")
+                    .encode())
+                for k in range(SMC_COUNT)}
+        else:
+            region_hashes[e["name"]] = _sha256_bytes(
+                ("\n".join(init_imgs[0][l0:l0 + e["lines"]]) + "\n").encode())
 
     hbm_preload_files = {
         f"memory_init{i}.hex": _sha256_file(snap / f"memory_init{i}.hex")
@@ -421,7 +553,12 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
             "STORE 完成判据 = HBM 模型 RAM 写口落实 + B 响应计数（S4BARRIER）；"
             "STB/STBAXI 信用结构性先于 HBM 写落实（ADR-060 §6.2），只记录不门控",
             "COMPUTE 段产物 = 公式编译器链字节原样拷贝（manifest 逐文件 sha256 锚定）",
-        ],
+        ] + ([
+            "equal_8smc_v1：信用链计数含 8 SMC 聚合（crd 链 daisy-chain 过"
+            "全部 SMC），exp 计数保持单 SMC 指令数（>= 语义），观测值入日志"
+            "不门控；WBARRIER/S4 仅 smc_0 通道——smc_1..7 落位未被屏障监测，"
+            "正式验收须全目标监测（spec §3 C3），本轮为探索档",
+        ] if is8 else []),
     }
     (case_dir / "g3_expect.json").write_text(
         json.dumps(expect, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -429,9 +566,10 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
     stage_man = build_copy / "stage_manifest.json"
     tb_sha = _sha256_file(tb_path) if Path(tb_path).is_file() else None
     manifest = {
-        "schema_version": PROGRAM_MANIFEST_SCHEMA,
+        "schema_version": (PROGRAM_MANIFEST_SCHEMA_V2 if is8
+                           else PROGRAM_MANIFEST_SCHEMA),
         "op": op_name, "formula": formula,
-        "n": n, "lanes": 4, "n_lines": n_lines,
+        "n": (SMC_COUNT * n if is8 else n), "lanes": 4, "n_lines": n_lines,
         "generated_at": expect["generated_at"],
         "hashes": {
             "sim_config_json": _sha256_file(lay["sim_cfg_path"]),
@@ -463,6 +601,35 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
             "不单独致 RED）",
         ],
     }
+    if is8:
+        manifest["partition"] = {
+            "scheme": "equal_8smc_v1",
+            "n_total": SMC_COUNT * n, "n_per": n, "smc_count": SMC_COUNT,
+            "input_derivation": (
+                "slice0=build 预载原样；slice k>=1 = 逐 input 张量确定性仿射"
+                "派生（fp32：v*(1+0.5k+0.25i) + (±0.125k)，i=张量声明序，奇"
+                "张量取负偏置）；param/constant 全通道同源；golden smc_1..7 ="
+                " 公式有序 AST fp32 独立参考逐通道生成"),
+        }
+        manifest["golden_files"] = [
+            {"file": f"smc_{k}/output_bank/bank{b}_final.hex",
+             "sha256": _sha256_file(case_dir / f"smc_{k}" / "output_bank"
+                                    / f"bank{b}_final.hex")}
+            for k in range(SMC_COUNT) for b in range(UR_BANKS)]
+        manifest["sentinel"]["hbm_mark_2_8"] = \
+            "无 smc_1..7 数据哨兵（equal_8smc_v1 全通道真数据）"
+        manifest["limitations"] = [
+            "LOAD/STORE 生成仅覆盖 D1 布局形态（addr=0、整行、bank×4096）",
+            "equal_8smc_v1 探索档：TB 完成监测仍 SMC0 中心（WBARRIER/S4 仅 "
+            "smc_0 通道；信用链聚合计数仅记录不门控）——正式验收须全目标监测"
+            "（docs/8smc_equal_partition_spec_20261014.md §3 C3，路径 A TB 改"
+            "动未授权）",
+            "smc_1..7 golden = 公式独立参考直接生成（与 C-H 同 machinery）， "
+            "smc_0 保持 build golden 三方互校",
+            "输入切片 1..7 为确定性仿射派生，非独立第二来源（ADR-056 既有口"
+            "径延伸）；slice0 与编译器 python sim 预载同源",
+            "完成时序信任 TB 辅助屏障，非硬件完成契约（F6 线既知边界）",
+        ]
     (case_dir / "program_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return manifest
@@ -482,9 +649,13 @@ def main() -> int:
                     help="算子名（manifest 如实记录，禁硬编码）")
     ap.add_argument("--formula", required=True,
                     help="公式串（manifest 自包含记录，C-H 独立参考之源）")
+    ap.add_argument("--partition", default=None, choices=list(PARTITION_SCHEMES),
+                    help="分片方案（缺省=单 SMC；equal_8smc=八目标等长分片，"
+                         "此时 --n 语义=每 SMC 元素数 n_per）")
     a = ap.parse_args()
     man = build_unified_case(a.build_copy, a.case_dir, a.n, a.tb,
-                             op_name=a.op_name, formula=a.formula)
+                             op_name=a.op_name, formula=a.formula,
+                             partition=a.partition)
     print(f"[ULCS-GEN] case = {a.case_dir}")
     print(f"[ULCS-GEN] stages = "
           + " → ".join(f"{s['kind']}(stage_{s['stage_id']})"

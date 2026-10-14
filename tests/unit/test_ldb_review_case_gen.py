@@ -60,9 +60,12 @@ class TestGuards:
         with pytest.raises(SystemExit, match="16B 对齐"):
             _guard(descs=[{"lines": 16, "brst": 15}], gr_base=0x1008)
 
-    def test_smc_id_en_nonzero_rejected(self):
-        with pytest.raises(SystemExit, match="smc_id_en=0"):
-            _guard(descs=[{"lines": 16, "brst": 15}], en=7)
+    def test_smc_id_en_partial_rejected(self):
+        # 2026-10-14 规则变更（立法序，tests/unit/test_8smc_equal_partition.py
+        # TestGuards）：{0,7} 已复核放行；部分使能/越界仍响拒
+        _guard(descs=[{"lines": 16, "brst": 15}], en=7)   # equal_8smc_v1 广播，放行
+        with pytest.raises(SystemExit, match="未复核形态"):
+            _guard(descs=[{"lines": 16, "brst": 15}], en=3)
 
     def test_ur_overflow_rejected(self):
         with pytest.raises(SystemExit, match="UR 写越界"):

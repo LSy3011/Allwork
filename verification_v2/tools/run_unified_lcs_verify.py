@@ -66,7 +66,8 @@ class UnifiedOrchestrator(Orchestrator):
             manifest = build_unified_case(
                 sctx.build_copy, case, sctx.n, tb,
                 op_name=Path(self.cfg.op_yaml).stem,
-                formula=op.formula_str)
+                formula=op.formula_str,
+                partition=self.cfg.partition)
         except SystemExit as e:
             raise StageFailure(["TYPE_LAYOUT_UNSUPPORTED"],
                                f"统一 case 装配响亮拒绝: {e}") from e

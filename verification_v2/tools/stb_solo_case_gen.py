@@ -96,8 +96,10 @@ def guard(name: str, descs: list[dict], ur_bank: int, ur_offset: int, gr_base: i
     if gr_base % LINE_BYTES != 0 or gr_base <= 0:
         raise SystemExit(f"[STB-GEN-GUARD] gr_base={gr_base:#x} 必须为正且 16B 对齐"
                          f"（0 会削弱地址正确性证据）")
-    if smc_id_en != 0:
-        raise SystemExit(f"[STB-GEN-GUARD] M3-lite 单 SMC 独验要求 smc_id_en=0，收到 {smc_id_en}")
+    if smc_id_en not in (0, 7):
+        raise SystemExit(f"[STB-GEN-GUARD] smc_id_en={smc_id_en} 未复核形态："
+                         f"仅 0（M3-lite 单 SMC）或 7（equal_8smc_v1 八目标广播）"
+                         f"已复核，部分使能 1..6/越界 8..31 响拒")
     total = 0
     for i, d in enumerate(descs):
         lines, brst, loops = d.get("lines"), d.get("brst"), d.get("loops", 0)

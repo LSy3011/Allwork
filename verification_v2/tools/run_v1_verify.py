@@ -108,7 +108,7 @@ REPORT_SCHEMA = "adr056_f3_run_report_v1"
 CONFIG_KEYS = frozenset([
     "op_yaml", "n_rows", "domain_mode", "hw_config", "suite", "sandbox",
     "vcs_timeout_s", "case_prefix", "run_vcs", "runs_root", "releases_root",
-    "run_id",
+    "run_id", "partition",
 ])
 DOMAIN_MODES = ("v1_admission", "frozen_regression")
 # frozen_regression 下允许放行（记录为设计内证据）的静态保守拒类别
@@ -185,6 +185,13 @@ class RunConfig:
             raise ConfigInvalid(f"vcs_timeout_s 须为正: {self.vcs_timeout_s}")
         self.case_prefix = str(raw.get("case_prefix", "compiler"))
         self.run_vcs = bool(raw.get("run_vcs", True))
+        self.partition = raw.get("partition", None)
+        if self.partition is not None:
+            if self.partition not in ("equal_8smc",):
+                raise ConfigInvalid(
+                    f"partition={self.partition!r} 未知（仅统一 LCS Orchestrator"
+                    f" 支持 equal_8smc；缺省=单 SMC）")
+            # partition 语义下 n_rows 元素 = 每 SMC 分片元素数 n_per
         self.runs_root = Path(str(raw.get("runs_root", REPO_ROOT / "build" / "v1_runs"))).resolve()
         self.releases_root = Path(str(
             raw.get("releases_root", REPO_ROOT / "verification_v2" / "artifacts" / "releases"))).resolve()
@@ -1128,6 +1135,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ConfigInvalid as e:
         # 预检失败同样落机器可读材料：无 run 目录可落（run_id/目录未定）→ stderr + exit 2
         print(f"[CONFIG_INVALID] {e}", file=sys.stderr)
+        return 2
+    if getattr(cfg, "partition", None) is not None:
+        print(f"[CONFIG_INVALID] V1 入口不支持 partition={cfg.partition!r}"
+              f"——分片仅统一 LCS 入口 run_unified_lcs_verify.py 支持",
+              file=sys.stderr)
         return 2
     orch = Orchestrator(cfg)
     try:
