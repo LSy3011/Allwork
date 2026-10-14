@@ -25,6 +25,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-14 | **新类型限时能力预检 DONE + 阶段三性能取数前置 DONE（软件侧两项，无板无新 VCS；57b29f0/a52b94c）** | ①归约/matmul/softmax 逐层判定（表达/lowering/调度/存储规划，路线图明文项）：归约=四层均缺但每层有最小先例（中等重构、中期后入口候选）；matmul=缺表达+配置链 lowering（硬件机制 ADR-025 已知、手写线模型 A 资产+VCS 债务）；softmax=大幅重构（modules.yaml 19 单元正面枚举无 EXP/DIV/MAX、缺×4 表达+双趟数据流）——三者均排中期冻结后，预检不授权实现；②阶段三性能取数前置：八组统一 LCS 发布运行+add V1 链五运行的 II/段数/指令行数（manifest 加总）/段拍（arbitrate markers，TB 拍非板端时序）/墙钟（compile_admit 1-2s、vcs 5-7s、全链 ≤16s，1s 量化）全部固定入表，观察仅事实性，分析与公平手写对照选择留阶段三 | docs/precheck_reduce_matmul_softmax_20261014.md；docs/perf_data_collection_20261014.md |
 | 2026-10-14 | **阶段一上板包×2 备妥（备而不跑）：horner n8 复杂结构 + scale_sum n244 跨段（dry-run 均 exit=0）** | 按 2026-10-14 路线图阶段一「优先小规模 horner，再选一个超容量分段案例，分别验证复杂计算结构和跨段执行」：①horner_v3u n=8 统一 LCS 三段（发布 run hv3u_step4fix_n8_committed_20261012，GREEN+published、git_head bd2ed7b 干净树）——II=6 三槽双单元复杂计算结构；②scale_sum n=244 统一 LCS 四段（发布 run adr061_accept2_n244，GREEN+published）——相对板端首例 n16 唯一变量=分段（两段 COMPUTE [0,60)+[60,61)，段间不复位、UR 跨段保持为正确性前提）；两包直接沿用 n16 r3 板证约定（runner d8e6be6d…+run_one_case.sh+PACKAGE_INFO+SHA256SUMS 67/96 项），版本门 0x00042200/IQP1、等待策略明文=DONE 轮询 10ms/10s 判据=HBM bit-exact 数据面（不继承 F6 仿真结论）、公式文本按 yaml 规范原文（horner `((c0*x+c1)*x+c2)*x+c3` / scale_sum `alpha*(x+other)`，不重演 r1–r3 笔误）；dry-run 全程走通 exit=0（horner：8 路预载→三段，stage_1 18 队列 598 packer 写→回读 0x7000；n244：四段，stage_1 2580 写/stage_2 102 写→回读 0x5000；smc_1..7 均按设计 SKIP）；**未接触板卡**，板端执行留用户在 zwz 手动进行 | ~/u280_fpga_packages/horner_v3u_ulcs_n8_v422_compiler_onboard_prepared_20261014{,.tar.gz（sha256 a904d74d…）}；~/u280_fpga_packages/scale_sum_ulcs_n244_v422_compiler_onboard_prepared_20261014{,.tar.gz（sha256 ab8cac92…）} |
 | 2026-10-13 | **论文实验表整理 DONE（统一对比表底稿）+ 公式文本勘误（纯文档）** | docs/thesis_experiment_table_20261013.md：四算子统一对比主表（公式求值序/II 锚/槽结构/输入流/单段 n_max 校准锚/分段实例/统一 LCS 链/VCS/板端九列）+ mul 单列（前 V1 证据类）+ 分段实例详表（同 n=160 两合法形态 39+1/38+2 钉死句）+ 板端首例节 + 可宣称/不外推口径 + 锚点清单；编制中正面取证两处：add 容量 240 系准入层既有值非 VCS 顶格校准（5 运行枚举全 4/8/60）→ 表内标【未校准】；**公式勘误=scale_sum 规范文本 alpha*(x+other)（yaml:8），r1–r3 包 README/PACKAGE_INFO 误写 alpha*x+other**（纯文档错误、执行链与 golden 未受影响，r3 包为运行证据不覆盖改写，勘误登记于板端归档 README 并重封 SHA256SUMS）；addcmul 步⑤ §2 上板条目加当日更新注 | docs/thesis_experiment_table_20261013.md；artifacts/onboard_scale_sum_n16_20261013/（README errata 版 2d418077…） |
 | 2026-10-13 | **编译器产物首个板端实际输出证据：scale_sum n16 统一 LCS 上板 CASE PASS（上板档第 1 例）** | r3 包 zwz 实跑（`sudo ./run_one_case.sh`，板证 runner d8e6be6d…）：版本门 0x00042200+IQP1 过、软复位 PASS、8 路 HBM 预载、三段 DONE（intid delta 全 1 无 WARN）、HBM 输出窗 64B 回读与 golden bit-exact（golden 锚=VCS 侧独立 fp32 参考）→ `smc_0 PASS` → `CASE PASS compared_smc=1`；判据=数据面非 DONE 时序（F6 措辞裁定：host ms 遮蔽解释流程顺畅、不构成竞态无害证明）；不扩大=本产物本形态单 SMC、host 完成协议闭环仍 F6 开放 | artifacts/onboard_scale_sum_n16_20261013/（board_log.txt 实录+README+SHA256SUMS）；包 ~/u280_fpga_packages/…_r3.tar.gz（22bfad6a…） |
@@ -1407,3 +1408,24 @@
   sha256 a904d74d44689833bbb0d012fae249c9040c1eaf53329fb87bf3f9af9090801f}；
   ~/u280_fpga_packages/scale_sum_ulcs_n244_v422_compiler_onboard_prepared_20261014{,.tar.gz
   sha256 ab8cac920179f0030827b536a501636236e24318492f25b13dd996d7bb06c875}。
+
+## 2026-10-14｜软件侧两项：新类型能力预检 + 阶段三性能取数前置
+
+- **背景**：用户当日指令——板端两包之后有时间再跑，先做可软件完成的内容。
+  选取两项均为路线图明文/前置项，全程无板、无新 VCS。
+- **①新类型限时能力预检**（docs/precheck_reduce_matmul_softmax_20261014.md，
+  路线图原文「现在可以做一次限时能力预检」）：以 ADR-056 §A（公式层=逐元素
+  流式 map、{+,*}、{FPMUL,FPADD}、矩阵/归约非目标）为判读基准，逐层判定——
+  归约：表达/lowering/调度/存储四层均缺，但每层有可指认先例（手写 matmul
+  cumulative 自环、UR 跨段保持机制），中等重构、中期后入口候选；matmul：
+  缺表达+配置链 lowering，硬件机制 ADR-025 已知（广播+addtree），手写线
+  模型 A 8/8 资产+VCS/时序债务未清；softmax：缺×4（exp/max/sum/div）+
+  无 EXP/DIV/MAX 硬件单元（modules.yaml 19 单元正面枚举；LOGIC 有 SELECT_*
+  但 §A.2-2 排除）+双趟数据流=大幅重构。三者均排中期冻结后；预检不授权
+  任何实现，届时规则变更须走立法序。
+- **②阶段三性能取数前置**（docs/perf_data_collection_20261014.md）：八组
+  统一 LCS 发布运行（scale_sum n16/60/240/244、horner n8/72、addcmulu
+  n8/160）+ add V1 链五运行，II/段数/各段指令行数/各段 TB 拍/三段墙钟
+  逐字段提取入表；口径钉死（段拍=VCS TB 拍非板端时序；墙钟 1s 量化）；
+  观察仅事实性不外推；公平手写对照选择与归一化分析留阶段三。
+- 两 commit：57b29f0（预检）、a52b94c（取数）；develop 不推送。
