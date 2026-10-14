@@ -5,8 +5,14 @@
 > 安排到中期之后；不能把'新增一个算子'当成几天内必然完成的小任务。」
 > 性质：**限时静态预检**（读码 + 已冻结文档分析；本预检未新跑 VCS、未触板）。
 > 口径分级：【源码】= 读代码/配置原文；【归档】= 已冻结 ADR/收口文档；【推断】标出。
-> 「缺」的判定基准 = 配置链当前能力边界（ADR-056 §A + 四算子实证形态）；缺席断言均
-> 附正面枚举锚（搜索目标本身存在且已列出），不凭空断言。
+> **「缺」的判定基准 = 当前通用公式入口（配置链：yaml 公式 → MIR → SMT → LIR → hex）
+> 缺少这项能力**；项目内已有的专用路径、手写线或 simulator 资产在相应小节单列，
+> 「缺」不表示项目完全没有相关实现。缺席断言均附正面枚举锚（搜索目标本身存在且
+> 已列出），不凭空断言。
+>
+> **「无专用硬件单元」≠ 不可实现。** 对 EXP/DIV/MAX 等无专用单元的运算，可能存在
+> 组合实现、近似算法或软件分解路线，但它们各自需要独立的精度、代价与正确性定义。
+> 本预检只陈述这些路线的成本与前提，不仅凭单元枚举判定某运算不可实现。
 
 ## 1. 判读基准：当前链的固有形态 = 逐元素流式 map
 
@@ -60,7 +66,7 @@ ADR-056 §A.1（【归档】原文）：用户公式层 = 「逐元素 fp32 表�
 | 层 | 判定 | 依据 |
 |---|---|---|
 | 表达 | **缺 ×4** | exp（函数）、max（归约）、sum（归约）、div（除法）四个**独立** §A.2-1 违规；且需双趟数据流（先 max/sum 后 normalize），超单趟流式【归档+推断】 |
-| lowering | **缺** | 硬件单元正面枚举（【源码】modules.yaml 全 19 单元）：FPADD/FPMUL/FP16MUL/LOGIC/RTOVR/VIN0/VIN1/VOUT0/STB/LDB/INTADD/FPTOINT/INTTOFP/INTTOINT/FPTOFP/FP32ADDTREE5TO1/FP32ADDTREE8TO1/SHIFTUP/SHIFTDN——**无 EXP/DIV/MAX 单元**。LOGIC 有 SELECT_GT/EQ/LS/GE/LE/NE 比较选择（modules.yaml:103-113）但 §A.2-2 把 LOGIC 整体排除在 V1 基础操作集外。exp 可多项式逼近落入 {+,*} 但需值域规约（依赖比较选择）与精度论证；div 可 Newton-Raphson 凑 {+,*} 但需迭代【推断】 |
+| lowering | **缺** | 硬件单元正面枚举（【源码】modules.yaml 全 19 单元）：FPADD/FPMUL/FP16MUL/LOGIC/RTOVR/VIN0/VIN1/VOUT0/STB/LDB/INTADD/FPTOINT/INTTOFP/INTTOINT/FPTOFP/FP32ADDTREE5TO1/FP32ADDTREE8TO1/SHIFTUP/SHIFTDN——**无 EXP/DIV/MAX 专用单元**。无专用单元不等于不可实现（见文首约定）：exp 可多项式逼近落入 {+,*}，但需值域规约（依赖比较选择）与独立的精度/代价/正确性定义；div 可 Newton-Raphson 凑 {+,*}，但需迭代收敛论证；max 可走 LOGIC 比较选择（SELECT_GT/EQ/LS/GE/LE/NE，modules.yaml:103-113）但 §A.2-2 当前把 LOGIC 整体排除在 V1 基础操作集外【推断】 |
 | 调度 | **缺** | 双趟 + 迭代逼近，无任何先例【推断】 |
 | 存储规划 | **缺** | normalize 前须全向量物化（非流式）；max/sum 部分量存放【推断】 |
 
@@ -69,11 +75,14 @@ ADR-056 §A.1（【归档】原文）：用户公式层 = 「逐元素 fp32 表�
 
 ## 3. 汇总矩阵
 
-| 类型 | 表达 | lowering | 调度 | 存储规划 | 重构量级 | 排期建议 |
-|---|---|---|---|---|---|---|
-| 归约（sum 族） | 缺 | 缺（有手写先例） | 部分有先例 | 缺 | 中 | 中期冻结后 |
-| matmul | 缺 | 缺（手写线模型 A 资产） | 部分有先例 | 部分有先例 | 中–大 | 中期冻结后 |
-| softmax | 缺 ×4 | 缺（无硬件单元） | 缺 | 缺 | **大** | 中期冻结后，且需先立项逼近方案 |
+「缺」= 当前通用公式入口（配置链）缺少该项能力，不表示项目完全没有相关实现；
+已有专用路径 / 手写线 / simulator 资产在最右列单列。
+
+| 类型 | 表达 | lowering | 调度 | 存储规划 | 重构量级 | 排期建议 | 已有专用/手写/simulator 资产 |
+|---|---|---|---|---|---|---|---|
+| 归约（sum 族） | 缺 | 缺 | 部分有先例 | 缺 | 中 | 中期冻结后 | 手写 matmul 的 cumulative addtree 自环先例（loop-carried II≥4，仅 python sim 模型 A，无 VCS）；ADR-025 |
+| matmul | 缺 | 缺 | 部分有先例 | 部分有先例 | 中–大 | 中期冻结后 | `ManualMatmulParallelNOperator` 手写线 8/8 bit-perfect @ N=8（python sim 模型 A；DEBT-023-BCAST-TIMING / DEBT-025-MULTITILE 未清、无 VCS）；SHIFTUP 广播 + FP32ADDTREE5TO1/8TO1 硬件单元在 hw_config |
+| softmax | 缺 ×4 | 缺（无 EXP/DIV/MAX **专用**单元；组合/逼近/软件分解路线的成本与前提见 §2.3，非不可实现） | 缺 | 缺 | **大** | 中期冻结后，且需先立项逼近方案 | LOGIC 单元含 SELECT_GT/EQ/LS/GE/LE/NE 比较选择（modules.yaml:103-113，§A.2-2 当前排除在 V1 基础操作集外）；无其他专用资产 |
 
 ## 4. 对路线图的输入
 

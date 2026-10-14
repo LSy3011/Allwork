@@ -25,6 +25,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-14 | **用户复核修订落地 + 软件三任务 DONE：性能指标定义 v1 + 8-SMC 等长分片预检 + 公平手写对照选定（无板无新 VCS）** | 用户裁定「能力边界分析≠新类型已支持、取数前置≠性能评估完成」，两处措辞修订落地（预检「缺」=通用公式入口缺+已有资产另列；无 EXP/DIV/MAX 专用单元≠不可实现仅陈成本）；三种时间分离入表（①调度发射规模②TB 执行行为③工具链墙钟）；**段拍构成实测分解**：COMPUTE 段拍 ~95-97% 是 TB 逐行 AXI 指令装载（13/26 拍/行），轮询量化 +19、屏障/固定等待小项齐全，硬件纯计算窗实测仅 ~30-50 拍——「horner 拍数更高」撤回至 TB 行为层、不可归因 II=6；任务1=13 个计时区间绑定明确起止事件+单位统一（n/有效迭代数/UR word/有效输出元素）；任务3=**8-SMC 关键发现：使能零改动**（smc_id_en 缺省 emit 7、指令流共享、PARAM_SMC_NUM=8，当前运行硬件层已是 8-SMC 执行），改动集中 case-gen 数据面×8+compare 验证面×8，条件具备；任务2=唯一候选对（编译器 mul↔手写 mul_scalar r2）七维核查四不一致→分列不并账维持，公平路径=手写 case 同 TB VCS 复跑（目录同构零开发）+编译器 8-SMC 分片对齐 | docs/perf_metrics_definition_20261014.md；docs/precheck_8smc_equal_partition_20261014.md；docs/fair_handwritten_baseline_selection_20261014.md；docs/perf_data_collection_20261014.md §5；docs/precheck_reduce_matmul_softmax_20261014.md（修订）；pytest 578 |
 | 2026-10-14 | **新类型限时能力预检 DONE + 阶段三性能取数前置 DONE（软件侧两项，无板无新 VCS；57b29f0/a52b94c）** | ①归约/matmul/softmax 逐层判定（表达/lowering/调度/存储规划，路线图明文项）：归约=四层均缺但每层有最小先例（中等重构、中期后入口候选）；matmul=缺表达+配置链 lowering（硬件机制 ADR-025 已知、手写线模型 A 资产+VCS 债务）；softmax=大幅重构（modules.yaml 19 单元正面枚举无 EXP/DIV/MAX、缺×4 表达+双趟数据流）——三者均排中期冻结后，预检不授权实现；②阶段三性能取数前置：八组统一 LCS 发布运行+add V1 链五运行的 II/段数/指令行数（manifest 加总）/段拍（arbitrate markers，TB 拍非板端时序）/墙钟（compile_admit 1-2s、vcs 5-7s、全链 ≤16s，1s 量化）全部固定入表，观察仅事实性，分析与公平手写对照选择留阶段三 | docs/precheck_reduce_matmul_softmax_20261014.md；docs/perf_data_collection_20261014.md |
 | 2026-10-14 | **阶段一上板包×2 备妥（备而不跑）：horner n8 复杂结构 + scale_sum n244 跨段（dry-run 均 exit=0）** | 按 2026-10-14 路线图阶段一「优先小规模 horner，再选一个超容量分段案例，分别验证复杂计算结构和跨段执行」：①horner_v3u n=8 统一 LCS 三段（发布 run hv3u_step4fix_n8_committed_20261012，GREEN+published、git_head bd2ed7b 干净树）——II=6 三槽双单元复杂计算结构；②scale_sum n=244 统一 LCS 四段（发布 run adr061_accept2_n244，GREEN+published）——相对板端首例 n16 唯一变量=分段（两段 COMPUTE [0,60)+[60,61)，段间不复位、UR 跨段保持为正确性前提）；两包直接沿用 n16 r3 板证约定（runner d8e6be6d…+run_one_case.sh+PACKAGE_INFO+SHA256SUMS 67/96 项），版本门 0x00042200/IQP1、等待策略明文=DONE 轮询 10ms/10s 判据=HBM bit-exact 数据面（不继承 F6 仿真结论）、公式文本按 yaml 规范原文（horner `((c0*x+c1)*x+c2)*x+c3` / scale_sum `alpha*(x+other)`，不重演 r1–r3 笔误）；dry-run 全程走通 exit=0（horner：8 路预载→三段，stage_1 18 队列 598 packer 写→回读 0x7000；n244：四段，stage_1 2580 写/stage_2 102 写→回读 0x5000；smc_1..7 均按设计 SKIP）；**未接触板卡**，板端执行留用户在 zwz 手动进行 | ~/u280_fpga_packages/horner_v3u_ulcs_n8_v422_compiler_onboard_prepared_20261014{,.tar.gz（sha256 a904d74d…）}；~/u280_fpga_packages/scale_sum_ulcs_n244_v422_compiler_onboard_prepared_20261014{,.tar.gz（sha256 ab8cac92…）} |
 | 2026-10-13 | **论文实验表整理 DONE（统一对比表底稿）+ 公式文本勘误（纯文档）** | docs/thesis_experiment_table_20261013.md：四算子统一对比主表（公式求值序/II 锚/槽结构/输入流/单段 n_max 校准锚/分段实例/统一 LCS 链/VCS/板端九列）+ mul 单列（前 V1 证据类）+ 分段实例详表（同 n=160 两合法形态 39+1/38+2 钉死句）+ 板端首例节 + 可宣称/不外推口径 + 锚点清单；编制中正面取证两处：add 容量 240 系准入层既有值非 VCS 顶格校准（5 运行枚举全 4/8/60）→ 表内标【未校准】；**公式勘误=scale_sum 规范文本 alpha*(x+other)（yaml:8），r1–r3 包 README/PACKAGE_INFO 误写 alpha*x+other**（纯文档错误、执行链与 golden 未受影响，r3 包为运行证据不覆盖改写，勘误登记于板端归档 README 并重封 SHA256SUMS）；addcmul 步⑤ §2 上板条目加当日更新注 | docs/thesis_experiment_table_20261013.md；artifacts/onboard_scale_sum_n16_20261013/（README errata 版 2d418077…） |
@@ -1429,3 +1430,53 @@
   逐字段提取入表；口径钉死（段拍=VCS TB 拍非板端时序；墙钟 1s 量化）；
   观察仅事实性不外推；公平手写对照选择与归一化分析留阶段三。
 - 两 commit：57b29f0（预检）、a52b94c（取数）；develop 不推送。
+
+## 2026-10-14｜用户复核修订 + 软件三任务：指标定义 / 8-SMC 预检 / 手写对照选定
+
+- **用户复核裁定（当日，管辖）**：前两项工作属「能力边界分析」与「性能取数前置」，
+  不能等同新类型已支持或性能评估已完成。措辞修订两处落地：①预检表「缺」改注
+  =当前通用公式入口（配置链）缺少，已有专用/手写/simulator 资产单列（§3 矩阵加列）；
+  ②「无 EXP/DIV/MAX 专用单元」≠不可实现——组合/逼近/软件分解路线需独立精度/代价/
+  正确性定义，预检只陈成本。性能侧三种时间分离（①II/迭代数/指令行数=调度发射规模、
+  ②TB 段拍=指定仿真环境执行行为、③墙钟=工具链成本）；1s 量化只作粗记录不算百分比；
+  VCS 5-7s 注明复用 simv 不含编译、许可证等待未单列。
+- **段拍构成实测分解（回答用户必核问题「COMPUTE 段拍是否含指令装载/轮询/屏障/固定
+  等待」=四项全含）**：TB 源码层钉死（BEGIN marker 在装载前、done 在 ack 后；UR/HBM
+  开场 backdoor 0 拍；每段 IQ 逐行真实 AXI 写 13/26 拍/行；轮询每 20 拍、量化 ≤19；
+  写落位屏障在段内、信用/S4 屏障在段外）+ 两例实测逐项加总精确闭合（horner n8
+  COMPUTE 7970 = 装载 7774(97.5%) + CSR/trigger 84 + 屏障 50 + 轮询 19 + ack 43；
+  scale_sum n16 3140 = 2964(94.4%) + 84 + 30 + 19 + 43）。**硬件纯计算窗（TRIGGER→
+  末写落位）实测 ~30-50 拍、占段拍 ~1%**——「horner 拍数更高」撤回到 TB 行为层，
+  主因=指令行数×TB 装载单价，不可归因 II=6、不可外推板端吞吐（
+  perf_data_collection §4 修订 + §5 新增）。
+- **任务1 性能指标定义 v1**（docs/perf_metrics_definition_20261014.md）：单位统一
+  （n / UR word=128b=4 lane / 有效迭代数=ceil(n/4) / 有效输出元素 / 指令行数=装载
+  beat 数 / TB 拍 / 墙钟秒）；13 个计时区间逐一绑定起止事件与可复取性
+  （T_load_inst/T_cfg_trigger/T_exec_obs/T_poll/T_ack/T_stage_span/T_interstage_gap/
+  T_total_sim + 墙钟三项）；报告纪律五条（三类型分行、「执行/吞吐」默认指
+  T_exec_obs 或板端、段拍比较先剥离装载、墙钟不算百分比、板端数字单列类型④）；
+  待立项取数明示（T_exec 精确窗、板端区间、add V1 段时序）。
+- **任务3 8-SMC 等长分片有界预检**（docs/precheck_8smc_equal_partition_20261014.md，
+  边界=等长 n%32==0、无尾块/多 chunk/归约）：12 项机制事实（F1-F12）钉死——
+  **关键发现：使能链路零改动**（单 SMI 全局指令流 ADR-022；smc_id_en 缺省 emit
+  PARAM_SMC_NUM-1=7，payload_factory.py:110-121；当前发布运行硬件层本就是 8-SMC
+  执行，smc_1..7 在哨兵数据上算结果被忽略）；地址规划结构零改动（每 SMC 对称同构、
+  每通道同偏移不同内容）；编译器零改动（n'=n/8 重新编译即得正确迭代计数）；
+  **改动集中两处工具**：case-gen 数据面×8（现役硬编码单 SMC：active_smc:0、
+  smc_1..7 哨兵、memory_init2..8 哨兵）+ compare 验证面×8（现仅读 smc_0）；
+  VCS/板端 runner 已逐 SMC 可比（缺席即 SKIP）零改动；WBARRIER 仅监测 smc_0 登记为
+  非阻断缺口。约束：n%32==0、总量容量 8×240=1920 为【推断】未校准、manifest schema
+  需版本化。结论=**条件具备**，四步路径（case-gen→compare+负控→VCS→报告口径）
+  待裁定后执行；本预检不授权实现。
+- **任务2 公平手写对照选定**（docs/fair_handwritten_baseline_selection_20261014.md）：
+  候选资产正面枚举（H1 llama r2 mul_scalar 8SMC 板证、H2 255w 前身、H3 matmul
+  模型 A 仅 python sim 无资格、H4 09-21 包非算子对照）；唯一候选对=编译器 mul
+  （前 V1，2048/2048，单 SMC，VCS）↔ H1（板端 5/5+40/40）——七维核查：公式结构
+  同构（均 1 FPMUL+2 读 1 写/元素）但操作数语义不同、精度 fp32 ✓、输入范围/规模/
+  SMC 数/执行环境+同步四项不一致 → **按用户规则分列展示不计算加速比**，论文表
+  「不并账」口径维持。公平路径（按代价）：A-1 手写 r2 case 同 TB VCS 复跑（目录
+  同构、零新开发，消环境/RTL/同步三维差，注意 writeback 提前 2 issue 形态差异须
+  明示）→ A-2 编译器 8-SMC 分片对齐规模（依赖任务3，n_total=8160%32==0 ✓）；
+  B 不推荐、C 为当前默认。度量口径预登记（主比 T_exec_obs、不用墙钟、任一维不一致
+  即分列）。
+- pytest 578 passed 无回归（基线 578 持平）；develop 不推送。
