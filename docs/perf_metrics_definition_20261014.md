@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | **T_load_inst** | 段 BEGIN marker 打印（段循环 :2428） | `data_list done` 打印（$time） | 该段 IQ 指令经 TB AXI 逐行装载的流量耗时（实测 13/26 拍/行，占段拍 ~95%+） | ✅ sim 日志两打印点 |
 | **T_cfg_trigger** | `data_list done` | TRIGGER CSR 写完成（IQ_EN×4 + CFG + TRIGGER 共 6 笔 AXI 写 + 3×repeat(2)） | host 侧配置与发射触发开销（实测恒定 ~84 拍） | ✅ sim 日志（TRIGGER 打印 + WBARRIER enter 夹逼） |
-| **T_exec_obs** | TRIGGER 写完成 | WBARRIER release（被观察段末写落位，:2440-42） | **当前可得的最接近「硬件纯执行」的可观察窗**（实测 30–50 拍） | ✅ sim 日志 WBARRIER enter/release 打印（发布运行均开启） |
+| **T_exec_obs** | TRIGGER 写完成 | WBARRIER release（被观察段末写落位，:2440-42） | **触发至末次目标写的观测窗口**（实测 30–50 拍）。起点=host 侧 TRIGGER 写完成而非硬件发射沿，终点=被监测目标的末写落位；**不称「硬件纯计算时间」** | ✅ sim 日志 WBARRIER enter/release 打印（发布运行均开启） |
 | **T_poll** | 执行事件实际发生（中断/落位） | 轮询检出（smi_wait_and_clear_intr，:803-823） | 完成检测量化（每 20 拍一轮，≤19 拍过冲，实测 +19） | ✅ sim 日志（release→intr 打印差） |
 | **T_ack** | 中断检出 | done marker 打印（:2451） | intid 应答 + 复查（2×AXI 读 + 1×AXI 写 + repeat(2)，实测恒定 ~43 拍） | ✅ sim 日志 |
 | **T_stage_span** | BEGIN marker | done marker | = T_load_inst + T_cfg_trigger + T_exec_obs + T_poll + T_ack（两例实测逐项相加精确相等） | ✅ arbitrate_report markers |
