@@ -25,6 +25,7 @@
 
 | 日期 | 里程碑 | 一句话结论 | 证据 |
 |---|---|---|---|
+| 2026-10-14 | **阶段一上板包×2 备妥（备而不跑）：horner n8 复杂结构 + scale_sum n244 跨段（dry-run 均 exit=0）** | 按 2026-10-14 路线图阶段一「优先小规模 horner，再选一个超容量分段案例，分别验证复杂计算结构和跨段执行」：①horner_v3u n=8 统一 LCS 三段（发布 run hv3u_step4fix_n8_committed_20261012，GREEN+published、git_head bd2ed7b 干净树）——II=6 三槽双单元复杂计算结构；②scale_sum n=244 统一 LCS 四段（发布 run adr061_accept2_n244，GREEN+published）——相对板端首例 n16 唯一变量=分段（两段 COMPUTE [0,60)+[60,61)，段间不复位、UR 跨段保持为正确性前提）；两包直接沿用 n16 r3 板证约定（runner d8e6be6d…+run_one_case.sh+PACKAGE_INFO+SHA256SUMS 67/96 项），版本门 0x00042200/IQP1、等待策略明文=DONE 轮询 10ms/10s 判据=HBM bit-exact 数据面（不继承 F6 仿真结论）、公式文本按 yaml 规范原文（horner `((c0*x+c1)*x+c2)*x+c3` / scale_sum `alpha*(x+other)`，不重演 r1–r3 笔误）；dry-run 全程走通 exit=0（horner：8 路预载→三段，stage_1 18 队列 598 packer 写→回读 0x7000；n244：四段，stage_1 2580 写/stage_2 102 写→回读 0x5000；smc_1..7 均按设计 SKIP）；**未接触板卡**，板端执行留用户在 zwz 手动进行 | ~/u280_fpga_packages/horner_v3u_ulcs_n8_v422_compiler_onboard_prepared_20261014{,.tar.gz（sha256 a904d74d…）}；~/u280_fpga_packages/scale_sum_ulcs_n244_v422_compiler_onboard_prepared_20261014{,.tar.gz（sha256 ab8cac92…）} |
 | 2026-10-13 | **论文实验表整理 DONE（统一对比表底稿）+ 公式文本勘误（纯文档）** | docs/thesis_experiment_table_20261013.md：四算子统一对比主表（公式求值序/II 锚/槽结构/输入流/单段 n_max 校准锚/分段实例/统一 LCS 链/VCS/板端九列）+ mul 单列（前 V1 证据类）+ 分段实例详表（同 n=160 两合法形态 39+1/38+2 钉死句）+ 板端首例节 + 可宣称/不外推口径 + 锚点清单；编制中正面取证两处：add 容量 240 系准入层既有值非 VCS 顶格校准（5 运行枚举全 4/8/60）→ 表内标【未校准】；**公式勘误=scale_sum 规范文本 alpha*(x+other)（yaml:8），r1–r3 包 README/PACKAGE_INFO 误写 alpha*x+other**（纯文档错误、执行链与 golden 未受影响，r3 包为运行证据不覆盖改写，勘误登记于板端归档 README 并重封 SHA256SUMS）；addcmul 步⑤ §2 上板条目加当日更新注 | docs/thesis_experiment_table_20261013.md；artifacts/onboard_scale_sum_n16_20261013/（README errata 版 2d418077…） |
 | 2026-10-13 | **编译器产物首个板端实际输出证据：scale_sum n16 统一 LCS 上板 CASE PASS（上板档第 1 例）** | r3 包 zwz 实跑（`sudo ./run_one_case.sh`，板证 runner d8e6be6d…）：版本门 0x00042200+IQP1 过、软复位 PASS、8 路 HBM 预载、三段 DONE（intid delta 全 1 无 WARN）、HBM 输出窗 64B 回读与 golden bit-exact（golden 锚=VCS 侧独立 fp32 参考）→ `smc_0 PASS` → `CASE PASS compared_smc=1`；判据=数据面非 DONE 时序（F6 措辞裁定：host ms 遮蔽解释流程顺畅、不构成竞态无害证明）；不扩大=本产物本形态单 SMC、host 完成协议闭环仍 F6 开放 | artifacts/onboard_scale_sum_n16_20261013/（board_log.txt 实录+README+SHA256SUMS）；包 ~/u280_fpga_packages/…_r3.tar.gz（22bfad6a…） |
 | 2026-10-13 | **上板实验包备妥（首个编译器产物上板包；备而不跑，dry-run exit=0）** | 按用户裁定「小规模、明确硬件版本和等待策略、不扩多 SMC/复杂尾块/F6 新 bitstream」：选 scale_sum n=16 统一 LCS（ADR-061 accept2 提交态复跑发布，最保守已证形态）打包——case（meta_v3.json out_bank=2/store_byte_base=20480/out_words=4 + hbm_data 8 路镜像 + 三段 IQ + 仅 smc_0 golden 镜像 VCS 单 SMC 范围）+ evidence 审计锚 + README（版本门 0x00042200/IQP1、等待策略明文=DONE 轮询 10ms/10s 但判据=HBM 64B bit-exact 数据面、停止条件、不扩大清单）；runner dry-run 全程走通 exit=0（软复位→8 路预载 stride 0x10000000→三段加载 stage_1 228 写→回读窗 0x5000→smc_1..7 按设计 SKIP）；tar+sha256 唯一命名封存；**未接触板卡**，板端执行留用户在 zwz 手动进行 | ~/u280_fpga_packages/scale_sum_ulcs_n16_v422_compiler_onboard_prepared_20261013{,.tar.gz,.tar.gz.sha256}（sha256 3cc3191a…） |
@@ -1363,3 +1364,46 @@
   论证素材两案例齐备（新增两必答项），留用户裁定。
 - pytest 基线 577（步②提交时点复跑，其后 docs-only）。E1–E5/上板包/
   条件复跑条款/遗留 addcmul.yaml 冻结登记，口径同 horner 步⑤。
+
+## 2026-10-14｜阶段一上板包×2 备妥：horner n8（复杂结构）+ scale_sum n244（跨段）
+
+- **路线图依据**：用户 2026-10-14 四阶段计划阶段一（10/14–18 单 SMC 板端能力
+  扩展）——「优先小规模 horner，再选一个超容量分段案例，分别验证复杂计算
+  结构和跨段执行」；并明文「仍需明确使用的 bitstream 与 host 等待策略，
+  不能继承 F6 的仿真结论」。
+- **选例理由**：horner n8 = 已发布的最保守复杂结构形态（II=6、fpadd 3 槽 +
+  fpmul 3 槽三槽双单元、18 计算队列、4 驻留参数+常量 bank；run
+  hv3u_step4fix_n8_committed_20261012 GREEN+published、git_head bd2ed7b
+  dirty=false）；scale_sum n244 = 变量隔离的分段案例（同算子 n16 已板端
+  PASS，唯一变量=分段；两段 COMPUTE [0,60)+[60,61) 四段程序；run
+  adr061_accept2_n244 GREEN+published、git_head e76592b dirty=true 按实）。
+  未选 addcmulu n=160 的理由：scale_sum 与已 PASS 的 n16 同算子，分段是
+  唯一被引入的变量，恰好满足「分别验证」。
+- **包构建**（均 r1，直接沿用 n16 r3 板证约定，零新约定）：源 case 与
+  smi_iq_inst/hbm_data/golden 逐字节比对一致后入包；meta_v3.json 值取自
+  program_manifest hbm_layout（horner：out_bank=2/store_byte_base=28672/
+  out_words=2；n244：out_bank=2/store_byte_base=20480/out_words=61）；
+  evidence=program_manifest+run_report+unified_lcs_compare(GREEN)+
+  batch_compare_log+reference_golden；runner=板证 v2 d8e6be6d…（与 09-21
+  及 10-13 两次 zwz 实跑同源）。
+- **明文约定**：bitstream=RTL 4.22（版本门 0x00042200+IQP1 不符即拒跑）；
+  host 等待=每段 DONE 轮询 10ms/10s + ack INT，判据=HBM readback bit-exact
+  数据面（32B/976B），DONE 时序不作判据——**不继承 F6 仿真结论**；段间
+  不复位（n244 跨段 UR 保持为正确性前提，README 已明文）；不自动重试。
+- **dry-run 校验**（本机，未触板）：两包 `run_one_case.sh --dry-run` 全程
+  exit=0——horner：软复位→8 路预载（smc_0 36864B valid=32800）→三段
+  （stage_1 18 队列 598 packer 写）→回读 0x7000→smc_1..7 SKIP；n244：
+  软复位→8 路预载（smc_0 28672B valid=25552）→四段（stage_0 40 写/
+  stage_1 2580 写/stage_2 102 写/stage_3 16 写）→回读 0x5000→smc_1..7
+  SKIP。SHA256SUMS 67/96 项生成后 `sha256sum -c` 全 OK。
+- **公式文本纪律**：两包 README/PACKAGE_INFO 公式均按 yaml 规范原文
+  （horner_v3u.yaml:15 `((c0 * x + c1) * x + c2) * x + c3`；
+  scale_sum.yaml:8 `alpha * (x + other)`）——n16 r1–r3 包笔误（误写
+  alpha*x+other）不重演，新包无勘误负担。
+- **边界**：备而不跑；板端执行留用户在 zwz 手动进行（`sudo ./run_one_case.sh`，
+  权限步骤见包 README §5）；通过后的可宣称范围=各自包 README §7（本产物
+  本形态单 SMC），不扩大；失败停止条件两包一致（README §6）。
+- **封存**：~/u280_fpga_packages/horner_v3u_ulcs_n8_v422_compiler_onboard_prepared_20261014{,.tar.gz
+  sha256 a904d74d44689833bbb0d012fae249c9040c1eaf53329fb87bf3f9af9090801f}；
+  ~/u280_fpga_packages/scale_sum_ulcs_n244_v422_compiler_onboard_prepared_20261014{,.tar.gz
+  sha256 ab8cac920179f0030827b536a501636236e24318492f25b13dd996d7bb06c875}。
