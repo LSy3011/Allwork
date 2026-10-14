@@ -322,3 +322,119 @@ class TestCompareV2:
             _w(case / f"smc_{k}" / f"hbm_result_smc_{k}.hex", hbm)
         c = _run_compare(case, tmp_path)
         assert c.run() == 1
+
+
+# ----------------------------------------------------------------------
+# A′（2026-10-14 用户裁定）：equal_8smc_v1 ⇒ en=7 且 intlv=通道步长 绑定；
+# 解码产物字段无截断 + 逐 SMC 地址窗核验；单 SMC 路径逐字节不变。
+# 机制锚：addr_k=gr_base+k*intlv（ldb_ur_axi_conv.v:392-425 /
+# stb_ur_axi_conv.v:360-377）；atcbmc300 按地址选通道
+# （noc/rtl/include/atcbmc300_config.vh:172-201，SLV2..9=ch0..7 各 256MB）。
+# ----------------------------------------------------------------------
+class TestIntlvBinding:
+    DESCS = [{"lines": 2, "brst": 1}]
+
+    def _mods(self):
+        import iq_field_diff as IFD
+        return IFD.load_modules_yaml(os.path.join(ROOT, "hw_config",
+                                                  "modules.yaml"))
+
+    def test_partition_transport_binding(self):
+        from unified_lcs_case_gen import (_partition_transport, CHANNEL_STRIDE,
+                                          SMC_COUNT)
+        assert _partition_transport(None) == (0, 0)
+        assert _partition_transport("equal_8smc") == (SMC_COUNT - 1,
+                                                      CHANNEL_STRIDE)
+        with pytest.raises(SystemExit):
+            _partition_transport("bogus_scheme")
+
+    def test_intlv_field_roundtrip_no_truncation(self):
+        """发射 intlv=通道步长 → 解码逐字段读回 == 原值（40bit 无截断），双侧。"""
+        from unified_lcs_case_gen import CHANNEL_STRIDE
+        import iq_field_diff as IFD
+        mods = self._mods()
+        _, axi = g2.build_and_emit(self.DESCS, 0, 0, 0x1000, 7, CHANNEL_STRIDE)
+        d = IFD.decode(axi[0], "LDB_AXI", mods)
+        assert d["body"]["GR_INTLV_ADDR"] == CHANNEL_STRIDE
+        assert d["body"]["GR_BASE_ADDR"] == 0x1000
+        _, axi = s1.build_and_emit(self.DESCS, 2, 0, 0x4000, 7, CHANNEL_STRIDE)
+        d = IFD.decode(axi[0], "STB_AXI", mods)
+        assert d["body"]["GR_INTLV_ADDR"] == CHANNEL_STRIDE
+        assert d["body"]["GR_BASE_ADDR"] == 0x4000
+
+    def test_single_smc_default_byte_identical(self):
+        """单 SMC 回归：缺省 intlv 与显式 0 逐字节一致，且解码字段==0。"""
+        import iq_field_diff as IFD
+        mods = self._mods()
+        a_l, a_x = g2.build_and_emit(self.DESCS, 0, 0, 0x1000, 0)
+        b_l, b_x = g2.build_and_emit(self.DESCS, 0, 0, 0x1000, 0, 0)
+        assert (a_l, a_x) == (b_l, b_x)
+        assert IFD.decode(a_x[0], "LDB_AXI", mods)["body"]["GR_INTLV_ADDR"] == 0
+        a_s, a_ax = s1.build_and_emit(self.DESCS, 2, 0, 0x4000, 0)
+        b_s, b_ax = s1.build_and_emit(self.DESCS, 2, 0, 0x4000, 0, 0)
+        assert (a_s, a_ax) == (b_s, b_ax)
+        assert IFD.decode(a_ax[0], "STB_AXI", mods)["body"]["GR_INTLV_ADDR"] == 0
+
+    @pytest.mark.parametrize("bad", [-16, 1 << 40, 8])
+    def test_guard_intlv_field_sanity(self, bad):
+        with pytest.raises(SystemExit):
+            g2.guard("t", self.DESCS, 0, 0, 0x1000, 7, bad)
+        with pytest.raises(SystemExit):
+            s1.guard("t", self.DESCS, 2, 0, 0x4000, 7, bad)
+
+    def test_window_checker_accepts_valid(self):
+        from unified_lcs_case_gen import (_check_v2_axi_windows, CHANNEL_STRIDE)
+        _, axi = g2.build_and_emit(self.DESCS, 0, 0, 0x1000, 7, CHANNEL_STRIDE)
+        _check_v2_axi_windows(axi, "LDB_AXI", CHANNEL_STRIDE)   # 不响拒即通过
+        _, axi = s1.build_and_emit(self.DESCS, 2, 0, 0x5000, 7, CHANNEL_STRIDE)
+        _check_v2_axi_windows(axi, "STB_AXI", CHANNEL_STRIDE)
+
+    def test_window_checker_rejects_wrong_stride(self):
+        """错误步长被拒绝：intlv=半步长 → 解码值 != 绑定步长 → 响拒（双侧）。"""
+        from unified_lcs_case_gen import (_check_v2_axi_windows, CHANNEL_STRIDE)
+        _, axi = g2.build_and_emit(self.DESCS, 0, 0, 0x1000, 7,
+                                   CHANNEL_STRIDE // 2)
+        with pytest.raises(SystemExit, match="GR_INTLV_ADDR"):
+            _check_v2_axi_windows(axi, "LDB_AXI", CHANNEL_STRIDE)
+        _, axi = s1.build_and_emit(self.DESCS, 2, 0, 0x5000, 7,
+                                   CHANNEL_STRIDE // 2)
+        with pytest.raises(SystemExit, match="GR_INTLV_ADDR"):
+            _check_v2_axi_windows(axi, "STB_AXI", CHANNEL_STRIDE)
+
+    def test_window_checker_rejects_cross_channel(self):
+        """burst 末地址跨入下一通道窗 → 响拒（通道0 顶界正面构造）。"""
+        from unified_lcs_case_gen import (_check_v2_axi_windows, CHANNEL_STRIDE)
+        _, axi = g2.build_and_emit([{"lines": 16, "brst": 15}], 0, 0,
+                                   CHANNEL_STRIDE - 0xF0, 7, CHANNEL_STRIDE)
+        with pytest.raises(SystemExit, match="地址窗越界"):
+            _check_v2_axi_windows(axi, "LDB_AXI", CHANNEL_STRIDE)
+
+    def test_case_v2_intlv_in_manifest_and_instructions(self, tmp_path):
+        """端到端：v2 case manifest 记步长 + 指令解码逐 SMC 窗全合法 + M6 绿。"""
+        import iq_field_diff as IFD
+        from unified_lcs_case_gen import CHANNEL_STRIDE
+        mods = self._mods()
+        case = _gen_case(tmp_path)
+        man = json.loads((case / "program_manifest.json").read_text())
+        assert man["partition"]["channel_stride"] == CHANNEL_STRIDE
+        assert "addr_rule" in man["partition"]
+        n_st = len(man["stages"])
+        for sid, unit, fn in ((0, "LDB_AXI", "iq_ldb_axi.hex"),
+                              (n_st - 1, "STB_AXI", "iq_stb_axi.hex")):
+            for row in (case / "smi_iq_inst" / f"stage_{sid}" / fn
+                        ).read_text().split():
+                d = IFD.decode(row, unit, mods)
+                assert d["body"]["GR_INTLV_ADDR"] == CHANNEL_STRIDE
+        chk = PMChecker(case)
+        assert chk.run() == 0, chk.bad
+
+    def test_channel_stride_tamper_red(self, tmp_path):
+        """manifest 步长篡改 → M5 绑定检查 RED。"""
+        case = _gen_case(tmp_path)
+        man_p = case / "program_manifest.json"
+        man = json.loads(man_p.read_text())
+        man["partition"]["channel_stride"] = 0x08000000
+        man_p.write_text(json.dumps(man, indent=2), encoding="utf-8")
+        chk = PMChecker(case)
+        assert chk.run() == 1
+        assert any("channel_stride" in m for m in chk.bad), chk.bad

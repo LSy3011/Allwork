@@ -58,12 +58,61 @@ PARTITION_SCHEMES = ("equal_8smc",)  # 规格：docs/8smc_equal_partition_spec_2
 SMC_COUNT = 8                        # PARAM_SMC_NUM（hw_params.yaml）
 EXPECT_SCHEMA = "adr061.unified_expect/v1"
 
+# HBM 通道地址窗跨度 256MB：atcbmc300 交叉开关按地址译码选通道
+# （data_engine/noc/rtl/include/atcbmc300_config.vh:172-201：
+# SLV2..SLV9 = HBM ch0..ch7，base=0x0/0x1000_0000/…/0x7000_0000，各 256MB）。
+# per-SMC 基址公式 addr_k = gr_base + k*gr_intlv_addr（RTL 行级：
+# ldb_ur_axi_conv.v:392-425 / stb_ur_axi_conv.v:360-377）——
+# 广播指令 + intlv=本常量 ⇒ SMC k 落通道 k 同偏移窗（equal_8smc_v1 原生形态；
+# 2026-10-14 首跑 intlv=0 → 8 master 同址全路由 ch0 的 RED 归因）。
+CHANNEL_STRIDE = 0x10000000
+
 LOAD_ROLES = ("input", "param", "constant")
 OUTPUT_ROLE = "output"
 
 
 def _die(msg: str) -> None:
     raise SystemExit(f"[ULCS-GEN-GUARD] {msg}")
+
+
+def _partition_transport(partition: str | None) -> tuple[int, int]:
+    """分片模式的传输参数绑定（en, intlv）。
+
+    equal_8smc_v1 ⇒ en=7（8 目标广播）且 intlv=CHANNEL_STRIDE（通道跨度），
+    二者同时成立才构成已复核分片形态。注意绑定不反向扩散：本函数不约束
+    其他 en=7 用途的步长（其他合法布局可不同——守卫绑分片模式，不绑所有
+    en=7 指令）。
+    """
+    if partition is None:
+        return 0, 0
+    if partition == "equal_8smc":
+        return SMC_COUNT - 1, CHANNEL_STRIDE
+    _die(f"partition={partition!r} 未知（已定义: {PARTITION_SCHEMES}），响亮拒绝")
+
+
+def _check_v2_axi_windows(axi_lines: list[str], unit: str, intlv: int) -> None:
+    """equal_8smc_v1 地址窗核验——**解码最终产物**，非发射参数重述。
+
+    每条 AXI 指令：①GR_INTLV_ADDR 无截断等于通道步长；②逐 SMC 基址
+    addr_k = gr_base + k*intlv 与其整段 burst 末地址全部落入通道 k 窗
+    [k*stride, (k+1)*stride)（不跨窗；窗顶 2^31 << 2^40，溢出被窗检查吸收）。
+    """
+    import iq_field_diff as IFD  # 局部 import：仅 v2 路径需要
+    mods = IFD.load_modules_yaml(os.path.join(ROOT, "hw_config", "modules.yaml"))
+    for idx, row in enumerate(axi_lines):
+        d = IFD.decode(row, unit, mods)
+        body, hdr = d["body"], d["header"]
+        if body["GR_INTLV_ADDR"] != intlv:
+            _die(f"{unit} 行{idx} GR_INTLV_ADDR={body['GR_INTLV_ADDR']:#x} != "
+                 f"{intlv:#x}（字段截断或发射失实，响亮拒绝）")
+        base, brst = body["GR_BASE_ADDR"], body["BRST"]
+        burst = (brst + 1) * LINE_BYTES * (hdr.get("LOOPS", 0) + 1)
+        for k in range(SMC_COUNT):
+            a0, a1 = base + k * intlv, base + k * intlv + burst
+            lo, hi = k * CHANNEL_STRIDE, (k + 1) * CHANNEL_STRIDE
+            if not (lo <= a0 and a1 <= hi):
+                _die(f"{unit} 行{idx} SMC{k} 地址窗越界：[{a0:#x},{a1:#x}) "
+                     f"未落入通道{k} 窗 [{lo:#x},{hi:#x})（跨窗/溢出，响亮拒绝）")
 
 
 def _sha256_bytes(b: bytes) -> str:
@@ -344,17 +393,24 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
                                      for ln in bl[:n_lines]]
 
     # ---- 指令发射（真 LIRPacker，门①/门② VCS 实证形态） ----
-    en = 7 if is8 else 0   # equal_8smc_v1：LOAD/STORE 广播 8 目标（守卫已复核 {0,7}）
+    # 分片传输参数绑定：equal_8smc_v1 ⇒ en=7 且 intlv=通道步长（A′ 修复——
+    # 首跑 intlv=0 致 8 master 同址全路由 channel0；守卫已复核 {0,7}）
+    en, intlv = _partition_transport(partition)
     ldb_lines_all: list[str] = []
     ldbaxi_lines_all: list[str] = []
     for t in loads:
         base = next(e["byte_base"] for e in hbm_layout if e["name"] == t["name"])
-        g2.guard("unified-ldb", descs, t["bank"], 0, base, en)
-        ldb_ls, axi_ls = g2.build_and_emit(descs, t["bank"], 0, base, en)
+        g2.guard("unified-ldb", descs, t["bank"], 0, base, en, intlv)
+        ldb_ls, axi_ls = g2.build_and_emit(descs, t["bank"], 0, base, en, intlv)
         ldb_lines_all += ldb_ls
         ldbaxi_lines_all += axi_ls
-    s1.guard("unified-stb", descs, out_bank, 0, out_base, en)
-    stb_lines, stbaxi_lines = s1.build_and_emit(descs, out_bank, 0, out_base, en)
+    s1.guard("unified-stb", descs, out_bank, 0, out_base, en, intlv)
+    stb_lines, stbaxi_lines = s1.build_and_emit(descs, out_bank, 0, out_base,
+                                                en, intlv)
+    if is8:
+        # 解码最终产物逐 SMC 核验地址窗（字段无截断 + 不跨通道窗）
+        _check_v2_axi_windows(ldbaxi_lines_all, "LDB_AXI", intlv)
+        _check_v2_axi_windows(stbaxi_lines, "STB_AXI", intlv)
 
     # ---- 物化 ----
     stage_dirs: list[tuple[int, str, list[tuple[str, list[str] | Path]]]] = []
@@ -605,6 +661,12 @@ def build_unified_case(build_copy: Path, case_dir: Path, n: int,
         manifest["partition"] = {
             "scheme": "equal_8smc_v1",
             "n_total": SMC_COUNT * n, "n_per": n, "smc_count": SMC_COUNT,
+            "channel_stride": CHANNEL_STRIDE,
+            "addr_rule": (
+                "addr_k = byte_base + k*channel_stride；atcbmc300 交叉开关按"
+                "地址译码选通道（noc/rtl/include/atcbmc300_config.vh:172-201，"
+                "SLV2..9=HBM ch0..7 各 256MB）；per-SMC 基址公式 RTL 行级锚="
+                "ldb_ur_axi_conv.v:392-425 / stb_ur_axi_conv.v:360-377"),
             "input_derivation": (
                 "slice0=build 预载原样；slice k>=1 = 逐 input 张量确定性仿射"
                 "派生（fp32：v*(1+0.5k+0.25i) + (±0.125k)，i=张量声明序，奇"

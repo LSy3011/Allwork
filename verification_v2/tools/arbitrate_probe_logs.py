@@ -580,6 +580,12 @@ def arbitrate_multi(case_root: Path, expected_stages: List[Dict[str, Any]],
 # ----------------------------------------------------------------------
 
 PROGRAM_MANIFEST_SCHEMA = "adr061_program_manifest_v1"
+# equal_8smc_v1 程序 manifest（8 目标等长分片；2026-10-14 A′ 起程序仲裁支持）。
+# v2 在 v1 全部检查之上追加**逐 SMC / 逐通道**写账覆盖（不只 SMC0 代表）；
+# 逐 SMC 数据正确性仍归 unified_lcs_compare 的 8/8 三区互校层。
+PROGRAM_MANIFEST_SCHEMA_V2 = "ulcs_program_manifest_v2_8smc"
+PROGRAM_MANIFEST_SCHEMAS = (PROGRAM_MANIFEST_SCHEMA, PROGRAM_MANIFEST_SCHEMA_V2)
+PROGRAM_SMC_COUNT_V2 = 8
 
 # LOAD/COMPUTE 段队列（rtl_probe_plan 镜像）：LOAD={ldb:26, ldb-axi:27}，
 # STORE={stb:24, stb-axi:25}。
@@ -664,14 +670,30 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
         入口 release 同拍」形态下有洞，已钉死回归测试）。
       * C-W：三类屏障 release 必须各 ≥1（WBARRIER/S4 恰 1）；S4 release
         > 末笔 HBM 写（排干正向证据）；WBARRIER release 落于末 COMPUTE 段窗。
+      * v2（ulcs_program_manifest_v2_8smc，8-SMC 等长分片）：v1 全部检查之上
+        **只增强不削弱**——LOAD 段 UR 写账逐 SMC（0..7）与声明窗双向比对
+        （覆盖不足/越界逐颗归因），STORE 段 HBM 写账逐通道（0..7）与声明窗
+        双向比对（漏搬运/写偏逐通道归因）；v1 路径零改动（smc_n=1 ⇒ 与
+        原「仅 SMC0 代表」逐字节等价）。逐 SMC 数据正确性不归本层（由
+        unified_lcs_compare 三区互校 8/8 承载）；读探针实测仅覆盖 SMC0，
+        已在 limitations 显式登记（不得据此声称逐 SMC 消费证据）。
     """
     bad: List[str] = []
     limits: List[str] = []
-    if program_manifest.get("schema_version") != PROGRAM_MANIFEST_SCHEMA:
+    schema = program_manifest.get("schema_version")
+    if schema not in PROGRAM_MANIFEST_SCHEMAS:
         return {"mode": "program", "violations":
-                [f"manifest schema={program_manifest.get('schema_version')!r}"
-                 f" != {PROGRAM_MANIFEST_SCHEMA!r}"], "limitations": [],
-                "verdict": "RED"}
+                [f"manifest schema={schema!r} != {PROGRAM_MANIFEST_SCHEMAS!r}"],
+                "limitations": [], "verdict": "RED"}
+    is_v2 = schema == PROGRAM_MANIFEST_SCHEMA_V2
+    if is_v2:
+        _part = program_manifest.get("partition") or {}
+        if _part.get("smc_count") != PROGRAM_SMC_COUNT_V2:
+            return {"mode": "program", "violations":
+                    [f"(v2) partition.smc_count={_part.get('smc_count')!r} != "
+                     f"{PROGRAM_SMC_COUNT_V2}"], "limitations": [],
+                    "verdict": "RED"}
+    smc_n = PROGRAM_SMC_COUNT_V2 if is_v2 else 1
     stages = program_manifest.get("stages") or []
     S = len(stages)
     if S < 3 or stages[0].get("kind") != "LOAD" \
@@ -767,6 +789,27 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
                    f"（首例 {sorted(missing)[0]}）——LOAD 未送达")
     rep["ur_writes"] = {"observed": len(ld_writes), "declared": len(load_windows),
                         "outside": len(outside), "missing": len(missing)}
+    if is_v2:
+        # v2：逐 SMC 覆盖（8 目标全验，不以 SMC0 代表全体）。
+        # 声明的 UR 写窗对八颗同形（等长分片），故逐 SMC 应与声明窗双向相等；
+        # 任一颗覆盖不足/越界分别响亮归因到 (…/smc_k)。
+        per_smc_load: Dict[str, Any] = {}
+        for k in range(smc_n):
+            wr_k = {(b, a) for (_c, s, b, a, _we, _wd) in w_w if s == k}
+            out_k = wr_k - load_windows
+            miss_k = load_windows - wr_k
+            if out_k:
+                bad.append(f"(LOAD/C-S/smc_{k}) UR 写越出声明窗 ×{len(out_k)}"
+                           f"（首例 {sorted(out_k)[0]}）")
+            if miss_k:
+                bad.append(f"(LOAD/C-S/smc_{k}) 声明窗覆盖不足：缺 {len(miss_k)}"
+                           f" 行（首例 {sorted(miss_k)[0]}）——LOAD 未送达"
+                           f"该目标")
+            per_smc_load[f"smc_{k}"] = {"observed": len(wr_k),
+                                        "outside": len(out_k),
+                                        "missing": len(miss_k)}
+        rep["per_smc_ur_writes"] = per_smc_load
+        rep["ur_writes"]["scope"] = "smc_0（逐 SMC 见 per_smc_ur_writes）"
     last_ld_w = max((c for (c, _s, _b, _a, _we, _wd) in w_w), default=None)
     rep["last_ur_write"] = last_ld_w
     rep["ack"] = acks[0]
@@ -849,6 +892,28 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
                          "declared": store_n,
                          "outside": len(out_h), "missing": len(miss_h),
                          "last_write": last_hbm}
+    if is_v2:
+        # v2：逐通道（=逐 SMC 出口）HBM 写账。hbm 探针的 s 字段即通道号；
+        # 八通道各写各的窗（等长分片、同形窗），故逐通道应与声明窗双向相等。
+        # 这是「写入数量/地址/非目标区」在 8-SMC 形态下的全覆盖检查：
+        # 任何一颗写少/写偏/未写，或某通道缺席（漏搬运），均逐条响亮归因。
+        per_ch: Dict[str, Any] = {}
+        for k in range(smc_n):
+            a_k = {a for (_c, s, a) in hbm_in if s == k}
+            out_k = a_k - want_addrs
+            miss_k = want_addrs - a_k
+            if out_k:
+                bad.append(f"(STORE/C-S/ch{k}) HBM 写越出声明窗 ×{len(out_k)}"
+                           f"（首例 addra={min(out_k)}）")
+            if miss_k:
+                bad.append(f"(STORE/C-S/ch{k}) HBM 声明窗覆盖不足：缺"
+                           f" {len(miss_k)} 行（首例 addra={min(miss_k)}）"
+                           f"——STORE 未送齐该通道")
+            per_ch[f"ch{k}"] = {"observed_lines": len(a_k),
+                                "outside": len(out_k),
+                                "missing": len(miss_k)}
+        rep["per_channel_hbm_writes"] = per_ch
+        rep["hbm_writes"]["scope"] = "ch0（逐通道见 per_channel_hbm_writes）"
     rep["ack"] = acks[S - 1]
     if releases["s4"] and last_hbm is not None \
             and releases["s4"][0] <= last_hbm:
@@ -864,6 +929,13 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
     #   单 release：退化为原规则；多 release 同为首读前置：须晚于其最大值
     #   （含同拍从严——同拍采样分辨率不足以证明读在放行之后）。
     cl: Dict[str, Any] = {}
+    read_smcs = sorted({s for (_c, s, _p, _b, _a) in read_rows})
+    cl["read_probe_smcs_observed"] = read_smcs
+    if is_v2 and read_smcs == [0]:
+        limits.append(
+            "(C-L/v2) 读探针实测仅覆盖 SMC0（ur_read_trace 全条目 s=0）——本层"
+            "「COMPUTE 消费了 LOAD 数据」仅以 SMC0 为代表；逐 SMC 消费/路由"
+            "证据由数据面 8/8 三区互校承载，不由本层承载")
     comp_reads = [(c, b, a) for (c, s, _p, b, a) in read_rows
                   if s == 0 and b in load_banks and c >= begins[1]]
     first_read = min((c for (c, _b, _a) in comp_reads), default=None)
@@ -935,7 +1007,15 @@ def arbitrate_program(case_root: Path, program_manifest: Dict[str, Any],
     return {
         "mode": "program",
         "case_root": str(case_root),
+        "schema_version": schema,
         "stage_count": S,
+        "partition": (dict(program_manifest.get("partition") or {})
+                      if is_v2 else None),
+        "program_checks": {
+            "v2_per_smc_load_coverage": is_v2,
+            "v2_per_channel_store_coverage": is_v2,
+            "smc_targets": smc_n,
+        },
         "markers": {"begins": begins, "acks": acks,
                     "complete": marks["complete"], "max_idx": marks["max_idx"]},
         "barriers": barriers,

@@ -961,3 +961,231 @@ class UnifiedLcsCompareHornerTest(unittest.TestCase):
         self.assertEqual(cmp_.run(), 1)
         self.assertTrue(any("未被公式" in m for m in cmp_.bad),
                         msg=f"装载未消费输入须由 C-H 点名: {cmp_.bad}")
+
+
+# ----------------------------------------------------------------------
+# arbitrate_program v2（ulcs_program_manifest_v2_8smc）：8-SMC 等长分片的
+# 逐 SMC LOAD 写账 / 逐通道 STORE 写账（2026-10-14 A′，用户执行范围③④）。
+#
+# 纪律（对抗自验）：v2 只许**增强**——绿用例必须 GREEN 且报告含逐 SMC /
+# 逐通道账目；任何一颗 SMC 少写/写偏、任一通道漏搬运或写越界，都必须
+# 响亮 RED 并点名到 smc_k / chk。v1 路径逐字节不变（同日志跑 v1 manifest
+# 仍 GREEN 且无 v2 账目块）。
+# ----------------------------------------------------------------------
+def _prog_manifest_v2(smc_count: int = 8) -> dict:
+    man = _prog_manifest()
+    man["schema_version"] = "ulcs_program_manifest_v2_8smc"
+    man["partition"] = {"scheme": "equal_8smc_v1", "smc_count": smc_count,
+                        "n_total": 8 * 2, "n_per": 2,
+                        "channel_stride": 0x10000000}
+    return man
+
+
+class ArbitrateProgramV2Test(unittest.TestCase):
+    SMC_N = 8
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self._write_green_v2()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_green_v2(self):
+        """与 v1 绿用例同形态，但 LOAD UR 写与 STORE HBM 写覆盖 8 颗目标。"""
+        r = self.root
+        fetch = ["# cycle iq addr_valid addr data_valid data"]
+        for k, rel in enumerate((0, 3, 4, 5, 6)):
+            fetch.append(f"{C_COMP + rel} 16 1 {k} 0 0")
+        for k, rel in enumerate((0, 5, 6, 7)):
+            fetch.append(f"{C_COMP + rel} 20 1 {k} 0 0")
+        fetch.append(f"{C_LOAD + 10} 26 1 0 0 0")
+        fetch.append(f"{C_LOAD + 11} 27 1 0 0 0")
+        fetch.append(f"{C_STORE + 10} 24 1 0 0 0")
+        fetch.append(f"{C_STORE + 11} 25 1 0 0 0")
+        (r / "iq_probe_trace.log").write_text("\n".join(fetch) + "\n")
+
+        issue = ["# cycle iq dly_data_valid dly_data"]
+        for rel in range(6):
+            issue.append(f"{C_COMP + rel} 16 1 00aa")
+        for rel in range(7):
+            issue.append(f"{C_COMP + rel} 20 1 00bb")
+        (r / "iq_issue_trace.log").write_text("\n".join(issue) + "\n")
+
+        wdata = "ab" * 16
+        write = ["# cycle smc bank we addr wbe wdata"]
+        # LOAD：八颗各写满声明窗 4 行（bank0/1 各 2 行）
+        for s in range(self.SMC_N):
+            for i, (bank, addr) in enumerate(((0, 0), (0, 1), (1, 0), (1, 1))):
+                write.append(f"{C_LOAD + 20 + i} {s} {bank} 1 {addr} "
+                             f"ffff {wdata}")
+        # COMPUTE（SMC0 代表）：期望写集 (2,10),(2,11)，早于 ack
+        write.append(f"{C_COMP + 40} 0 2 1 10 ffff {wdata}")
+        write.append(f"{C_COMP + 41} 0 2 1 11 ffff {wdata}")
+        (r / "ur_write_trace.log").write_text("\n".join(write) + "\n")
+
+        read = ["# cycle smc port bank addr",
+                f"{C_COMP + 10} 0 0 0 0"]      # 读探针实测仅 SMC0
+        (r / "ur_read_trace.log").write_text("\n".join(read) + "\n")
+
+        hbm = ["# cycle smc addra wea dina"]
+        for s in range(self.SMC_N):
+            hbm.append(f"{C_STORE + 20} {s} {100:05x} ffff {'cd' * 16}")
+            hbm.append(f"{C_STORE + 21} {s} {101:05x} ffff {'cd' * 16}")
+        (r / "hbm_write_trace.log").write_text("\n".join(hbm) + "\n")
+
+        sim = [
+            f"[TB_MULTI_STAGE] ===== stage_0/2 BEGIN ===== @time 1000 "
+            f"@probe_cycle {C_LOAD}",
+            f"[TB_MULTI_STAGE] stage_0 done (intr cleared) @time 1500 "
+            f"@probe_cycle {ACK_LOAD}",
+            f"[GATE3][BARRIER] release @probe_cycle {CREDIT_REL}",
+            f"[TB_MULTI_STAGE] ===== stage_1/2 BEGIN ===== @time 1600 "
+            f"@probe_cycle {C_COMP}",
+            f"[GATE4][WBARRIER] release @probe_cycle {WB_REL}",
+            f"[TB_MULTI_STAGE] stage_1 done (intr cleared) @time 2050 "
+            f"@probe_cycle {ACK_COMP}",
+            f"[TB_MULTI_STAGE] ===== stage_2/2 BEGIN ===== @time 2100 "
+            f"@probe_cycle {C_STORE}",
+            f"[TB_MULTI_STAGE] stage_2 done (intr cleared) @time 2500 "
+            f"@probe_cycle {ACK_STORE}",
+            f"[GATE4][S4BARRIER] release @probe_cycle {S4_REL}",
+            f"[TB_MULTI_STAGE] all stages complete @probe_cycle {S4_REL + 5}",
+        ]
+        (r / "sim.log").write_text("\n".join(sim) + "\n")
+
+    def _run(self, man: dict | None = None) -> dict:
+        return arb.arbitrate_program(self.root, man or _prog_manifest_v2(),
+                                     {1: _compute_expected()},
+                                     self.root / "sim.log")
+
+    # ---- 绿 + 账目块 ----
+    def test_v2_green_with_per_target_accounting(self):
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "GREEN", msg=rep["violations"])
+        self.assertEqual(rep["schema_version"], "ulcs_program_manifest_v2_8smc")
+        self.assertEqual(rep["partition"]["smc_count"], self.SMC_N)
+        load_rep = rep["stages"][0]
+        self.assertEqual(sorted(load_rep["per_smc_ur_writes"]),
+                         [f"smc_{k}" for k in range(self.SMC_N)])
+        for k in range(self.SMC_N):
+            acc = load_rep["per_smc_ur_writes"][f"smc_{k}"]
+            self.assertEqual((acc["observed"], acc["outside"], acc["missing"]),
+                             (4, 0, 0), msg=f"smc_{k}: {acc}")
+        store_rep = rep["stages"][-1]
+        self.assertEqual(sorted(store_rep["per_channel_hbm_writes"]),
+                         [f"ch{k}" for k in range(self.SMC_N)])
+        for k in range(self.SMC_N):
+            acc = store_rep["per_channel_hbm_writes"][f"ch{k}"]
+            self.assertEqual((acc["observed_lines"], acc["outside"],
+                              acc["missing"]), (2, 0, 0), msg=f"ch{k}: {acc}")
+        # 读探针仅覆盖 SMC0 ⇒ 必须落 limitation，不得声称逐 SMC 消费证据
+        self.assertTrue(any("读探针" in lim and "SMC0" in lim
+                            for lim in rep["limitations"]), msg=rep["limitations"])
+
+    # ---- v1 路径不变（同日志：v1 只以 SMC0/ch0 代表，无 v2 账目块） ----
+    def test_v1_manifest_on_v2_logs_still_green_without_v2_blocks(self):
+        rep = self._run(_prog_manifest())
+        self.assertEqual(rep["verdict"], "GREEN", msg=rep["violations"])
+        self.assertIsNone(rep["partition"])
+        self.assertNotIn("per_smc_ur_writes", rep["stages"][0])
+        self.assertNotIn("per_channel_hbm_writes", rep["stages"][-1])
+        self.assertFalse(any("读探针" in lim for lim in rep["limitations"]))
+
+    # ---- 负控：逐 SMC LOAD ----
+    def test_v2_load_missing_one_smc_row_red(self):
+        p = self.root / "ur_write_trace.log"
+        lines = p.read_text().splitlines()
+        # 摘掉 smc_5 的 bank1/addr1 那一笔（第 4 笔）→ 该目标覆盖不足
+        victim = [i for i, ln in enumerate(lines)
+                  if ln.startswith(f"{C_LOAD + 23} 5 1 1 ")]
+        self.assertEqual(len(victim), 1, msg=lines)
+        del lines[victim[0]]
+        p.write_text("\n".join(lines) + "\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(LOAD/C-S/smc_5)" in v and "覆盖不足" in v
+                            for v in rep["violations"]), msg=rep["violations"])
+        self.assertEqual(rep["stages"][0]["per_smc_ur_writes"]["smc_5"]["missing"],
+                         1)
+        # 其余目标仍应为满额（不因一颗失配而污染全部账目）
+        self.assertEqual(rep["stages"][0]["per_smc_ur_writes"]["smc_4"]["missing"],
+                         0)
+
+    def test_v2_load_out_of_window_on_one_smc_red(self):
+        with open(self.root / "ur_write_trace.log", "a") as fh:
+            fh.write(f"{C_LOAD + 24} 6 3 1 9 ffff {'ab' * 16}\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(LOAD/C-S/smc_6)" in v and "越出声明窗" in v
+                            for v in rep["violations"]), msg=rep["violations"])
+
+    def test_v2_load_smc7_entirely_absent_red(self):
+        p = self.root / "ur_write_trace.log"
+        lines = [ln for ln in p.read_text().splitlines()
+                 if not ln.startswith(f"{C_LOAD + 20} 7 ")
+                 and not ln.startswith(f"{C_LOAD + 21} 7 ")
+                 and not ln.startswith(f"{C_LOAD + 22} 7 ")
+                 and not ln.startswith(f"{C_LOAD + 23} 7 ")]
+        p.write_text("\n".join(lines) + "\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(LOAD/C-S/smc_7)" in v for v in rep["violations"]),
+                        msg=rep["violations"])
+        self.assertEqual(rep["stages"][0]["per_smc_ur_writes"]["smc_7"]["observed"],
+                         0)
+
+    # ---- 负控：逐通道 STORE ----
+    def test_v2_store_missing_one_channel_line_red(self):
+        p = self.root / "hbm_write_trace.log"
+        lines = p.read_text().splitlines()
+        victim = [i for i, ln in enumerate(lines) if ln.startswith(f"{C_STORE + 20} 3 ")]
+        self.assertEqual(len(victim), 1, msg=lines)
+        del lines[victim[0]]
+        p.write_text("\n".join(lines) + "\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(STORE/C-S/ch3)" in v and "覆盖不足" in v
+                            for v in rep["violations"]), msg=rep["violations"])
+        self.assertEqual(
+            rep["stages"][-1]["per_channel_hbm_writes"]["ch3"]["missing"], 1)
+
+    def test_v2_store_cross_channel_write_red(self):
+        # 通道 2 多写一行（越出声明窗）→ 逐通道越界捕获
+        with open(self.root / "hbm_write_trace.log", "a") as fh:
+            fh.write(f"{C_STORE + 22} 2 {102:05x} ffff {'cd' * 16}\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(STORE/C-S/ch2)" in v and "越出声明窗" in v
+                            for v in rep["violations"]), msg=rep["violations"])
+
+    def test_v2_store_channel7_absent_red(self):
+        p = self.root / "hbm_write_trace.log"
+        lines = [ln for ln in p.read_text().splitlines()
+                 if not ln.startswith(f"{C_STORE + 20} 7 ")
+                 and not ln.startswith(f"{C_STORE + 21} 7 ")]
+        p.write_text("\n".join(lines) + "\n")
+        rep = self._run()
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("(STORE/C-S/ch7)" in v for v in rep["violations"]),
+                        msg=rep["violations"])
+        self.assertEqual(
+            rep["stages"][-1]["per_channel_hbm_writes"]["ch7"]["observed_lines"],
+            0)
+
+    # ---- 负控：schema / 目标数 ----
+    def test_v2_smc_count_tamper_red(self):
+        man = _prog_manifest_v2(smc_count=7)
+        rep = self._run(man)
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("smc_count" in v for v in rep["violations"]),
+                        msg=rep["violations"])
+
+    def test_unknown_schema_red(self):
+        man = _prog_manifest()
+        man["schema_version"] = "ulcs_program_manifest_v9"
+        rep = self._run(man)
+        self.assertEqual(rep["verdict"], "RED")
+        self.assertTrue(any("schema" in v for v in rep["violations"]),
+                        msg=rep["violations"])

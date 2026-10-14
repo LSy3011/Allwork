@@ -39,7 +39,7 @@ import ldb_review_case_gen as g2  # noqa: E402
 import stb_solo_case_gen as s1    # noqa: E402
 from unified_lcs_case_gen import (  # noqa: E402
     PROGRAM_MANIFEST_SCHEMA, PROGRAM_MANIFEST_SCHEMA_V2, EXPECT_SCHEMA,
-    LOAD_ROLES, OUTPUT_ROLE, SMC_COUNT,
+    LOAD_ROLES, OUTPUT_ROLE, SMC_COUNT, CHANNEL_STRIDE,
     HBM_REGION_BYTES, HBM_FIRST_BASE, UR_BANKS, UR_BANK_DEPTH, LINE_BYTES,
     chunk_descs, _sha256_file, _read_hex_lines)
 
@@ -214,9 +214,9 @@ class Checker:
                 if len(_read_hex_lines(p)) != fm.get("lines"):
                     self.err(f"IQ 文件行数不符: {p.name}")
 
-    # ③b 指令再发射逐字节比对（v2：en=7 广播；v1：en=0 单 SMC）
+    # ③b 指令再发射逐字节比对（v2：en=7 广播 + intlv=通道步长；v1：en=0/intlv=0）
     def _check_reemit(self, man: dict, stages: list, n_lines: int,
-                      en: int = 0) -> None:
+                      en: int = 0, intlv: int = 0) -> None:
         descs = chunk_descs(n_lines)
         lay = man.get("hbm_layout") or []
         h2d = [e for e in lay if e.get("direction") == "h2d"]
@@ -230,11 +230,11 @@ class Checker:
             axi_all: list[str] = []
             for e in h2d:
                 ls, xs = g2.build_and_emit(descs, e["bank"], 0, e["byte_base"],
-                                           en)
+                                           en, intlv)
                 ldb_all += ls
                 axi_all += xs
             stb, stbaxi = s1.build_and_emit(descs, d2h[0]["bank"], 0,
-                                            d2h[0]["byte_base"], en)
+                                            d2h[0]["byte_base"], en, intlv)
         finally:
             os.chdir(cwd)
         s0 = self.case / "smi_iq_inst" / "stage_0"
@@ -389,6 +389,11 @@ class Checker:
             self.err(f"(M5) partition n_per={n_per}/smc_count="
                      f"{part.get('smc_count')} 与 n_total={n_total} 不一致")
             return self._finish()
+        if part.get("channel_stride") != CHANNEL_STRIDE:
+            self.err(f"(M5) partition.channel_stride="
+                     f"{part.get('channel_stride')!r} != {CHANNEL_STRIDE:#x}"
+                     f"（equal_8smc_v1 绑定：en=7 且步长==RTL 通道跨度）")
+            return self._finish()
         n_lines = n_per // 4
         if man.get("n_lines") != n_lines:
             self.err(f"(M5) manifest n_lines={man.get('n_lines')} != n_per//4="
@@ -406,12 +411,51 @@ class Checker:
         if K is None:
             return self._finish()
         self._check_iq_files(stages)
-        self._check_reemit(man, stages, n_lines, SMC_COUNT - 1)
+        self._check_reemit(man, stages, n_lines, SMC_COUNT - 1,
+                           part.get("channel_stride", 0))
         self._check_m1_enablement(man, stages)
+        self._check_v2_axi_windows(man, stages)
         self._check_v2_preloads(man, n_lines)
         self._check_v2_hbm_golden(man, exp, n_lines)
         self._check_barrier_params(man, exp, stages, n_lines)
         return self._finish()
+
+    # M6 地址窗复核（独立路径：解码 case 内最终指令，非再发射比对）
+    def _check_v2_axi_windows(self, man: dict, stages: list) -> None:
+        """LOAD/STORE 段每条 AXI 指令：GR_INTLV_ADDR 无截断 == 通道步长；
+        逐 SMC addr_k=gr_base+k*intlv 与整段 burst 末地址全落入通道 k 窗。"""
+        import iq_field_diff as IFD  # 局部 import：仅 v2 需要
+        mods = IFD.load_modules_yaml(os.path.join(ROOT, "hw_config",
+                                                  "modules.yaml"))
+        n_st = len(stages)
+        for sid, unit, fn in ((0, "LDB_AXI", "iq_ldb_axi.hex"),
+                              (n_st - 1, "STB_AXI", "iq_stb_axi.hex")):
+            p = self.case / "smi_iq_inst" / f"stage_{sid}" / fn
+            if not p.is_file():
+                self.err(f"(M6) 缺 {p}")
+                continue
+            for idx, row in enumerate(_read_hex_lines(p)):
+                try:
+                    d = IFD.decode(row, unit, mods)
+                except Exception as exc:  # noqa: BLE001——解码失败须响亮入档
+                    self.err(f"(M6) {fn} 行{idx} 解码异常: {exc}")
+                    continue
+                body, hdr = d["body"], d["header"]
+                if body["GR_INTLV_ADDR"] != CHANNEL_STRIDE:
+                    self.err(f"(M6) {fn} 行{idx} GR_INTLV_ADDR="
+                             f"{body['GR_INTLV_ADDR']:#x} != {CHANNEL_STRIDE:#x}"
+                             f"（字段截断或发射失实）")
+                    continue
+                base, brst = body["GR_BASE_ADDR"], body["BRST"]
+                burst = (brst + 1) * LINE_BYTES * (hdr.get("LOOPS", 0) + 1)
+                for k in range(SMC_COUNT):
+                    a0, a1 = base + k * CHANNEL_STRIDE, \
+                             base + k * CHANNEL_STRIDE + burst
+                    lo, hi = k * CHANNEL_STRIDE, (k + 1) * CHANNEL_STRIDE
+                    if not (lo <= a0 and a1 <= hi):
+                        self.err(f"(M6) {fn} 行{idx} SMC{k} 地址窗越界："
+                                 f"[{a0:#x},{a1:#x}) 未落入通道{k} 窗 "
+                                 f"[{lo:#x},{hi:#x})")
 
     # M1 manifest.active_smcs ↔ 解码指令使能
     def _check_m1_enablement(self, man: dict, stages: list) -> None:

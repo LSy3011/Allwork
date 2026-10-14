@@ -93,3 +93,27 @@
 | compare 现状（smc_0 主比对 + smc_1..7 标记泄漏面 + 缺席即 RED 先例） | unified_lcs_compare.py:95-100、:156、:265-283 |
 | 每-SMC 容量校准值 | thesis_experiment_table_20261013.md 主表 |
 | WBARRIER 仅 SMC0 / 屏障位置 | precheck v2 F9；TB :2992、:3421-3440 |
+
+## 6. errata / 执行状态（2026-10-14 A′ 后补记）
+
+1. **intlv 参数化落地（用户裁定 A′）**：`equal_8smc_v1` ⇒ `smc_id_en=7` **且**
+   `GR_INTLV_ADDR = 通道跨度 0x10000000`（**绑定分片模式，不成为全局 en=7 规则**：
+   其他合法布局步长可不同）。机制 `addr_k = gr_base + k·intlv`，atcbmc300 按地址
+   译码选通道（`noc/rtl/include/atcbmc300_config.vh:172-201`）。
+   实现：`unified_lcs_case_gen._partition_transport` / `_check_v2_axi_windows`
+   （40bit 字段无截断 + 逐 SMC 地址窗包含）+ manifest `partition.channel_stride`
+   / `addr_rule` + 校验器 M5/M6 + 单元测试 `TestIntlvBinding`（9 项）。
+2. **首跑 RED 归因勘误**：初判「en=7 广播坍缩/分片设计被推翻」**已撤回**；真因
+   是指令参数 intlv=0（8 个 master 同访问低地址）。归档
+   `verification_v2/artifacts/8smc_first_red_intlv0_20261014/`。预检中「每个 SMC
+   天然连接自己的独立 HBM 通道」表述**撤回**（正确机制见上条）。
+3. **A′ 运行结果**：`8smc_intlv_n128_r2` `outcome=GREEN published=True`
+   （PM-CHK + VCS + 8/8 三区/C-H + 仲裁 v2 逐 SMC/逐通道写账全绿），归档
+   `verification_v2/artifacts/8smc_intlv_n128_20261014/`。**签收上限不变**：只作
+   「正确路由与 8-SMC 数据结果的探索证据」，**不升级**为正式验收。
+4. **§3 C3 路径 B 举证稿已交**：`docs/8smc_last_smc_completion_semantics_20261014.md`
+   （CRD 链结构 = 8 目标 AND 归约 + 运行时脉冲粒度=指令批次），**待用户裁定**；
+   路径 A（TB 加全目标监测）仍未授权。
+5. **§3 C1 部分实现补齐**：程序仲裁器 v2 分支（逐 SMC LOAD 写账、逐通道 STORE
+   写账、未知 schema/`smc_count` 篡改响亮 RED），读探针仅覆盖 SMC0 一点以
+   limitation 显式登记（不冒充逐 SMC 消费证据）。

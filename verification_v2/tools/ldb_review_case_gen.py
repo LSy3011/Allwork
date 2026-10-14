@@ -105,9 +105,15 @@ def parse_desc(s: str) -> dict:
 
 
 def guard(name: str, descs: list[dict], ur_bank: int, ur_offset: int, gr_base: int,
-          smc_id_en: int) -> None:
+          smc_id_en: int, intlv: int = 0) -> None:
     if not (0 <= ur_bank < UR_BANKS):
         raise SystemExit(f"[LDB-GEN-GUARD] ur_bank={ur_bank} 越界 [0,{UR_BANKS})")
+    # gr_intlv_addr 字段 40bit（ldb_ur_axi_conv.v:296 [92:53]）；
+    # 分片语义绑定（en=7 ⇒ intlv=通道步长）在 unified_lcs_case_gen 的
+    # equal_8smc_v1 分支，此处只做字段级合法性（不绑全局 en=7 规则）。
+    if not (0 <= intlv < (1 << 40)) or intlv % LINE_BYTES != 0:
+        raise SystemExit(f"[LDB-GEN-GUARD] intlv={intlv:#x} 越出 40bit 字段或非 "
+                         f"{LINE_BYTES}B 对齐")
     if ur_offset % LINE_BYTES != 0 or not (0 <= ur_offset < UR_BANK_DEPTH * LINE_BYTES):
         raise SystemExit(f"[LDB-GEN-GUARD] ur_offset={ur_offset} 非 16B 对齐或越界")
     if gr_base % LINE_BYTES != 0 or gr_base <= 0:
@@ -148,7 +154,7 @@ def guard(name: str, descs: list[dict], ur_bank: int, ur_offset: int, gr_base: i
 
 # ── 指令发射 ────────────────────────────────────────────────────────────────
 def build_and_emit(descs: list[dict], ur_bank: int, ur_offset: int, gr_base: int,
-                   smc_id_en: int) -> tuple[list[str], list[str]]:
+                   smc_id_en: int, intlv: int = 0) -> tuple[list[str], list[str]]:
     """单条 LDB（CNT=total）+ 每描述符一条 LDBAXI，经真 LIRPacker 发射。
 
     平坦形态（镜像 golden w033）：无 INIT/embed/TERM，全 LOOPS=0（loops>0 时仅
@@ -172,7 +178,7 @@ def build_and_emit(descs: list[dict], ur_bank: int, ur_offset: int, gr_base: int
             header=SMIHeader(**{"inc": (brst + 1) * LINE_BYTES, "vld": 1,
                                 **({"loops": loops} if loops else {})}),
             payload={"VALID": 1, "first_byte_strb": 0, "last_byte_strb": 0, "brst": brst,
-                     "gr_base_addr": axi_addr, "gr_intlv_addr": 0, "inst_id": 0,
+                     "gr_base_addr": axi_addr, "gr_intlv_addr": intlv, "inst_id": 0,
                      "smc_id_en": smc_id_en, "tid": TID}))
         axi_addr += lines * LINE_BYTES
 
