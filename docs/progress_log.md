@@ -1539,3 +1539,22 @@
 - 收口口径：保留正常运行、全目标监测与门控负控证据；**非对称延迟下恢复与
   保持力未验证**；S1（bmc_ds{2+k}_bready）留作独立诊断候选、论证先行，
   不阻塞主线。审计全文 `docs/pathA_s2_injection_audit_20261015.md`。
+
+## 2026-10-15（续）性能主线·手写 r2 对照侧 VCS 复跑取数
+
+- **复现**：mul_scalar llama r2（8 SMC×255 词×5 chunk）主线 TB（3324a33b 未动）
+  复跑 5/5：runner COMPARE 8/8×5、与 09-04 封存哈希清单逐字节一致（216/216×5）、
+  verify_ddr 8/8×5；T_total_sim 恒 2661（数据无关控制流确定性）。
+- **重大陷阱登记**：主线 TB 从全局 `data_engine/sram/memory_init{1..8}.hex` 预载
+  HBM、不读 case 自带 hbm_data/，裸运行器无 staging——首轮直跑吃到 m3lite
+  残留致 8/8 FAIL（结果恰 ×1.25）而 $finish 拍不变（控制流与数据无关）。
+  处置=跑前 staging + 跑后快照恢复（已核验）；防线脚本化留裁定。
+- **取数**（perf_marker_extract.py 新工具；13 区间可落地子集）：COMPUTE 段
+  WBARRIER 门控实测 T_exec_obs=275（trigger→末笔 UR 落位上界；waited=269 真实
+  等待），IQ 装载 57 行×13 拍=741 为固定开销、执行窗随 n 增长；R2 门控不改
+  数据面、记账开销 +3 拍。trig 锚=触发写自身 B 握手行（双侧夹逼）。
+- **工具勘误**：提取器初版 ps→拍 ×10 换算错 + TRIGGER 锚 ub 近似稀疏段高估
+  276 拍，首轮即被单调性护栏拦截，已修（见报告 §5）。
+- 报告 `docs/perf_handwritten_r2_vcs_rerun_20261015.md`；归档
+  `artifacts/perf_hw_r2_vcs_rerun_20261015/`（51 项 sha256）。下一步=手写裁小
+  +编译器同规模配对对照（selection §3）。
