@@ -499,3 +499,28 @@ v1 草案的「信用无 CSR 可观测 → 固定等待唯一可行」论断被�
       新报警、合法反压与正常运行不误报；历史长时间死锁证据（round6 FSDB、
       bpdbg 归档）原样冻结保留。
     - **选项 C（RTL fail-open）未选**，理由在收口文档 §7 记录。
+11. **us3bp「合法反压恢复」结论降级撤回（2026-10-15 用户裁定；详
+    `docs/pathA_s2_injection_audit_20261015.md`）**：
+    - **机理证伪**：errata ⑧ 定「合法 B 反压注入点 = master 源头」的机制表述
+      （「使矩阵 mst_bready=0 → pending 正常捕获 → ds_bready=0 双方同视图」）
+      经 RTL 复核**在引擎侧不成立**：DW_axi_gm_core（STB/LDB 共用 master 核）
+      的 `bready`/`rready` 为纯输出门（:510/:511），respb 接收判据 = 内部
+      `gready`（:455/:462/:467/:508），**全核不回读自身 ready 输出网**；STB 侧
+      `stb_top.v:222 .mready(1'b1)` ⇒ gready≡1。force `de_stb_bready[k]`
+      期间矩阵 us 端口视图确被阻塞（bvalid 合规挂起），但 SMC 核按内部节奏
+      照常消费——矩阵侧与引擎侧**视图分裂**。
+    - **降级口径（用户原文）**：us3bp（n=150，TB `355d48d4…`，冻结归档
+      `verification_v2/artifacts/m3lite_gate3_us3bp_20261008/`）——
+      「该运行结果正确；已有标志不足以证明内部真实握手被阻塞，因此不计入
+      合法反压恢复证据。」其四个标志（inject/risen/release/drained）全在
+      被 force 的线上，证得的只是**线握手被推迟、矩阵 us 口 bvalid 保持合规、
+      释放后干净排空**（此点仍有效）。用户此前据此所称「合法源端注入已验证」
+      一并撤回。
+    - **不受影响**：errata ⑧ 前半「边界线 force 已证死」（桥 FSM 自读输出线
+      + 孤儿 B 机制）、「尚无证据要求修改矩阵 RTL」、以及 10-08 注记「S4
+      barrier bresp tap 在 ds2 边界、观测不到该 stall」均维持有效（后者与
+      本次发现互为印证）。
+    - **连带作废**：路径 A 步骤二注入器曾引 errata ⑧ 把 master 侧 READY
+      force 当作已证合法点——同据此条作废（其 stb_b 惰性 / ldb_r 污染实证
+      与机制闭合见审计文档 §B/§C）。
+    - 本 ADR 原文与 us3bp 冻结归档不改动，以本 errata 为准。

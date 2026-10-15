@@ -59,9 +59,13 @@ def build_case(tmp_path, *, mode="positive", plant=None, merged=False,
     store=True：步骤④三段形态（expect 增 store/wbarrier/s4barrier 段，
     增 hbm_write_trace/stb_ur_read_trace/iq_issue_trace 与 GATE4 标记）。
     fi=N：故障注入标签（expect.fault_injection.min_waited=N）+ BP 标记。
-    fi_us3=N：master 侧合法注入形态（ADR-060 errata 8，2026-10-08）——
+    fi_us3=N：master 侧注入形态（ADR-060 errata 8，2026-10-08）——
     expect 同样带 fault_injection，但写 [GATE4][US3BP] 标记族
     （inject<bvalid_risen<release<=drained 为绿基线）；
+    【勘误 2026-10-15，ADR-060 errata 11】us3bp「合法反压恢复已证」结论已降级：
+    该运行结果正确，但既有标志不足以证明内部真实握手被阻塞，不计入合法反压
+    恢复证据。本组用例仍测比较器对该标记族语法的判定（线级时序判据本身不变），
+    不再承载「合法反压恢复」语义。
     plant='us3_nodrain' 缺 drained / 'us3_leak' drained<release /
     'us3_risen_late' risen>release。
     fatal='wbarrier'|'s4barrier'|'respacct'：fatal_expected 形态 sim.log
@@ -492,8 +496,10 @@ def test_g3_red_bp_waited_short(tmp_path):
 
 
 def test_g3_store_us3bp_delay_recover_green(tmp_path):
-    """master 侧合法注入（ADR-060 errata 8）：inject<risen<release<=drained
-    且 delay>0 → US3BP 语义全过；S4-waited 判据不适用（note 不门控）→ GREEN。"""
+    """master 侧注入（ADR-060 errata 8；语义经 errata 11 降级，见模块头注释）：
+    inject<risen<release<=drained 且 delay>0 → US3BP 线级标记判据全过；
+    S4-waited 判据不适用（note 不门控）→ GREEN。
+    注：此 GREEN 仅判线级标记形态，不构成「合法反压恢复」证据（2026-10-15 裁定）。"""
     case, sbx = build_case(tmp_path, store=True, fi_us3=150)
     assert _run(case, sbx, "positive") == 0
 

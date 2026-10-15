@@ -617,6 +617,9 @@
   措辞裁定对称保持：不外推「硬件已证健壮」。n=400 腿 $finish 早于预定 release
   的假绿已分账（教训：注入窗必须短于运行自然尾部）。比对器 us3_mode 分支 +4 测试；
   pytest 530。TB 指纹 `355d48d4…52a54`；归档 `artifacts/m3lite_gate3_us3bp_20261008/`。
+  【勘误 2026-10-15：本条「合法反压恢复已证」结论已按用户裁定降级——运行结果
+  正确，但既有标志不足以证明内部真实握手被阻塞，不计入合法反压恢复证据；
+  详见 ADR-060 errata 11 与文末 2026-10-15 条。】
 - **F6 指代钉死**：F6 本义 = LSU 完成竞态修复（RECON §4 A/B，IQ24/25/26/27/92
   影响面，**仍待拟**）；矩阵死锁为任务 2 遗留的另一条线。
 - **F6 提案（矩阵线）已起草待裁决**：`docs/adr/F6-proposal-ds2-bresp-forward-veto.md`。
@@ -986,7 +989,9 @@
   M3-lite 五腿 ALL-LEGS-AS-EXPECTED 且与 stock 逐拍一致（RESPACCT
   @12275000ps、to_wb @9495000ps、bp red=22、负控 red=6 全同值）；
   第六腿 us3bp n=150 GREEN——注入链逐拍一致（inject1172<risen1192<
-  release1321≤drained1321，delay=129），**STORE 完成时序修正显形**：
+  release1321≤drained1321，delay=129），**STORE 完成时序修正显形**
+  【us3bp 腿的「合法反压恢复」语义已于 2026-10-15 降级，见 ADR-060
+  errata 11；本条其余结论（逐拍一致性、STORE 完成时序修正）不受影响】：
   stage_2 INTR stock@1159≺真信用@1184/1188（legacy 竞态真实路径实况）
   → p2b@1191=末信用+3（契约时序），数据面零代价。归档
   f6_realunit_regression_20261010（29 项 sha256）；F6 文档 §15 落账。
@@ -1515,3 +1520,22 @@
   起步（每 SMC 1020 超首轮单段范围），先小规模、后分段/多 chunk。
 - pytest 578 passed 基线持平；develop 提交不推送。步②（分片配置/manifest/全目标
   完成条件）为下一任务。
+
+## 2026-10-15 路径 A 步骤二收口（兜底口径）+ us3bp 结论降级
+
+- **步骤二终态**：门控存在性分支修复（计数类条件误入存在性检查→bresp_min=99
+  被误判「缺目标」；修为事件标记-only，计数归等待环）；三用例复跑=④真 TIMEOUT
+  RED（2000 拍满超时）/⑤存在性 RED/①GREEN waited=0。归档
+  `artifacts/pathA_s2_gatefix_20261015/`（8 项 sha256）。
+- **注入前提证伪并判废**：DW_axi_gm_core（STB/LDB 共用）不回读自身 ready
+  输出网（内部 gready 接收；stb_top mready 绑 1）⇒ master 侧 READY force 在
+  本 8-SMC 配置必为分裂视图——stb_b 惰性（门控 tap 在 ds 侧，ch3 B 与正向
+  同拍、trace 逐比特一致）、ldb_r 污染（R 数据拍重复入 respb，smc_3 FAIL；
+  非合法运行下 DUT 缺陷，不外推硬件）。
+- **历史订正（用户裁定，有界）**：us3bp「合法反压恢复已证」降级——
+  「该运行结果正确；已有标志不足以证明内部真实握手被阻塞，因此不计入合法
+  反压恢复证据」；「合法源端注入已验证」一并撤回。勘误落 ADR-060 errata ⑪ /
+  task2-closure 勘误节 / F6 文档勘误节 / 本条；冻结归档不覆盖。
+- 收口口径：保留正常运行、全目标监测与门控负控证据；**非对称延迟下恢复与
+  保持力未验证**；S1（bmc_ds{2+k}_bready）留作独立诊断候选、论证先行，
+  不阻塞主线。审计全文 `docs/pathA_s2_injection_audit_20261015.md`。

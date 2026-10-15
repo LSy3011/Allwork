@@ -108,7 +108,7 @@ REPORT_SCHEMA = "adr056_f3_run_report_v1"
 CONFIG_KEYS = frozenset([
     "op_yaml", "n_rows", "domain_mode", "hw_config", "suite", "sandbox",
     "vcs_timeout_s", "case_prefix", "run_vcs", "runs_root", "releases_root",
-    "run_id", "partition",
+    "run_id", "partition", "extra_plusargs",
 ])
 DOMAIN_MODES = ("v1_admission", "frozen_regression")
 # frozen_regression 下允许放行（记录为设计内证据）的静态保守拒类别
@@ -197,6 +197,16 @@ class RunConfig:
             raw.get("releases_root", REPO_ROOT / "verification_v2" / "artifacts" / "releases"))).resolve()
         self.run_id = str(raw.get("run_id") or self._default_run_id())
 
+        # 附加仿真 plusargs（默认空 = 与既有运行逐比特同形；仅供 TB 侧已声明的
+        # 显式实验开关使用，如路径 A 的全目标门控 +PA_FULLTARGET=1 / 延迟注入
+        # +PA_DLY_*）。逐项校验前缀，避免误传非 plusarg 词被 runner 分词。
+        extra = raw.get("extra_plusargs", []) or []
+        if not isinstance(extra, list) or any(
+                (not isinstance(x, str)) or (not x.startswith("+")) for x in extra):
+            raise ConfigInvalid(
+                f"extra_plusargs 须为以 '+' 开头的字符串列表: {extra!r}")
+        self.extra_plusargs = list(extra)
+
         if self.run_vcs:
             runner_sh = self.sandbox / "sim_multi_stage" / "run_sim_aiacc_top_f_multi_stage.sh"
             if not runner_sh.is_file():
@@ -215,6 +225,7 @@ class RunConfig:
             "vcs_timeout_s": self.vcs_timeout_s, "case_prefix": self.case_prefix,
             "run_vcs": self.run_vcs, "runs_root": str(self.runs_root),
             "releases_root": str(self.releases_root), "run_id": self.run_id,
+            "extra_plusargs": list(self.extra_plusargs),
         }
 
     def digest(self) -> str:

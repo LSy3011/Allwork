@@ -8,10 +8,12 @@
 > 由用户裁定。路径 A（TB 加全目标监测，原树 TB 改动）仍未获授权。
 > 日期：2026-10-14。载体 run：`8smc_intlv_n128_r2`（case
 > `ulcs8smc2r2_scale_sum_8smc_intlv_n128_r2_n16`，run_dir
-> `build/v1_runs/scale_sum/8smc_intlv_n128_r2/n16/`，`outcome=GREEN`）；
+> `build/v1_runs/scale_sum/8smc_intlv_n128_r2/n16/`，`outcome=GREEN`）。
 > 其前身 run1（`8smc_intlv_n128`）与 r2 的 case 载荷 `*.hex` 228/228 逐字节
-> 相同，故本文引用的周期级观测两 run 通用。归档：
-> `verification_v2/artifacts/8smc_intlv_n128_20261014/`。
+> 相同——**该事实只证指令与数据载荷同一，不证两次运行逐拍同一**；**本文引用
+> 的全部周期级观测一律取自 r2 自身日志**（`r2/evidence/n16_sim_log.log`、
+> `n16_ur_write_trace.log`、`n16_hbm_write_trace.log` 等，已随归档冻结）。
+> 归档：`verification_v2/artifacts/8smc_intlv_n128_20261014/`。
 
 ## 0. 结论（分档）
 

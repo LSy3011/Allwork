@@ -158,6 +158,11 @@ class UnifiedOrchestrator(Orchestrator):
                     f" +G3_S4_BARRIER=1 +G3_S4_ADDR0={s4['addr0']}"
                     f" +G3_S4_WRITES={s4['writes']} +G3_S4_BRESP={s4['bresp']}"
                     f" +G3_S4_TIMEOUT={s4['timeout_cycles']}")
+            # 路径 A（2026-10-14）：配置可选的附加 plusargs（默认空 ⇒ 既有运行
+            # 逐比特同形）。由 run_v1_verify.RunConfig 校验为 '+' 前缀字符串列表，
+            # 仅 TB 侧已声明的显式实验开关（全目标门控 / 延迟注入 / 负控）。
+            for _pa in getattr(self.cfg, "extra_plusargs", []) or []:
+                plus += f" {_pa}"
             runner = self.cfg.sandbox / "sim_multi_stage" \
                 / "run_sim_aiacc_top_f_multi_stage.sh"
             stdout_path = sctx.ev(f"n{sctx.n}_vcs_runner_stdout.log")
@@ -208,7 +213,13 @@ class UnifiedOrchestrator(Orchestrator):
         out = super()._collect_vcs_evidence(sctx, runner_stdout)
         if sctx.case_root and sctx.case_root.is_dir():
             for name in ("ur_read_trace.log", "hbm_write_trace.log",
-                         "stb_ur_read_trace.log"):
+                         "stb_ur_read_trace.log",
+                         # 路径 A（2026-10-14）全目标观测日志：逐 SMC 读/写、
+                         # 逐位置信用链、逐通道写响应。缺席即缺席（is_file 判）
+                         # ——原树 TB 无这些文件时行为不变。
+                         "pa_ur_wr_trace.log", "pa_ur_rd_trace.log",
+                         "pa_stb_rd_trace.log", "pa_crd_trace.log",
+                         "pa_bresp_trace.log"):
                 src = sctx.case_root / name
                 if src.is_file():
                     dst = sctx.ev(f"n{sctx.n}_{name}")
