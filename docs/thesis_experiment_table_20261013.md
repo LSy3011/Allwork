@@ -1,4 +1,4 @@
-# 论文实验表：编译器产物验证结果统一对比（数据截止 2026-10-13）
+# 论文实验表：编译器产物验证结果统一对比（数据截止 2026-10-13；§7 增补 2026-10-18）
 
 > 用途：毕业论文实验章节的统一对比表底稿。每个数字都带锚（run ID / release /
 > 归档 sha256），口径分级标签【实测】【源码】【归档】【推断】【未校准】不混称；
@@ -100,3 +100,56 @@ II 实证值集 {2,3,6}（V1 链）；多槽谱系三档（单槽/双槽单单�
 | 板端首例 | artifacts/onboard_scale_sum_n16_20261013/（SHA256SUMS）；包 r3 tarball 22bfad6a… |
 | mul 单列证据 | memory compiler-rtovr-dense-vs-sparse-mismatch（ADR-054 阶段2-M1 条） |
 | pytest 基线 | 578 passed（7 skipped，11 xfailed，148 subtests）@ 2026-10-13 |
+| §7 公平对照（组合程序） | docs/fair_pair_scalar_mul_64w_design_20261018.md；artifacts/fair_pair_smul64w_20261018/（SHA256SUMS 15 项）；commit d59111a |
+
+## 7. 公平对照：手写 vs 编译器（组合程序，2026-10-18，commit d59111a）
+
+**回答的问题**：在相同输入字节、相同搬运框架（LOAD/STORE 三段）、相同
+RTL/TB 环境下，编译器生成程序能否正确运行，以及额外成本落在哪里。
+**口径（用户裁定置顶）**：这是公平对照实验的**组合程序**，不是新增的
+公式驱动统一 LCS 能力；不进入 §1 主表（未经准入/容量校准/统一 LCS 链）。
+
+- 任务：`y_i = fp32(α·x_i)`，α=2.5 四 lane 同值（单一标量乘前提写入双方
+  输入规格）；64 UR 词/SMC（256 元素）× 8 SMC × fp32 × seed=20261018。
+- 框架：手写生成器产 LOAD/STORE/数据/golden，两变体逐字节同一
+  （meta/hbm_data/ur_data/golden/stage_0+2 全 hex IDENTICAL 审计）；
+  唯一差异面 = stage_1 COMPUTE 指令集 + 其 data_list 条目。
+  α 按 64 词**双侧共同整载**——属**保守的共同搬运框架**（证据库无单词
+  LOAD 描述符已验证先例），**不声称标量输入搬运已优化**。
+
+**正确性（先决，两链独立全绿）**：COMPARE 逐 SMC UR bank2（256 行含零尾）
+**8/8 零 SKIP ×2**；verify_ddr HBM 窗 8/8 ×2；独立 IEEE 参考（先与手写
+生成器 golden 逐位互校）8/8 ×2；非目标写检查零改写 ×2；TB 3324a33b 未漂移。
+
+**取数（TB 执行行为层，scoped 事件对照）**：
+
+| 指标 | A 手写 | B 编译器 | Δ |
+|---|---|---|---|
+| COMPUTE 逻辑指令行（hex 行/13 队列） | 28 | 39 | +11（+39.3%） |
+| COMPUTE 指令装载（AXI beats） | 39 | 54 | +15 beats |
+| 装载成本（13 拍/beat） | 507 拍 | 702 拍 | **+195 拍 = (54−39)×13** |
+| stage_1 span | 729 | 924 | +195（+26.7%） |
+| 完成观测窗口（触发→done，**含轮询与应答的上界代理**） | 144 拍 | 144 拍 | 0 |
+| T_total（stage_0 BEGIN→stage_2 done） | 1713 | 1908 | +195（+11.4%） |
+| LOAD/STORE 共享段（span/load/trig→done） | 实测同值 | 同左 | 0 |
+
+表述纪律（用户 2026-10-18 收紧）：
+- 写「**完成观测窗口相同**」，**不写「计算周期相同」**——该窗口含轮询与
+  应答，可能掩盖较小的执行差异；
+- **逻辑指令行（28→39）与装载 beat（39→54）分列**；195 拍写为
+  (54−39)×13=195，不表述为「每条逻辑指令占一个 beat」；
+- 段分解 `span = load + cfg(78) + trig→done` 四段算术闭合；
+- Δ 全部位于 COMPUTE 段指令装载面（TB AXI 装载行为层）：可归因**指令
+  足迹**，不归因硬件计算能力（段拍 ~95–97% 系 TB 装载，perf §5）；
+- 不套 v3 unroll 常数，不宣称 flat 逐拍契约；限本配置本规模，不外推容量。
+
+锚：设计 `docs/fair_pair_scalar_mul_64w_design_20261018.md`；归档
+`verification_v2/artifacts/fair_pair_smul64w_20261018/`（15 项 sha256：
+sim 日志/perf JSON/独立参考/verify_ddr/TB sha）。
+静态拆解（四步序②，2026-10-18）：
+`docs/fair_pair_smul64w_instr_decomposition_20261018.md`——Δ11 行**全部
+属 INIT 角色行**（编译器 13 队列统一 [INIT,BODY,TERM] vs 手写 11 队列
+[BODY′,TERM] 无独立 INIT；rtovr-35/ur-w0 两侧同 3 行）；无延迟填充行、
+无额外终止行（TERM 12/13 逐字节一致）；Δ15 beats = 行差 × 每行 beat 数
+（字节落位函数，两侧同队列相同）：7×1+4×2+2×0=15，逐队列算术闭合；
+本轮只归因不优化。
