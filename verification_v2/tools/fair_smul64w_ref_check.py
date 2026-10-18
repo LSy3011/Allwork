@@ -11,19 +11,20 @@
 #   α @行256..319（byte_base 4096，4 lane 同值）、y 输出窗 @行512..575（byte_base 8192）。
 #
 # 用法：
-#   fair_smul64w_ref_check.py --pre  <case_dir>   # golden 一致性：IEEE(x·α)==golden bank2（8/8）+零尾
-#   fair_smul64w_ref_check.py --post <case_dir>   # 运行后：hbm_result 窗内==IEEE 参考、窗外==staged 镜像
+#   fair_smul64w_ref_check.py --pre  <case_dir> [--words 64]   # golden 一致性：IEEE(x·α)==golden bank2（8/8）+零尾
+#   fair_smul64w_ref_check.py --post <case_dir> [--words 64]   # 运行后：hbm_result 窗内==IEEE 参考、窗外==staged 镜像
 # 退出码：0=全过；1=任一失败；2=用法/文件缺失。
+# --words：每 SMC 词数（64w 对照=64；255w 对照=255），默认 64 保持 64w 归档可复验。
 
 import argparse
 import struct
 import sys
 import os
 
-WORDS = 64          # x/y 各 64 词
+WORDS = 64          # x/y 词数（--words 覆盖）
 ALPHA_LINE0 = 256   # byte_base 4096 / 16
 OUT_LINE0 = 512     # byte_base 8192 / 16
-UR_DEPTH = 256      # golden bank2 总行数（64 有效 + 零尾）
+UR_DEPTH = 256      # golden bank2 总行数（有效 + 零尾）
 
 
 def read_hex_lines(path):
@@ -112,11 +113,15 @@ def check_post(case):
 
 
 def main():
+    global WORDS
     ap = argparse.ArgumentParser()
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--post", action="store_true")
+    ap.add_argument("--words", type=int, default=64,
+                    help="每 SMC 词数（64w 对照=64，255w 对照=255）")
     ap.add_argument("case")
     a = ap.parse_args()
+    WORDS = a.words
     if not (a.pre or a.post) or (a.pre and a.post):
         print("用法: --pre|--post <case_dir>")
         return 2

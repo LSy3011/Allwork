@@ -101,6 +101,7 @@ II 实证值集 {2,3,6}（V1 链）；多槽谱系三档（单槽/双槽单单�
 | mul 单列证据 | memory compiler-rtovr-dense-vs-sparse-mismatch（ADR-054 阶段2-M1 条） |
 | pytest 基线 | 578 passed（7 skipped，11 xfailed，148 subtests）@ 2026-10-13 |
 | §7 公平对照（组合程序） | docs/fair_pair_scalar_mul_64w_design_20261018.md；artifacts/fair_pair_smul64w_20261018/（SHA256SUMS 15 项）；commit d59111a |
+| §8 公平对照第二规模 | docs/fair_pair_smul255w_precheck_20261018.md；artifacts/fair_pair_smul255w_20261018/（SHA256SUMS 15 项） |
 
 ## 7. 公平对照：手写 vs 编译器（组合程序，2026-10-18，commit d59111a）
 
@@ -153,3 +154,37 @@ sim 日志/perf JSON/独立参考/verify_ddr/TB sha）。
 无额外终止行（TERM 12/13 逐字节一致）；Δ15 beats = 行差 × 每行 beat 数
 （字节落位函数，两侧同队列相同）：7×1+4×2+2×0=15，逐队列算术闭合；
 本轮只归因不优化。
+
+## 8. 公平对照第二规模：255 词/SMC（1020 元素，2026-10-18）
+
+四步序③④：预检 `docs/fair_pair_smul255w_precheck_20261018.md`
+（双方支持 255w、**准入零放宽**——手写 r2 VCS 先例；编译器
+`--n-rows 1020` e2e 全绿、BODY LOOPS=254 实发、字段 10bit 合法；
+yaml 零改动，length=声明的 UR word 分配上界非元素数）→ 同一公平条件
+正式配对（同一生成器框架、α=2.5 同一补丁-还原序、同一 seed、TB 同 sha）。
+
+**正确性（先决，两链独立全绿）**：COMPARE **8/8 零 SKIP ×2**；
+verify_ddr 255 词窗 8/8 ×2；独立 IEEE 参考（--words 255）8/8 ×2；
+非目标写零 ×2。**编译器 flat 形态 VCS 实证规模由此前 LOOPS=63 扩至
+LOOPS=254（首上 RTL 即 8/8 零 SKIP）**。
+
+**取数与跨规模观测**：
+
+| 量 | 64w A→B | 255w A→B |
+|---|---|---|
+| COMPUTE 逻辑行 | 28→39 | 28→39（**规模不变**） |
+| COMPUTE 装载 beats（×13 拍） | 39→54 | 39→54（**规模不变**） |
+| 装载成本差 | +195 拍 | +195 拍（**绝对值恒定**） |
+| 完成观测窗口（上界代理） | 144=144 | 334=334（两侧同步 +190） |
+| T_total | 1713→1908（+11.4%） | 2661→2856（**+7.3%**） |
+
+核心观测：两侧 COMPUTE 均为批量/平坦形态，指令足迹与规模无关 ⇒
+装载差额绝对值恒定 +195 拍，**相对占比随规模下降（11.4%→7.3%）**；
+共享段同规模内两侧逐拍一致（公平性成立），其跨规模自身差异属框架
+生成器合法发射差异，不入 A/B 对照。
+⚠ 两规模不足以确立任意规模恒定性（容量墙形态切换可能改变结论，
+两规模均远在墙下）。表述纪律同 §7（观测窗口≠计算周期；行与 beat
+分列；组合程序口径，不入 §1 主表）。
+
+锚：归档 `verification_v2/artifacts/fair_pair_smul255w_20261018/`
+（SHA256SUMS 15 项）；预检 `docs/fair_pair_smul255w_precheck_20261018.md`。
