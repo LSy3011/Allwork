@@ -1627,3 +1627,34 @@
 - 测试：语料快照守卫（test_admission_l1_l2 TestYamlCorpusCompat）按设计
   程序更新（40→41 + 沿革注释；scalar_mul 无 flag、flagged 名单不变，
   定向 30/30）。
+
+## 2026-10-18 公平对照组合程序（C 主线）构建+验收+取数 DONE
+
+- **设计先行**：`docs/fair_pair_scalar_mul_64w_design_20261018.md`（C 口径
+  置顶：组合程序非新增统一 LCS 能力；六指令逐条映射）。
+- **α 装载裁定（指令 3 取证）**：证据库无单词 LOAD 描述符先例
+  （手写 r2 255w 整载；统一 LCS n16 `program_manifest.hbm_layout` α=4 行
+  =n_lines 整载复制）⇒ 双侧共同 64 词整载，公平性由框架同一文件构造保证。
+- **框架构建**：手写生成器 argv 传 64（零生成器补丁用于词数）；α=2.5 经
+  单行补丁（`scalar_value_{1.25f→2.5f}`）+重编译+生成+**即还原**（sha 核，
+  树零漂移）；scratch 目录隔离全局 sram（生成器 argv[2] 污染源封堵）；
+  ur_data 全零 Phase A 初始化 ⇒ 真 LOAD→COMPUTE→STORE。
+- **前科坐实并关闭**：步② compiler_scalar_mul「COMPARE PASSED」实为
+  smc_0 单侧（total_smc_runs=1）；本组合两变体均 total_smc_runs=8。
+- **变体 B 组装**：yaml α bank 3→1（配置-only）→ e2e GREEN → 产物变化面
+  8/35（iq_ur-r1 等）→ compiler_scalar_mul_b1 步②复验 PASSED → 换 stage_1
+  十三对（队列槽位键名等价：68_vin0≡vin0→inst_mem_vin0）。
+- **冻结面审计**：meta/hbm_data/ur_data/golden/stage_0+2 全 hex 两变体
+  IDENTICAL；txt/data_list/stages.md 仅 case 名字符串（去名 NAME-ONLY）。
+- **指令 4 两链全绿**：COMPARE 8/8 零 SKIP ×2、verify_ddr 8/8 ×2、
+  独立参考（fair_smul64w_ref_check.py：BE u32 文本序实证）pre 与生成器
+  golden 逐位互校 + post HBM 窗==IEEE 参考 ×2、非目标写零（[0,512) 不动
+  +[576,1M) 全零）×2、staged 恢复校验 ×2；TB 3324a33b 未漂移。
+- **取数（指令 5/6，scoped 口径）**：COMPUTE 28 vs 39 hex 行（+39.3%）、
+  装载 39 vs 54 beats（+195 拍=Δ 全部，段分解 span=load+cfg+trig→done
+  算术闭合）、trig→done 两侧同值 144 拍（上界代理非纯计算周期）、
+  共享段实测同值、T_total 1713 vs 1908（+11.4%）；不套 v3 unroll 常数、
+  不归因硬件计算能力（perf §5 TB 装载主导）。
+- 归档 `verification_v2/artifacts/fair_pair_smul64w_20261018/`（15 项 sha256）。
+- 教训登记：write_hex_file 按 u32 值 MSB 优先打印（独立参考初版 LE 假设
+  FAIL 后实证修正）；perf_marker_extract --json 需带输出路径参数。

@@ -14,10 +14,14 @@ name: "scalar_mul"
 #   一致（本算子上该标记为空操作，故不声明）。
 # test_data 安全域同 scale_sum §C.4-2：x∈[1,2]、α=2.5 → y∈[2.5,5]，
 #   ⊥ 亚正规带且 ⊥ ±FLT_MAX。
+# 2026-10-18 bank 重对齐（配置-only）：α bank 3→1，对齐公平对照组合框架的 UR 布局
+#   （手写框架 x→bank0 / α→bank1 / y→bank2，见
+#   docs/fair_pair_scalar_mul_64w_design_20261018.md §2）；bank3 版为此前独立
+#   UR case（compiler_scalar_mul，步② GREEN）所用，已归档。
 formula: "alpha * x"
 tensors:
   x: { bank: 0, role: "input", offset: 0, length: 256 }
-  alpha: { bank: 3, role: "param", offset: 0, length: 256 } # 标量系数（stride=0 驻留，消耗 1 word）
+  alpha: { bank: 1, role: "param", offset: 0, length: 256 } # 标量系数（stride=0 驻留，消耗 1 word）
   constants: { bank: 7, role: "constant", offset: 0, length: 256 }
   y: { bank: 2, role: "output", offset: 0, length: 256 }
 test_data:
