@@ -1544,11 +1544,16 @@
 
 - **复现**：mul_scalar llama r2（8 SMC×255 词×5 chunk）主线 TB（3324a33b 未动）
   复跑 5/5：runner COMPARE 8/8×5、与 09-04 封存哈希清单逐字节一致（216/216×5）、
-  verify_ddr 8/8×5；T_total_sim 恒 2661（数据无关控制流确定性）。
+  verify_ddr 8/8×5；T_total_sim 恒 2661。**【勘误，2026-10-15 用户裁定】**
+  原括注「数据无关控制流确定性」越界：该一致性只证明**这些输入下**观测
+  总周期一致，不证明任意输入下控制流与数据无关；下同。
 - **重大陷阱登记**：主线 TB 从全局 `data_engine/sram/memory_init{1..8}.hex` 预载
   HBM、不读 case 自带 hbm_data/，裸运行器无 staging——首轮直跑吃到 m3lite
-  残留致 8/8 FAIL（结果恰 ×1.25）而 $finish 拍不变（控制流与数据无关）。
-  处置=跑前 staging + 跑后快照恢复（已核验）；防线脚本化留裁定。
+  残留致 8/8 FAIL（结果恰 ×1.25）而 $finish 拍不变——仅说明本 case 指令
+  发射不依赖 HBM 数据值这一有限事实（勘误口径同上条）。
+  处置=跑前 staging + 跑后快照恢复（已核验）；防线脚本化**已获用户批准**
+  （2026-10-15：staging 纳入受控运行入口，独占锁+备份+装载+逐文件校验+
+  仿真比较+成败皆恢复校验，缺输入/校验失败/恢复失败必须响亮报错）。
 - **取数**（perf_marker_extract.py 新工具；13 区间可落地子集）：COMPUTE 段
   WBARRIER 门控实测 T_exec_obs=275（trigger→末笔 UR 落位上界；waited=269 真实
   等待），IQ 装载 57 行×13 拍=741 为固定开销、执行窗随 n 增长；R2 门控不改
@@ -1558,3 +1563,37 @@
 - 报告 `docs/perf_handwritten_r2_vcs_rerun_20261015.md`；归档
   `artifacts/perf_hw_r2_vcs_rerun_20261015/`（51 项 sha256）。下一步=手写裁小
   +编译器同规模配对对照（selection §3）。
+
+## 2026-10-15（续二）staging 受控入口落地 + 反例固定 + 标量乘配置侦察
+
+- **措辞收紧落地**（用户裁定）：perf 报告 §3 / 本条上一段 / 记忆三处
+  「数据无关控制流确定性」改为「仅证明这些输入下观测总周期一致」；
+  归档 README 以勘误为准，冻结件不覆盖。
+- **受控入口落地**（用户批准的固定序逐条实现）：
+  `verification_v2/tools/run_multi_stage_staged.sh` +
+  `hbm_preload.py` 新增 backup/stage/restore-backup 三子命令——flock
+  独占（与 m3lite 线同一把 `.m3lite_gate3.flock`，用户裁定所有相关运行器
+  共用同一共享资源锁）→ 备份（SHA256SUMS）→ 装载（8 源齐备才写=不半装载）
+  → 逐文件校验 → 裸运行器仿真比较 → 无论成败恢复并校验。退出码分档
+  0=GREEN / 2=用法缺前提 / 3=缺输入 / 4=装载校验失败 / 5=仿真或比较
+  FAIL / 6=备份失败 / 7=恢复失败（最重，备份留存人工处置，绝不可静默
+  继续）；trap 兜底恢复；备份成功才置 NEED_RESTORE。
+- **测试 14 项**（`tests/unit/test_run_multi_stage_staged.py`）：缺输入拒跑
+  不污染 / 运行器失败仍恢复 / 备份被污染拒恢复 exit 7 且响亮 / 共享锁
+  阻塞序列化 / **执行位防呆**（实战首验 exit=126 教训：Write 建脚本缺 +x，
+  测试用 `bash <path>` 调发现不了 → 补断言）。全量 pytest 650 passed
+  （/tmp/pytest_full_20261018.log，未归档）。
+- **反例固定**（用户令保留）：`artifacts/hbm_staging_counterexample_20261015/`
+  （7 项 sha256）——确定性复现的污染运行（exit=1 COMPARE FAILED、
+  $finish 与正确运行同拍、32/216 FAILED）+ 入口实战首验 dogfood
+  GREEN 全链日志（含跑后 216/216、全局 8/8 原样归还）。
+- **标量乘配置侦察**（用户令：新增配置不新增算子名称特判；先核对手写
+  实现实际语义）：手写 `mul_scalar_op_ur_inst.cpp:13-21` 实证 port0=x 流式 /
+  **port1=α 固定地址 stride=0（原注释 "fixed address (true scalar
+  semantics)"）**、4 lane fp32、golden 读 `scalar[i%4]`；编译器侧 scale_sum
+  已有 `role:"param"` 同机制（ADR-056/061 已证链 + 板端 PASS）⇒
+  **判定：完全落在既有语法/准入/II=1 范围，配置-only 新 yaml，无需为
+  新增 YAML 重开大型 ADR**；注册表按 v3 追加冻结惯例补 FORMULA_SEMANTICS
+  条目。配对公平性注意项：手写侧 255 个复制 α 词整载入 UR（compute 只读
+  词 0），配对时须裁到 1 词，否则 LOAD 段拍数不公平。
+- **下一步**（用户序列）：标量乘配置正确性 → 同规模配对 → 性能取数。

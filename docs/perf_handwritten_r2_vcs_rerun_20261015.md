@@ -43,6 +43,14 @@ m3lite 线已有 `hbm_preload.py` 快照↔expect 双锚工具（任务1），
 **裸运行器路径没有这道防线**——跨线复跑 case 时必须先 staging。
 此陷阱已写入归档 README 首部。
 
+**【落地，2026-10-15 同日用户批准】** staging 已纳入受控运行入口：
+`verification_v2/tools/run_multi_stage_staged.sh`（flock 独占[与 m3lite
+同一把锁] → 备份 → 装载 → 逐文件校验 → 仿真比较 → 无论成败恢复并校验；
+缺输入/校验失败/恢复失败分档响亮退出 3/4/7）。8/8 FAIL 反例已确定性复现
+并固定于 `artifacts/hbm_staging_counterexample_20261015/`（runner exit=1、
+$finish 与正确运行同拍、32/216 FAILED）；入口实战首验 GREEN 且环境原样
+归还。测试 14 项（`tests/unit/test_run_multi_stage_staged.py`）。
+
 ## 3. 复现结果（修正 staging 后，三重锚点）
 
 | chunk | runner COMPARE | 09-04 哈希清单 | verify_ddr_v3 | T_total_sim |
@@ -56,7 +64,11 @@ m3lite 线已有 `hbm_preload.py` 快照↔expect 双锚工具（任务1），
 - 「09-04 哈希清单」= 复跑前对 case 目录现场的逐文件封存（每 chunk 216 项）。
   复跑重写的 dump 与 09-04 逐字节一致 ⇒ **09-04 的 VCS PASS 在本机主线 TB
   下可确定性复现**（dump mtime 证实确为本轮重写，非残留）。
-- 五 chunk `T_total_sim` 恒 2661：数据无关控制流的确定性，跨 chunk 零漂移。
+- 五 chunk `T_total_sim` 恒 2661。**【收紧，2026-10-15 用户裁定】** 该一致性
+  **只证明这些输入下观测到的总周期一致**（五 chunk 数据同构、指令流相同），
+  **不能据此证明对所有输入控制流都与数据无关**。首轮 ×1.25 错数据跑出相同
+  $finish 拍，只说明「该 case 的指令发射不依赖 HBM 数据值」这一有限事实；
+  归档 README 同口径措辞以本条勘误为准。
 - verify_ddr：DDR dump @store_byte_base 8192（行 512）起 255 词 == golden，8 SMC 全过。
 
 ## 4. 区间取数（类型② TB 拍；chunk0000，其余 chunk 同构同值）
@@ -123,7 +135,11 @@ m3lite 线已有 `hbm_preload.py` 快照↔expect 双锚工具（任务1），
 
 ## 7. 下一步
 
-1. 手写侧裁小（chunk 内词数）+ 编译器同规模配对，同 TB 同指标出对照行；
-2. 对照行进论文实验表（docs/thesis_experiment_table_20261013.md 扩充）；
-3. sram 全局目录陷阱的防线（staging 脚本化）已在归档 README 登记，
-   是否纳入运行器改造留用户裁定。
+1. 手写侧裁小（chunk 内词数；**含标量装载从 255 复制词裁到 1 词**，compute
+   只读词 0，装载不裁则 LOAD 段拍数不公平）+ 编译器同规模配对，同 TB 同
+   指标出对照行；
+2. 编译器侧新增 `alpha * x` 配置-only yaml（scale_sum 的 `role:"param"`
+   机制已覆盖 stride=0 标量，无需扩展契约；注册表按 v3 惯例追加
+   FORMULA_SEMANTICS 条目）+ 正确性验收先行，再配对取数；
+3. 对照行进论文实验表（docs/thesis_experiment_table_20261013.md 扩充）；
+4. ~~staging 防线~~ 已落地（见 §2 末）。
