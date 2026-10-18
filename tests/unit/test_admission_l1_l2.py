@@ -431,8 +431,11 @@ class TestYamlCorpusCompat(unittest.TestCase):
         paths = sorted(OPS_DIR.glob("*.yaml"))
         # scale_sum.yaml 自 2026-09-26 预检期已在语料（当时无 flag），步⑤ 仅补 flag+length；
         # 2026-10-12 步② 新增 horner_v3u.yaml（语料 38→39）；
-        # 2026-10-12 addcmul 步② 新增 addcmulu.yaml（语料 39→40）。
-        self.assertEqual(len(paths), 40,
+        # 2026-10-12 addcmul 步② 新增 addcmulu.yaml（语料 39→40）；
+        # 2026-10-18 新增 scalar_mul.yaml（语料 40→41，y=alpha*x 配置-only 无 flag——
+        # 实证 experimental_unroll 对本算子为空操作故不声明，
+        # docs/scalar_mul_config_acceptance_plan_20261018.md §3）。
+        self.assertEqual(len(paths), 41,
                          f"ops/*.yaml 语料规模漂移（键并集取证的基数前提）: {len(paths)}")
         flagged = []
         for p in paths:

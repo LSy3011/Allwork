@@ -1597,3 +1597,33 @@
   条目。配对公平性注意项：手写侧 255 个复制 α 词整载入 UR（compute 只读
   词 0），配对时须裁到 1 词，否则 LOAD 段拍数不公平。
 - **下一步**（用户序列）：标量乘配置正确性 → 同规模配对 → 性能取数。
+
+## 2026-10-18 标量乘配置 + 步② VCS 正确性 GREEN
+
+- **手写语义核对**（用户点①）：`mul_scalar_op_ur_inst.cpp:13-21` 实证
+  port0=x 流式 / **port1=α 固定地址 stride=0（原注释 "fixed address (true
+  scalar semantics)"）**、4 lane fp32、golden 读 `scalar[i%4]`；手写 LOAD
+  255 复制 α 词整载但 compute 只读词 0（配对修剪项登记）。
+- **配置-only 判定成立**（用户点②）：`verification_v2/ops/scalar_mul.yaml`
+  （y=α·x；x bank0 流式 / alpha bank3 param stride=0 / y bank2；安全域
+  x∈[1,2] α=2.5 同 scale_sum §C.4-2）。探针实证：legacy 路径接受 param
+  角色；**SMT II=1**（FPMUL 全流水 II_res=1）；发射 = level-0 平坦压缩流
+  （INIT+BODY LOOPS=63+TERM，SMC_ID_EN=7，13 队列×3 行）与 mul ✅VCS 形态
+  同型；**experimental_unroll 开关两轮 35 项产物逐字节一致=空操作故不声明**。
+  落在既有语法/准入/II=1 发射范围 ⇒ 无需大 ADR，配置+验收计划记录于
+  `docs/scalar_mul_config_acceptance_plan_20261018.md`。
+- **步② VCS GREEN**：compiler_scalar_mul（n=256 元素=64 词/SMC ×8 SMC，
+  UR 进/UR 出零 HBM 触达故裸运行器）首跑 **SIM+COMPARE 双 PASSED**；
+  TB 3324a33b 未漂移；非空转核验（bank2=2.5·x 与 golden 一致）。
+  归档 `artifacts/scalar_mul_probe_20261018/`（10 项 sha256）。
+  签收口径：该配置×该规模 VCS COMPARE PASSED，不构成容量声明。
+- **设计问题登记**（步③配对前置，留用户裁定）：编译器 mul 形态 case
+  无 HBM LOAD/STORE 段 vs 用户点③整链同范围要求——选项 A（LCS 链承载
+  flat COMPUTE）/B（仅计算窗配对，分列不并账）/C（case 级组合）。
+- 边界注记：II=1 flat/压缩行在 v3 注册表 unroll 记录边界外，验收依据 =
+  mul 先例证据类（ADR-054）；协议层逐拍仲裁如需，走探索→独立论证→追加
+  冻结，不得引用 v3 unroll 常数外推。步⑤收口时注册表补
+  FORMULA_SEMANTICS_SCALAR_MUL。
+- 测试：语料快照守卫（test_admission_l1_l2 TestYamlCorpusCompat）按设计
+  程序更新（40→41 + 沿革注释；scalar_mul 无 flag、flagged 名单不变，
+  定向 30/30）。

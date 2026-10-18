@@ -1,0 +1,25 @@
+name: "scalar_mul"
+# 2026-10-18 新增（配置-only，零代码改动）：y = alpha * x，与手写 mul_scalar 的
+# 公平对照配置（用户 2026-10-15 令：新增配置不新增算子名称特判）。
+# 手写侧语义实证（Jianyuan/aiacc/SMI_IQ/op/mul_scalar/mul_scalar_op_ur_inst.cpp:13-21）：
+#   port0 = x 流式（addr_word=para_input_addr+step）；port1 = α 固定地址 stride=0
+#   驻留（原注释 "fixed address (true scalar semantics)"）；4 lane fp32/16B 词，
+#   α 每词复制 ×4；golden 读 scalar[i%4]。
+# 张量布局与 mul.yaml 同构（流式第二输入 other 换为 param 角色 α）；
+# α 的 stride=0 驻留机制与 scale_sum 的 alpha（role:"param"）同源（ADR-056 §A.2-4）。
+# 发射形态实证（2026-10-18 探针，e2e 两轮对照）：SMT 给 II=1（FPMUL count=1
+#   lat=4 全流水 II_res=1），发射为 level-0 平坦压缩流（INIT + BODY LOOPS=63
+#   64 拍 + TERM，SMC_ID_EN=7），与 mul 已 VCS 验证形态（ADR-054 阶段2-M1，
+#   compiler_mul COMPARE PASSED）同型；experimental_unroll 开/关产物逐字节
+#   一致（本算子上该标记为空操作，故不声明）。
+# test_data 安全域同 scale_sum §C.4-2：x∈[1,2]、α=2.5 → y∈[2.5,5]，
+#   ⊥ 亚正规带且 ⊥ ±FLT_MAX。
+formula: "alpha * x"
+tensors:
+  x: { bank: 0, role: "input", offset: 0, length: 256 }
+  alpha: { bank: 3, role: "param", offset: 0, length: 256 } # 标量系数（stride=0 驻留，消耗 1 word）
+  constants: { bank: 7, role: "constant", offset: 0, length: 256 }
+  y: { bank: 2, role: "output", offset: 0, length: 256 }
+test_data:
+  x: { range: [1.0, 2.0] }
+  alpha: [2.5]
