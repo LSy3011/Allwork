@@ -115,6 +115,12 @@ rsqrt_op.cpp:668-672 y0_tensor、div_op.h:18）——仅排除依赖该原语的
   不对齐 lane0，且零填充会污染全负输入的 max）；wbe 只选目的字节、不搬源数据
   （user_register.v:373 写使能与写数据分接）。全原语表内未发现 lane 重排单元
   （RtoVR=整词路由、VIN=reg_pipe、FPTOINT/FPTOFP 的 pos 字段=lane 内半字定位）。
+- **P0 标量自环 mask 合法性已核**（RtoVR.v 稀疏分支）：LOGIC_S0/S1 允许集含
+  VIN0_D/VIN1_D(11/12)、LOGIC_D(10) 自环、FPADD_D(4)、FPMUL_D(3)（:249-250）；
+  LOGIC_ST ∈ {INTADD_ST(2), FPADD_ST(5), VIN0_D, VIN1_D}（:251）。⇒ 运行 max 的
+  全标量比较-选择链（FPADD SUB/UPDATE_ST → LOGIC SELECT，m 经 LOGIC_D 自环
+  进位）在冻结 TB 全合法，与 SUM 同走串行自环路线（RecMII = 4+1+1+1 = 7：
+  LOGIC(1)→RtoVR(1)→FPADD(4) 比较回路 + LOGIC 自环 2）。
 - **候选替代（待有界取证，不预先承诺）**：
   - **P0 lane0-scalar 布局**：输入在 HBM 预置为每词 1 元素（lane0，其余填 0），
     全部趟次 lane0 标量运算；逐项 LOGIC AND 掩码清污（exp 常数项会污染 lane1-3，
@@ -128,21 +134,47 @@ rsqrt_op.cpp:668-672 y0_tensor、div_op.h:18）——仅排除依赖该原语的
     四个 lane、最大值位于首词/末词。
 - **判定**：⚠️ **条件推进**（用户裁定）：先解决 lane 合并/广播路径，再承诺 RTL 验收。
 
-### 3.2 SUM（归约反馈 = matmul 同构先例；首证为最低交付）
+### 3.2 SUM（首证 = 最低交付；五取证已核，结论改判：addtree 冻结 TB 不可达 fp32 → 串行 FPADD 自环）
 
-- **基础操作**：FP32ADDTREE5TO1 + accumulate 位；每词 4 lane 求和 + old_i 进位 →
-  lane0 行和。手写线全同构先例 matmul_op.py:410-412（`cumulative=True,
-  reduction_per_channel=4, loop_carried_depends_on={"y_0": 4}`，II≥4）；
-  sim fp32_add_tree_unit.py:81-105。机制链已通：metadata → RecMII
-  （ii_analyzer.py:128-163）→ SMT 自环（ucode_solver.py:449-454）→ accumulate 位
-  emit（payload_factory.py:104-109）。串行 FPADD 自环为更低连接风险的备选形态。
-- **落地前必核（用户指定的 SUM 取证清单）**：①addtree RtoVR 连接（allowed 矩阵
-  rtovr_config.yaml:109-118 对 addtree 槽位有约束，以 matmul 实际产物为模板核实）；
-  ②累加初值（首迭代 old_i 的取值/清零语义，RTL 核实）；
-  ③反馈依赖（自环距离 1，ii_analyzer.py:155 明示 distance>1 不支持——softmax 不需要）；
-  ④末次结果写回路径；⑤连续两行之间的状态清理（累加器复位语义）。
-- **判定**：✅ 机制链最成熟；**冻结 TB 无 cumulative addtree VCS 记录——
-  这正是中期前最低交付物（用户裁定：SUM 首证）**。
+**五取证结论（2026-10-19 RTL 正面取证，u280_sim_v422 冻结树 = TB 3324a33b 源树）**：
+
+- **① addtree RtoVR 连接：否证（fp32 不可达）**。冻结 TB 实编译稀疏 mask 分支
+  （run_sim_aiacc_top_f_multi_stage.sh:119 `+define+USE_RTOVR_SPARSE_MASK`）：
+  RtoVR.v:262-269 `OUT_FROM_IN_EN_24..31 = bits 18..25` ⇒ FP32ADDTREE5TO1_S0..S7
+  **只能**收 FP16MUL_D0..D7；5to1_D（in 26/27）只能喂 8to1_S0/S1（RtoVR.v:270-271）；
+  UR_WRITE 源 mask 0x30002000 = {VOUT0_D(13), 8to1_D(28), SHIFTUP_D(29)}（RtoVR.v:273-276）
+  **不含 5to1_D**。⇒ 5to1 在冻结 TB 是 INT8 MAC 链专用累加段
+  （INT8TOFP16→FP16MUL→5to1→8to1→UR_WRITE 硬串联），fp32 值无合法路径进入
+  （必经 INT8TOFP16/FP16MUL 会摧毁 fp32 语义）。rtovr_config.yaml:109-118 与 RTL 一致。
+  matmul_op.py:410-412 先例属该 INT8 链语境，**不能外推到 fp32 SUM**。
+- **② 累加初值**：`old_i = (inst_valid_eff && accumulate) ? add_result_stage4[i] : 0`
+  （fp32_adder_tree_final_pipeline_5to1.v:146-148）；stage4 寄存器仅 rst_n 清零、
+  被下一 valid 结果覆盖（:498-504）。⇒ **accumulate=0 的首迭代即零种子**。
+- **③ 反馈依赖**：自环距离 1；stage4 在 issue+3（valid_pipe[2]）锁存 ⇒ II≥4 时进位
+  已就绪（与 matmul `loop_carried_depends_on={"y_0":4}` 同构）；ii_analyzer.py:155
+  distance>1 不支持——softmax 距离 1 够用。
+- **④ 末次写回**：dr_d0={add_result[0..3]}、dr_d1={[4..7]}（:518-521）；但稀疏约束下
+  5to1_D 不可直写 UR——须先过 8to1（in 26/27→OUT_32/33，out 28→UR_WRITE）。
+- **⑤ 行间状态清理**：RTL 无显式复位原语；契约 = **每行首迭代 accumulate=0**
+  （忽略 stage4 残留），行间天然隔离。
+- **⑥ 舍入模式**：i_rounding_mode 全 SMC 硬连 3'b000 = **RNE**
+  （aiacc_top_f.v:1919、:2044）——独立参考与误差筛查必须按 RNE。
+
+**fp32 SUM 冻结 TB 唯一合法载体 = 串行 FPADD 自环**（稀疏 mask 内逐项合法）：
+
+- FPADD_S0/S1 允许集 0x1FDB 含 **FPADD_D(4) 自环**与 **VIN0_D/VIN1_D(11/12)**
+  （RtoVR.v:243-244；yaml:90-91）；FPADD_D→VOUT0_D→UR_WRITE ✓（:254→:273-276）。
+- 数据路径：T2 exp 末级 FPMUL_D **直送** FPADD_S0（FPMUL_D(3) ∈ 0x1FDB ✓，免 UR
+  回读）；进位 s：FPADD_D→RtoVR→FPADD_S1；RecMII = FPADD(4)+RtoVR(1) = **5**。
+- 零种子/行间清理：FPADD 无内部累加器——行首迭代 S1 改接 host 预置**零常量字**
+  （UR 常驻 stride=0 读），后续迭代 S1 接 FPADD_D；行间清理天然，无残留状态。
+- sim 先例：exp 手写线 RTOVR_IN_DR_FPMUL_D 自环（sim only）；**VCS 无自环先例
+  = 本证新 territory**，e2e 首验即此。
+
+- **判定**：⚠️ 载体改判（addtree→串行 FPADD 自环），路径合法性已 RTL 实证；
+  **VCS 首证对象 = L=16 元素 lane0-only 小例，II=5**；预期收益：e2e 链路
+  （VIN 入→FPADD 自环→VOUT0 出）全 sparse-legal，sim/VCS 语义差风险低
+  （dense sim ⊇ sparse，合法路径两者同）。
 
 ### 3.3 EXP（v2：常量选择表 k·ln2 规约为候选主路线；平方路线按用户筛查反例降级）
 
@@ -265,8 +297,9 @@ v1 采三趟因其**最易验证**（每趟语义独立、验收可分层），�
 
 1. **本文档修订**（半天–一天）：无阻断口径→部分原语已确认；跨 lane 与数值规格
    登记待验证。✅ 本轮落地（v2）。
-2. **SUM 主线**：按 §3.2 取证清单核实 addtree 连接/累加初值/反馈依赖/末次写回/
-   行间状态清理 → 配置化生成 → 小规模 VCS（**最低交付**）。
+2. **SUM 主线**：✅ 五取证 RTL 已核（§3.2：addtree fp32 不可达=否证，串行 FPADD
+   自环=唯一合法载体，II=5，RNE 硬连）→ 配置化生成（Manual-DFG 先例路径，绕开
+   准入门立法序；公式入口 Σ 归 ADR）→ 小规模 VCS L=16（**最低交付**）。
 3. **MAX 有界路径取证**：lane 合并/广播路径（P0/P1 评估），用例必覆盖
    全负输入、最大值在四个 lane 各一次、首词/末词。
 4. **EXP/倒数软件数值筛查提前**：冻结系数/顺序/舍入/下溢行为后测；输入域与
@@ -288,7 +321,7 @@ v1 采三趟因其**最易验证**（每趟语义独立、验收可分层），�
 | R5 | sim 多驻留读退化影响未评估 | 中 | e2e 预检第一步 |
 | R6 | exp 每元素 ~35–45 ops，计算成本远高于已证 map 算子 | 中 | 预期内；W3 优化；同精度门槛比较 |
 | R7 | LOGIC SELECT / cumulative addtree 冻结 TB 均无 VCS 记录 | 中 | SUM 首证补 addtree；MAX 落地时补 LOGIC |
-| R8 | addtree RtoVR allowed 矩阵连接受限（rtovr_config.yaml:109-118） | 中 | SUM 取证清单第①条 |
+| R8 | ~~addtree RtoVR 连接受限~~→**已实证否证**：稀疏 mask 下 addtree=INT8 链专用，fp32 不可达 | 已闭合 | SUM/MAX 改串行自环（§3.2 实证）；addtree 留待未来 TB 放宽 |
 | R9 | P0 布局 4× 算术/HBM 词量 + 逐阶段掩码成本 | 低 | v1 正确性优先接受；W3 评估 packed |
 | R10 | IQ 定长指令：数据相关控制流必须直线化 | 低 | §3.3/§3.4 全部 SELECT 级联直线化 |
 | R11 | 手写线 exp/div/rsqrt 非活跃资产无 VCS 日志 | 低 | 一律「参考资产」不作能力证据 |
@@ -327,6 +360,17 @@ streaming normalize · 分组加法树（W3 候选）· 位重解释规约路线
 - 用户 exp 筛查（2026-10-19）：[−87,0] 200001 fp32 点、逐步 fp32 Horner deg12/15
   Taylor + 8 平方，max rel err ≈ 3.10×10⁻⁵ > 2⁻¹⁹ ——【筛查证据：否证该候选，
   不否定所有系数方案】
+- SUM 五取证 RTL 锚（2026-10-19，u280_sim_v422 冻结树）：
+  - 稀疏 mask 实编译：run_sim_aiacc_top_f_multi_stage.sh:119（+define+USE_RTOVR_SPARSE_MASK）
+  - addtree 输入锁定 FP16MUL_D0..D7：RtoVR.v:262-269（OUT_FROM_IN_EN_24..31 = bits 18-25）；
+    yaml rtovr_config.yaml:109-116 一致
+  - 5to1_D 只能喂 8to1：RtoVR.v:270-271；UR_WRITE 源={VOUT0_D,8to1_D,SHIFTUP_D}：RtoVR.v:273-276
+  - 元素级 S 口允许集 0x1FDB（含自环 FPADD_D/FPMUL_D/LOGIC_D、VIN0_D/VIN1_D）：
+    RtoVR.v:238-250（FPADD_S=243-244、LOGIC_S0/S1=249-250、LOGIC_ST=251、VIN=252-253、VOUT0=254）
+  - addtree accumulate/初值/清理：fp32_adder_tree_final_pipeline_5to1.v:146-148（old_i 选择）、
+    :498-504（stage4 锁存/仅 rst_n 清零）、:518-521（d0/d1 打包）、:72-75（smc_id_en/inst_valid）
+  - 舍入 RNE 硬连：data_engine/aiacc_top_f.v:1919、:2044（i_rounding_mode(0)）
+  - 实例化点：data_engine/SMC_ALL.sv:761-768（5to1，i_rounding_mode 透传）
 
 **推断/待验证**（落实前正面取证）：
 - 表规约 exp 路线误差 ≈2⁻²² 级有机会满足 2⁻¹⁹（筛查证实前不作结论）
