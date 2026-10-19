@@ -25,6 +25,15 @@
 > MAX 为条件推进项（先解决 lane 合并/广播路径再承诺 RTL 验收）。
 > **当前不需要改功能 RTL，不扩大统一入口支持声明。**
 >
+> **v3（2026-10-19，用户二次复核，SUM 载体裁定）**：①措辞订正——「唯一合法载体」改为
+> **「当前已核实连接合法、选作首证的载体：串行 FPADD 反馈路径」**（替代构造未穷尽）；
+> 「绕开准入门立法序」改为 **「隔离的归约实验入口，不是绕过正式准入」**。
+> ②SUM 首证实验契约五项锁定（§3.7）；执行序=订正契约→参数化 DFG 生成→软件参考
+> 与产物审计→L=1/L=16 VCS→连续两行与负控→归档。③文档旧表述清理：§4.2 addtree
+> lowering、§4.3 ADDTREE 扩集、R7「SUM 首证补 addtree」——本轮 SUM 用 FPADD，
+> **ADDTREE 扩集任务撤出本轮**，LOGIC 留 MAX 再处理。④成果口径：首证通过=
+> **「编译器后端能够生成并正确执行受限的跨迭代 fp32 SUM」**——非通用 SUM、非完整 softmax。
+>
 > 口径纪律（继承 2026-10-14 预检）：「缺」= 通用公式入口缺该项能力；已有专用路径/
 > 手写线/simulator 资产单列。「无专用 EXP/DIV/MAX 单元」≠ 不可实现。证据分级：
 > 每条事实带 `文件:行号` 锚；实测/推断/筛查结论分列。
@@ -160,21 +169,23 @@ rsqrt_op.cpp:668-672 y0_tensor、div_op.h:18）——仅排除依赖该原语的
 - **⑥ 舍入模式**：i_rounding_mode 全 SMC 硬连 3'b000 = **RNE**
   （aiacc_top_f.v:1919、:2044）——独立参考与误差筛查必须按 RNE。
 
-**fp32 SUM 冻结 TB 唯一合法载体 = 串行 FPADD 自环**（稀疏 mask 内逐项合法）：
+**当前已核实连接合法、选作首证的载体：串行 FPADD 反馈路径**（稀疏 mask 内逐项合法；
+替代构造未穷尽，addtree 直路径=已否证）：
 
 - FPADD_S0/S1 允许集 0x1FDB 含 **FPADD_D(4) 自环**与 **VIN0_D/VIN1_D(11/12)**
   （RtoVR.v:243-244；yaml:90-91）；FPADD_D→VOUT0_D→UR_WRITE ✓（:254→:273-276）。
 - 数据路径：T2 exp 末级 FPMUL_D **直送** FPADD_S0（FPMUL_D(3) ∈ 0x1FDB ✓，免 UR
-  回读）；进位 s：FPADD_D→RtoVR→FPADD_S1；RecMII = FPADD(4)+RtoVR(1) = **5**。
+  回读）；进位 s：FPADD_D→RtoVR→FPADD_S1；RecMII = FPADD(4)+RtoVR(1) = **5**
+  （**候选值，非已验证周期保证**，§3.7-4：须逐拍核实结果可用/被采样时刻）。
 - 零种子/行间清理：FPADD 无内部累加器——行首迭代 S1 改接 host 预置**零常量字**
   （UR 常驻 stride=0 读），后续迭代 S1 接 FPADD_D；行间清理天然，无残留状态。
 - sim 先例：exp 手写线 RTOVR_IN_DR_FPMUL_D 自环（sim only）；**VCS 无自环先例
   = 本证新 territory**，e2e 首验即此。
 
 - **判定**：⚠️ 载体改判（addtree→串行 FPADD 自环），路径合法性已 RTL 实证；
-  **VCS 首证对象 = L=16 元素 lane0-only 小例，II=5**；预期收益：e2e 链路
-  （VIN 入→FPADD 自环→VOUT0 出）全 sparse-legal，sim/VCS 语义差风险低
-  （dense sim ⊇ sparse，合法路径两者同）。
+  **VCS 首证对象 = L=16 元素 lane0-only 小例（II=5 候选，契约 §3.7-4）**；
+  预期收益：e2e 链路（VIN 入→FPADD 自环→VOUT0 出）全 sparse-legal，
+  sim/VCS 语义差风险低（dense sim ⊇ sparse，合法路径两者同）。
 
 ### 3.3 EXP（v2：常量选择表 k·ln2 规约为候选主路线；平方路线按用户筛查反例降级）
 
@@ -236,6 +247,36 @@ rsqrt_op.cpp:668-672 y0_tensor、div_op.h:18）——仅排除依赖该原语的
   （多项式系数/选择表/0.75/mask）、m/s/r 驻留字；容量瓶颈预计在 IQ 行数不在 UR，
   实测校准。
 
+### 3.7 SUM 首证实验契约（2026-10-19 用户锁定五项边界）
+
+1. **隔离的归约实验入口，不是绕过正式准入**：复用 Manual-DFG 机制、由参数生成
+   DFG，并经过现有调度、lowering、发射组件；最终产物仍检查连接、字段、容量与
+   地址。暂不进入 V1 正式发布通道，不宣称 `Σ` 公式入口已支持；若必须修改生产
+   接口或准入语义，再履行相应 ADR。
+2. **首验规格 = L=16 元素、W=16 词、lane0-only**：每词一个有效元素，其余 lane
+   不参与结果；检查它们是否符合声明的零值或保持值。该布局验证跨迭代归约，
+   **不证明 packed vec4 横向归约**；性能报告必须注明 lane 利用率。
+3. **首项初始化、反馈、末次写回分开表达**，冻结语义：
+   `s₀ = +0`，`s_{i+1} = fp32(s_i + x_i)`（RNE）。首次加法读零常量、后续读前一次
+   结果；必须检查首次路由切换及末次输出。⚠「FPADD 无内部累加器」**不得**解释成
+   整条反馈路径无残留状态——RtoVR 等寄存器仍有状态。
+4. **II=5 是候选，不是已验证的周期保证**：配置中的反馈延迟须包含实际路由路径，
+   逐拍验证结果何时可用、何时被下一次加法采样；源码连接合法 ≠ 时序已闭合。
+5. **最低验收 = L=16 正向 + 三个有鉴别力的检查**：
+
+   | 检查 | 要证明的内容 |
+   |---|---|
+   | L=1 | 初值与末次写回没有多算、漏算 |
+   | 两行连续运行、不做全局复位，输入明显不同 | 第二行不会继承第一行累计值 |
+   | 故意错误的种子/反馈接线或漏末项负控 | 检查器能真实检出归约错误 |
+
+   数值参考按冻结的串行 fp32 顺序独立计算；输入取正负混合、抵消、大小量级混合，
+   不能只测简单正整数。
+
+**执行序**：订正契约 → 参数化 DFG 生成 → 软件参考与产物审计 → L=1/L=16 VCS →
+连续两行与负控 → 归档。**成果口径**：首证通过 = 「编译器后端能够生成并正确执行
+受限的跨迭代 fp32 SUM」——非通用 SUM、非完整 softmax。
+
 ## 4. 编译器落地路径（四层改动面 + 立法序清单）
 
 ### 4.1 表达层（需新增，立法序：ADR）
@@ -246,19 +287,23 @@ rsqrt_op.cpp:668-672 y0_tensor、div_op.h:18）——仅排除依赖该原语的
 
 ### 4.2 lowering 层（需新增，机制件全在）
 
-- 归约 lowering 生成 addtree/LOGIC 节点 + cumulative/loop_carried metadata
-  （matmul_op.py:394-437 手搭模式配置化）；配置链 addtree 特例 cumulative=False
-  （standard_kernels.py:33-73）需扩。exp/倒数 lowering = §3.3/§3.4 子图模板。
+- **本轮（SUM 首证）**：Manual-DFG 实验入口（§3.7 契约）——DFG = FPADD
+  loop_carried 自环节点 + 行首零常量路由特例；**不新增 addtree lowering**
+  （冻结 TB fp32 不可达，§3.2 实证）。
+- **后续 softmax 完整版**：归约 lowering 按 §3.2 载体生成 FPADD/LOGIC 自环节点 +
+  loop_carried metadata（matmul_op.py:394-437 手搭模式为配置化先例）；
+  exp/倒数 lowering = §3.3/§3.4 子图模板。
 
-### 4.3 调度层（机制在；准入 ADR **启动设计与复核**，用户裁定）
+### 4.3 调度层（机制在；本轮无扩集义务）
 
 - loop-carried SMT 约束已存在（ucode_solver.py:449-454）；RecMII 已有；自环
   latency≥2 ⇒ 天然 II≥2 ⇒ 满足 unroll G-II（assembler.py:505-510）。
-- G-op 白名单 `_V1_COMPUTE_ALLOWED={FPMUL,FPADD}`（assembler.py:17,127-132）。
-  **ADR 须分开定义 ADDTREE 与 LOGIC 的具体支持形态**（用户裁定：不是把单元名
-  加进白名单就算准入成立）——ADDTREE：cumulative 形态、reduction_per_channel、
-  初值/清理语义、连接约束；LOGIC：允许的 optype 子集、与 FPADD ST 位的配对形态、
-  掩码常量形态。
+- G-op 白名单 `_V1_COMPUTE_ALLOWED={FPMUL,FPADD}`（assembler.py:17,127-132）：
+  **本轮 SUM 实验只用 FPADD（已在白名单内），无需扩集、无 ADR 义务**。
+- **ADDTREE 扩集任务撤出本轮**（冻结 TB fp32 不可达，§3.2 实证）；LOGIC 支持
+  形态定义留到 MAX 阶段再处理——届时 ADR 分单元定义具体支持形态（用户裁定：
+  不是把单元名加进白名单就算准入成立），如 LOGIC：允许的 optype 子集、与
+  FPADD ST 位的配对形态、掩码常量形态。
 
 ### 4.4 发射 / 分段层（最大新增工程量）
 
@@ -280,7 +325,7 @@ rsqrt_op.cpp:668-672 y0_tensor、div_op.h:18）——仅排除依赖该原语的
 
 ```
 T1 (max):    读 x_i（lane0 标量流）     → 运行 max m（FPADD ST + LOGIC SELECT 标量反馈）
-T2 (exp+sum):读 x_i + 读 m（stride=0）  → e_i 写 UR + 掩码清污 + addtree 累加 s
+T2 (exp+sum):读 x_i + 读 m（stride=0）  → e_i 写 UR + 掩码清污 + FPADD 自环累加 s（§3.2 改判）
 T3 (norm):   读 e_i + 读 s（stride=0）  → r=1/s（规格化 NR，一次）→ y_i=e_i·r 覆写 e 区
 ```
 
@@ -297,14 +342,14 @@ v1 采三趟因其**最易验证**（每趟语义独立、验收可分层），�
 
 1. **本文档修订**（半天–一天）：无阻断口径→部分原语已确认；跨 lane 与数值规格
    登记待验证。✅ 本轮落地（v2）。
-2. **SUM 主线**：✅ 五取证 RTL 已核（§3.2：addtree fp32 不可达=否证，串行 FPADD
-   自环=唯一合法载体，II=5，RNE 硬连）→ 配置化生成（Manual-DFG 先例路径，绕开
-   准入门立法序；公式入口 Σ 归 ADR）→ 小规模 VCS L=16（**最低交付**）。
+2. **SUM 主线**（✅ 五取证 RTL 已核，§3.2）：契约已锁定（§3.7）→ **参数化 DFG
+   生成**（Manual-DFG 隔离实验入口，过现有调度/lowering/发射）→ **软件参考与
+   产物审计** → **L=1/L=16 VCS** → **连续两行与负控** → 归档（**最低交付**）。
 3. **MAX 有界路径取证**：lane 合并/广播路径（P0/P1 评估），用例必覆盖
-   全负输入、最大值在四个 lane 各一次、首词/末词。
+   全负输入、最大值在四个 lane 各一次、首词/末词；LOGIC 支持形态 ADR 此时再立。
 4. **EXP/倒数软件数值筛查提前**：冻结系数/顺序/舍入/下溢行为后测；输入域与
    2⁻¹⁹ 维持候选目标不冻结。
-5. G-op 扩集 ADR：ADDTREE/LOGIC 分别定义支持形态，hco 复核。
+5. G-op 扩集 ADR：本轮**撤出 ADDTREE**（§3.2 否证）；LOGIC 形态随 MAX 阶段处理。
 6. 中期后 W1–W4 按主线令表推进（W2 端到端基线、W3 实测优化、W4 扩规模板端）。
 
 **当前不改功能 RTL；不扩大统一入口支持声明。**
@@ -320,7 +365,7 @@ v1 采三趟因其**最易验证**（每趟语义独立、验收可分层），�
 | R4 | exp 误差预算未成立（筛查反例已否证平方路线） | **高** | 软件筛查提前（步骤 4）；表规约路线待筛查证实 |
 | R5 | sim 多驻留读退化影响未评估 | 中 | e2e 预检第一步 |
 | R6 | exp 每元素 ~35–45 ops，计算成本远高于已证 map 算子 | 中 | 预期内；W3 优化；同精度门槛比较 |
-| R7 | LOGIC SELECT / cumulative addtree 冻结 TB 均无 VCS 记录 | 中 | SUM 首证补 addtree；MAX 落地时补 LOGIC |
+| R7 | FPADD 自环（RtoVR D→S 重路由发射）冻结 TB 无 VCS 先例；LOGIC SELECT 同无 | 中 | SUM 首证补 FPADD 自环 VCS；LOGIC 留 MAX 落地时补；addtree 撤出本轮 |
 | R8 | ~~addtree RtoVR 连接受限~~→**已实证否证**：稀疏 mask 下 addtree=INT8 链专用，fp32 不可达 | 已闭合 | SUM/MAX 改串行自环（§3.2 实证）；addtree 留待未来 TB 放宽 |
 | R9 | P0 布局 4× 算术/HBM 词量 + 逐阶段掩码成本 | 低 | v1 正确性优先接受；W3 评估 packed |
 | R10 | IQ 定长指令：数据相关控制流必须直线化 | 低 | §3.3/§3.4 全部 SELECT 级联直线化 |
