@@ -339,18 +339,27 @@ class TestShiftupMirToLirLowering(unittest.TestCase):
         instrs = self._build_physical_instrs("verification_v2/ops/fma_parallel_n.yaml")
         sup_instrs = [p for p in instrs if p.iq_name == "shiftup"]
         stages = sorted(p.stage for p in sup_instrs)
-        self.assertIn("INIT", stages)
         self.assertIn("BODY", stages)
         self.assertIn("TERM", stages)
         self.assertNotIn("HDR", stages,
             "II=1 单槽队列按 ADR-054 平坦化，不得再产 HDR（embed）行")
         for p in sup_instrs:
             self.assertEqual(p.op_type.upper(), "SHIFTUP")
-        # 平坦协议形（assembler.py ADR-054 分支的 header 契约）
-        sup_init = next(p for p in sup_instrs if p.stage == "INIT")
+        # 平坦协议形（assembler.py ADR-054 分支的 header 契约）。
+        # INIT→DLY 合并实验（2026-10-19，AIACC_FLAT_INIT_FOLD=1 且 l_init+1+op_dly≤7
+        # 时 INIT 被摘除、相位并入 BODY dly；默认关，契约形不变）——两形分开断言。
         sup_body = next(p for p in sup_instrs if p.stage == "BODY")
         sup_term = next(p for p in sup_instrs if p.stage == "TERM")
-        self.assertEqual(sup_init.header.vld, 0)
+        import os as _os
+        if _os.environ.get("AIACC_FLAT_INIT_FOLD", "0") == "1" and "INIT" not in stages:
+            # 折叠形：[BODY(vld=1, level=0, dly=l_init+1+op_dly)][TERM]——INIT 缺席
+            # 本身即 fold 生效标记；dly 必落 [1,7]（BITS_DLY=3 域，准入条件保证）。
+            self.assertGreaterEqual(sup_body.header.dly, 1)
+            self.assertLessEqual(sup_body.header.dly, 7)
+        else:
+            self.assertIn("INIT", stages)
+            sup_init = next(p for p in sup_instrs if p.stage == "INIT")
+            self.assertEqual(sup_init.header.vld, 0)
         self.assertEqual(sup_body.header.vld, 1)
         self.assertEqual(sup_body.header.level, 0)
         self.assertEqual(sup_term.header.vld, 1)

@@ -1,4 +1,5 @@
 import copy
+import os
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
 from ir.lir.lir_op import LIROp, PhysicalInstruction, SMIHeader
@@ -440,17 +441,35 @@ class PhysicalAssembler:
                 # 相位对齐：embed 形 HDR 占位 1 拍（vld=1 但 _instruction_valid=False，纯 loop setup），
                 # body 首 fire 在 l_init+1 拍；平坦形无 HDR → INIT 多垫 1 拍，保持首 fire 相位不变
                 # （否则全流提前 1 拍——mul e2e other_read 审计实证差一拍）。
-                physical_instructions[-1].header.loops = l_init  # 主线上方已发 INIT(loops=l_init-1)
-                assert physical_instructions[-1].trace_id == f"init_{iq_name}", "相位垫拍须落在本队列 INIT 行"
                 op = next(iter(kernel_map.values()))
                 op_stride = int(op.metadata.get("stride", 0))
                 logical_addr = op.metadata.get("logical_addr", 0)
                 iq_start_t = min(o.metadata.get("global_t", 0) for o in ops)
                 relative_skip = op.metadata.get("global_t", 0) // iq_II - iq_start_t // iq_II
                 op_dly = int(op.metadata.get("dly", 0)) & 0x7
+                # ===== INIT→DLY 合并（有界优化实验，用户 2026-10-19 令；默认关）=====
+                #   待 RTL 首证的等价性假设（docs/fair_pair_init_fold_feasibility_20261019.md）：
+                #   [INIT(vld=0, loops=L)] + [BODY(dly=0)] ≡ [BODY(dly=L+1)]——
+                #   RTL smi_iq_iic.v:695-699 dly 仅附首 fire（后续 fire 置 0）+
+                #   smi_iq_dly_queen.v:479-511 dly=k ⇒ 发射相对 dly=0 基线晚 k 拍；
+                #   sim iq_unit.py:144-149,248-256 同构。首 fire 相位、重复次数、
+                #   地址序列、跨队列相位、末次写回、终止行为仍须 VCS 核验。
+                #   （2026-10-19 四腿 VCS 已核验全绿：16w A/B、64w B、255w B，见同文档 ④）
+                #   准入：实验开关 ∧ fold_dly ≤ 7（BITS_DLY=3 域）；不满足 → 原三行发射。
+                fold_dly = l_init + 1 + op_dly
+                fold_init = (os.environ.get("AIACC_FLAT_INIT_FOLD", "0") == "1"
+                             and fold_dly <= 7)
+                assert physical_instructions[-1].trace_id == f"init_{iq_name}", \
+                    "INIT 合并/垫拍须落在本队列 INIT 行"
+                if fold_init:
+                    physical_instructions.pop()  # 摘除 INIT 行：相位改由 BODY dly 承担
+                    body_dly = fold_dly
+                else:
+                    physical_instructions[-1].header.loops = l_init  # 主线上方已发 INIT(loops=l_init-1)
+                    body_dly = op_dly
                 header = SMIHeader(vld=1, level=0, loops=loops_val,
                                    inc=iq_max_stride if is_memory_iq else 0,
-                                   dly=op_dly, inc_embed=0)
+                                   dly=body_dly, inc_embed=0)
                 payload = self._resolve_physical_payload(op, trace_to_slot, trace_to_type)
                 if "ur-" in iq_name.lower():
                     from src.core.memory_layout import PhysicalMemoryLayout

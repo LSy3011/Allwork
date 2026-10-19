@@ -142,8 +142,15 @@ class IQUnit(Component):
 
         self._next_pc = self.pc
         if dly > 0 and not self._dly_finished_marker:
-            self.delay_active = True
-            if self.dly_counter <= 0:
+            # 潜伏 bug 修（2026-10-19，INIT→DLY 合并验收暴露）：旧逻辑在计数减到 0 的
+            # 下一拍先被 evaluate 以 `counter <= 0` 重新初始化（dly-1），tick 的 else
+            # （delay_active=False、marker=True）永不触发 → dly≥1 的行**永不 fire**。
+            # 该路径史上零演练（编译器从未发 dly≠0、sim 未跑过手写侧 dly 案例）。
+            # RTL 语义（smi_iq_dly_queen.v:479-511 + smi_iq_iic.v:695-699）：
+            # dly=k ⇒ 首 fire 一次性延迟 k 拍（相对 dly=0 基线），后续 fire 不再延迟。
+            # 修：初始化仅在进入延迟的当拍发生（not delay_active），计数归零由 tick 收尾。
+            if not self.delay_active:
+                self.delay_active = True
                 self.dly_counter = dly - 1
             self.exec_active = False
             return
