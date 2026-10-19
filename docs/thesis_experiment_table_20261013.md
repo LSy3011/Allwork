@@ -189,3 +189,45 @@ LOOPS=254（首上 RTL 即 8/8 零 SKIP）**。
 
 锚：归档 `verification_v2/artifacts/fair_pair_smul255w_20261018/`
 （SHA256SUMS 15 项）；预检 `docs/fair_pair_smul255w_precheck_20261018.md`。
+
+## 9. INIT→DLY 折叠：有界编译器优化实验（2026-10-19，commit a01190d）
+
+用户 2026-10-19 令（有界实验，非协议扩张）：§7/§8 已证 Δ195 拍全部来自统一
+发射模板的 INIT 行 ⇒ 检查点①②③（逐队列语义比较→结构规则→单候选变换）
+→ ④验收。**用户裁定（本行收口，不追残余 26 拍）**：成果表述为
+「**在三个已测规模中，通过编译器侧 INIT 折叠保持结果正确，减少 13 个装载
+beats，对应当前 TB 下减少 169 拍**」；保持默认关闭合理；**相同完成观测窗
+仍不能单独证明内部逐拍完全相同**。
+
+**变换（仅限 ADR-054 flat 分支，默认关 `AIACC_FLAT_INIT_FOLD=1` 开启）**：
+`l_init+1+op_dly ≤ 7` 时摘除 INIT 行、相位并入 BODY 头部 3bit DLY 字段；
+条件不满足原三行发射逐字不动；无算子名特判；零硬件/hw_config 变更。
+等价性 = RTL 两模块（smi_iq_iic.v dly 仅附首 fire + smi_iq_dly_queen.v
+dly=k 晚 k 拍）+ sim 单测 + 手写侧 VCS 先例三源闭合。
+
+**正确性（先决，四腿全绿）**：VCS 四腿（16w A/B-fold、64w B-fold、
+255w B-fold）COMPARE **8/8 零 SKIP**；verify_ddr 三规模 8/8 bit-exact；
+独立 IEEE 参考 + 非目标写零 4/4 腿；pytest 双模式 656 passed 零漂移；
+编译器侧潜伏 sim dly 计数器 bug 随本检查点暴露并修复（零演练路径，
+6 项新增单测锁定）。新增第三规模 16w（UR 容量下界一侧的边界核验）。
+
+**取数（TB 执行行为层，与 §7/§8 同口径）**：
+
+| 量 | B 未折叠 → B 折叠 | 备注 |
+|---|---|---|
+| COMPUTE 逻辑指令行 | 39 → 30（−9） | 9 队列折叠；vout0/rtovr-16/rtovr-35/ur-w0 保留 |
+| COMPUTE 装载 beats | 54 → 41（**−13**） | 三规模数量相同 |
+| 装载成本 | 702 → 533 拍（**−169**） | 实测与静态投影逐拍一致；跨规模绝对恒定 |
+| 完成观测窗口（上界代理） | 144/334 → 不变 | 相位零扰动；⚠ 不能单独证明内部逐拍完全相同 |
+| T_total | 1908→1739（64w，−8.9%）；2856→2687（255w，−5.9%） | −169 拍绝对恒定 |
+| 16w 新规模 | A 1215 / B-fold 1241 | 与 A 残余 +26 拍 |
+
+对 A 手写基线残余 **+2 beats ≈ +26 拍**：逐队列归因 13 队列中 11 队列逐项
+相同，唯一差异 = rtovr-16、vout0 各 +1 beat（INIT 保留：l_init+1=10/11
+超 3bit DLY 域），属结构性保留而非调度失败。表述纪律同 §7/§8，另加：
+−169 拍为 **TB 指令装载拍实测差，不写作板端加速比**；不承诺消除全部
+195 拍（实为消除 169、结构性保留 26）。
+
+锚：可行性检查点与验收 `docs/fair_pair_init_fold_feasibility_20261019.md`；
+归档 `verification_v2/artifacts/fair_pair_init_fold_acceptance_20261019/`
+（SHA256SUMS 26 项）；sim dly 语义锁定 `tests/unit/test_iq_unit_dly.py`。
