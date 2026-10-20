@@ -14,6 +14,7 @@ from verification_v2.ops.taylor import TaylorOperator
 from verification_v2.ops.configurable import ConfigurableOperator
 from verification_v2.ops.matmul_op import ManualMatmulOperator, ManualMatmulParallelNOperator, ManualMatmulQOperator, ManualMatmulQDsTOperator, ManualMatmulQDsTK8Operator, ManualMatmulQDsTFullOperator, ManualMatmulQ2Operator, ManualMatmulQMultiRowOperator, ManualMatmulQMultiTileOperator, ManualMatmulQFullOperator, ManualFp16MatmulOperator, ManualFp16MatmulK16Operator, ManualFp16MatmulK16LdbOperator, ManualFp16MatmulK128LdbOperator, ManualFp16MatmulK256LdbOperator, ManualFp16MatmulK32StreamLdbOperator, ManualFp16MatmulK24Operator, ManualFp16MatmulK32Operator, ManualFp16MatmulK2048Operator, ManualFp16MatmulQOperator, ManualFp16MatmulParallelNOperator, ManualFp16MatmulQDsTOperator, ManualFp16MatmulFullOperator, ManualFp16MatmulFullDsTOperator
 from verification_v2.ops.manual_selu import ManualSeluOperator
+from verification_v2.ops.sum_lane0_op import SumLane0UnrollOperator
 from verification_v2.ops.cross_smc_unit_op import UnitFpAddOperator, UnitDataShuffleTransposeOperator, UnitDataShuffleTransposeFp16Operator, UnitDstVec128Operator
 
 OPERATOR_MAP = {
@@ -29,6 +30,20 @@ OPERATOR_MAP = {
 
     "manual_selu": ManualSeluOperator,
     "selu": ManualSeluOperator,
+    # softmax 主线 SUM 首证（§3.7 契约；全展开串行 FPADD 反馈链，lane0-only）
+    "sum_lane0":         lambda **kw: SumLane0UnrollOperator(name="sum_lane0", **kw),
+    "sum_lane0_l1":      lambda **kw: SumLane0UnrollOperator(name="sum_lane0_l1", L=1, **kw),
+    # 两行隔离检查（契约 §3.7-5）：v4（2026-10-20）实证 ADR-056 展开分支 =
+    # 模调度帧重复执行，FPADD_D 单寄存器被两链帧内交错过写——单 schedule 两行
+    # 不可行（实测行0 写回被行1 污染 -65514.0，终值比对响亮检出）。
+    # sum_lane0_2row 保留为 **expected-fail 污染检出证据**（exit=1 为正确行为），
+    # 不作契约两行正向证据；正向两行检查 = VCS two-stage L=16 组合（段间无复位，
+    # UR/寄存器跨段保持，ADR-061 先例）。
+    "sum_lane0_2row":    lambda **kw: SumLane0UnrollOperator(name="sum_lane0_2row", L=8, n_lines=2, **kw),
+    # 契约 §3.7-5 负控：通过判据 = 检查器响亮 FAIL（非 e2e PASS）
+    "sum_lane0_neg_seed": lambda **kw: SumLane0UnrollOperator(name="sum_lane0_neg_seed", neg_ctrl="bad_seed", **kw),
+    "sum_lane0_neg_wire": lambda **kw: SumLane0UnrollOperator(name="sum_lane0_neg_wire", neg_ctrl="miswire", miswire_at=8, **kw),
+    "sum_lane0_neg_drop": lambda **kw: SumLane0UnrollOperator(name="sum_lane0_neg_drop", neg_ctrl="drop_last", **kw),
     # matmul 使用手动 DFG（ManualMatmulOperator），不走 ConfigurableOperator 的
     # compile_with_adpc 路径（后者对 4-operand 公式生成的 DFG 结构 SMT 不可解）
     "matmul": ManualMatmulOperator,
