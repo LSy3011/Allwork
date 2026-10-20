@@ -40,6 +40,9 @@ OPERATOR_MAP = {
     # 不作契约两行正向证据；正向两行检查 = VCS two-stage L=16 组合（段间无复位，
     # UR/寄存器跨段保持，ADR-061 先例）。
     "sum_lane0_2row":    lambda **kw: SumLane0UnrollOperator(name="sum_lane0_2row", L=8, n_lines=2, **kw),
+    # VCS two-stage 段 1：只生成行 1 程序（pool/地址整体偏移一行，与段 0 不相交；
+    # 共享 preload 拼合、段间无复位连续执行——契约 §3.7-5 两行检查的正向载体）
+    "sum_lane0_r1":      lambda **kw: SumLane0UnrollOperator(name="sum_lane0_r1", row_base=1, **kw),
     # 契约 §3.7-5 负控：通过判据 = 检查器响亮 FAIL（非 e2e PASS）
     "sum_lane0_neg_seed": lambda **kw: SumLane0UnrollOperator(name="sum_lane0_neg_seed", neg_ctrl="bad_seed", **kw),
     "sum_lane0_neg_wire": lambda **kw: SumLane0UnrollOperator(name="sum_lane0_neg_wire", neg_ctrl="miswire", miswire_at=8, **kw),

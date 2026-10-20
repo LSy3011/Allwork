@@ -70,6 +70,38 @@
 > ⑤ 三负控签名（sim，全部 exit=1）：neg_seed 差 1.0（truth audit 与终值双层检出）、
 > neg_wire 差 3.0（=误接点前累计值，终值层检出）、neg_drop 差 42.0（=末元素，
 > 终值层检出）；独立参考脚本对三者同判 exit=1。
+>
+> **v5（2026-10-20，VCS 层结果登记——仍不改 §3.7 契约文本）**：五步序第 4、5 步
+> 在 u280_sim_v422（TB 3324a33b 冻结不动，multi-stage 流程，+define+USE_RTOVR_SPARSE_MASK）
+> 完成：
+> ① **L=16 / L=1 正向 VCS 全绿**：两例 SIM PASSED + COMPARE PASSED；独立参考脚本
+> 对 TB dump 复核 bit-exact（L=16：0x42348000=45.125；L=1：0x3fc00000=1.5），
+> 非目标写检查（bank2 零尾 + bank1/3 与 preload 逐词一致）全过。
+> ② **两行连续无复位 = VCS two-stage 组合 GREEN**：用例 `sum_lane0_2row_2stage`
+> （拼装器 tools/sum_lane0_assemble_2stage.py，段间地址不相交前置断言 + 全文件
+> sha256 manifest）：stage_0 = 已过 VCS 的 L=16 单行字节（与构建目录逐一 cmp 核实），
+> stage_1 = 同参数化生成器 row_base=1 程序（pool/地址整体偏移一行）。TB 语义正面
+> 核实：UR 全程仅起始装载一次、stage_1 指令在 stage_0 中断后装载（sim.log 51 处
+> stage_1 标记）、无段间复位。结果 SIM+COMPARE PASSED；独立参考 --rows 2 复核
+> bit-exact（行0=45.125、行1=11.875——**行1 未继承行0 累计值**，若继承必得
+> 57.0 或被 pool2 污染值）。三方一致：RTL dump == 算子 golden（11.875）== 独立
+> 参考（从拼合 preload 字节重算）。
+> ③ **VCS 负控（neg_seed）**：打包时发现 golden 来源陷阱——构建目录
+> `smc_0/output_bank/` 是 **Python sim 终态 dump**（cluster.py:200/374「output_bank
+> 作 VCS golden」），对负控会打包进「被腐蚀的忠实值」使比对层空转。处置：打包后
+> 以独立参考 golden（[0,0,0,45.125]）覆写 bank2_final.hex，其余 bank 维持
+> preload 惯例。**实测签名（双层检出，全如期望）**：SIM PASSED + COMPARE
+> **FAILED**——逐 bank 判定 bank0/1/3..7 全 exact PASS、独 bank2 行 1
+> `golden=…42348000 dump=3f8000003f8000003f80000042388000`（exact 与 FP32
+> 宽松双败）；独立参考脚本 exit=1：`lane0 got=46.125 want=45.125` 且
+> lanes1-3 污染 1.0（0x3f800000×3）——RTL 在腐蚀种子下的行为与 Python sim
+> 逐位一致（46.125），两个检查器各自真实检出。
+> ④ 成果表述按用户锁定口径：**编译器后端能够生成并正确执行受限的跨迭代 fp32
+> SUM**（L=16 元素、W=16 词、lane0-only、单 SMC、串行 FPADD 反馈链、展开形态）。
+> 偏差登记：展开（非 loop 载体）；帧重复语义下单链幂等为正确性依据（v4-②）；
+> 两行经 two-stage 组合（非单 schedule）；lane0-only 未证 packed vec4 横向归约，
+> 性能口径须注明 lane 利用率 1/4；II=5 为 sim 观察节奏（逐拍窗口产物审计全过），
+> RTL 侧本轮以行为级比对确认为准、未单独抽取逐拍轨迹。
 
 ---
 

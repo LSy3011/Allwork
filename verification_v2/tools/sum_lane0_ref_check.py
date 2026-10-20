@@ -54,7 +54,7 @@ def serial_sum_bits(xs):
     return struct.unpack("<I", struct.pack("<f", s))[0]
 
 
-def run(case_ur, out_dir, L, rows, do_post):
+def run(case_ur, out_dir, L, rows, row_base, do_post):
     fails = []
     for b, tag in ((X_BANK, "x"), (Z_BANK, "zero")):
         p = os.path.join(case_ur, f"bank{b}.hex")
@@ -67,22 +67,23 @@ def run(case_ur, out_dir, L, rows, do_post):
         print(f"[FATAL] preload 行数不为 {UR_DEPTH}")
         return 2
 
-    # 布局审计 + 逐行参考
-    ref_bits = []
+    # 布局审计 + 逐行参考（全局行号 R = row_base + r，地址随行走）
+    ref_bits = {}
     for r in range(rows):
-        seed = line_to_u32x4(z_lines[r])
+        R = row_base + r
+        seed = line_to_u32x4(z_lines[R])
         seed_f = u32_to_f32(seed[3])
-        print(f"[row {r}] 零种子词 lanes={['%08x' % u for u in seed]} "
+        print(f"[row {R}] 零种子词 lanes={['%08x' % u for u in seed]} "
               f"(lane0={seed_f!r})")
         xs = []
         for i in range(L):
-            w = line_to_u32x4(x_lines[r * L + i])
+            w = line_to_u32x4(x_lines[R * L + i])
             if w[0] != 0 or w[1] != 0 or w[2] != 0:
-                fails.append(f"x{r}_{i} lane1-3 非 +0: {['%08x' % u for u in w]}")
+                fails.append(f"x{R}_{i} lane1-3 非 +0: {['%08x' % u for u in w]}")
             xs.append(u32_to_f32(w[3]))
         bits = serial_sum_bits(xs)
-        ref_bits.append(bits)
-        print(f"[row {r}] 参考和 s_{L} = 0x{bits:08x} ({u32_to_f32(bits)!r})")
+        ref_bits[R] = bits
+        print(f"[row {R}] 参考和 s_{L} = 0x{bits:08x} ({u32_to_f32(bits)!r})")
 
     if not do_post:
         if fails:
@@ -91,22 +92,37 @@ def run(case_ur, out_dir, L, rows, do_post):
         print("[PRE] 布局审计通过（x 词 lane1-3 全 +0）")
         return 0
 
-    y_lines = read_hex_lines(os.path.join(out_dir, f"bank{Y_BANK}_final.hex"))
+    def out_file(bank):
+        # TB dump（ur_result_smc_0_bankN.hex，VCS 多段流程）优先；
+        # 否则 sim dump（bankN_final.hex）。
+        tb = os.path.join(out_dir, f"ur_result_smc_0_bank{bank}.hex")
+        if os.path.exists(tb):
+            return tb
+        return os.path.join(out_dir, f"bank{bank}_final.hex")
+
+    y_path = out_file(Y_BANK)
+    print(f"[POST] 输出侧文件: {y_path}")
+    y_lines = read_hex_lines(y_path)
     if len(y_lines) != UR_DEPTH:
         print(f"[FATAL] output bank{Y_BANK} 行数 {len(y_lines)} != {UR_DEPTH}")
         return 2
+    targets = set()
     for r in range(rows):
-        got = line_to_u32x4(y_lines[r])
-        want = (0, 0, 0, ref_bits[r])
+        R = row_base + r
+        targets.add(R)
+        got = line_to_u32x4(y_lines[R])
+        want = (0, 0, 0, ref_bits[R])
         if got != want:
             fails.append(
-                f"row {r} 输出词不一致: got={['%08x' % u for u in got]} "
+                f"row {R} 输出词不一致: got={['%08x' % u for u in got]} "
                 f"want={['%08x' % u for u in want]}"
                 f"（lane0 got={u32_to_f32(got[3])!r} want={u32_to_f32(want[3])!r}）")
 
-    # 非目标写检查①：bank2 零尾（第 rows 词起应全 +0——preload 即全零，
+    # 非目标写检查①：bank2 目标行之外应全 +0（preload 即全零，
     # 任何非目标写都会留下痕迹）。
-    for a in range(rows, UR_DEPTH):
+    for a in range(UR_DEPTH):
+        if a in targets:
+            continue
         w = line_to_u32x4(y_lines[a])
         if w != (0, 0, 0, 0):
             fails.append(f"bank2 非目标词 {a} 被写: {['%08x' % u for u in w]}")
@@ -114,7 +130,7 @@ def run(case_ur, out_dir, L, rows, do_post):
     # 非目标写检查②：输入/常量 bank 运行后应与 preload 逐行一致
     # （回写污染 x/零种子 = 归约语义被静默破坏的通道之一）。
     for b, pre in ((X_BANK, x_lines), (Z_BANK, z_lines)):
-        post_p = os.path.join(out_dir, f"bank{b}_final.hex")
+        post_p = out_file(b)
         if not os.path.exists(post_p):
             print(f"[WARN] 缺 {post_p}，跳过 bank{b} 完整性比对")
             continue
@@ -142,6 +158,8 @@ def main():
     ap.add_argument("--out", default=None, help="output_bank 目录（--post 必填）")
     ap.add_argument("--L", type=int, default=16)
     ap.add_argument("--rows", type=int, default=1)
+    ap.add_argument("--row-base", type=int, default=0,
+                    help="全局行号偏移（VCS two-stage 段 1 = 1）")
     args = ap.parse_args()
     if args.pre == args.post:
         print("用法：--pre 与 --post 恰取其一")
@@ -149,7 +167,7 @@ def main():
     if args.post and not args.out:
         print("--post 需要 --out")
         return 2
-    return run(args.ur, args.out, args.L, args.rows, args.post)
+    return run(args.ur, args.out, args.L, args.rows, args.row_base, args.post)
 
 
 if __name__ == "__main__":

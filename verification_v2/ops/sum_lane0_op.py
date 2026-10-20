@@ -113,19 +113,30 @@ class SumLane0UnrollOperator(BaseOperator):
                     - drop_last: 少发最后一个 add（末次写回 = s_{L-1}）→ 检出。
         miswire_at: miswire 的注入点（默认 L//2）。
         name:       算子身份（ADR-056 §B.1 接线闸要求与注册键规范化一致）。
+        row_base:   行索引偏移（VCS two-stage 用）：row_base=1 时本算子只生成
+                    「行 1」程序——x 取 _POOL_ROW1、地址落在 bank1[L..2L)、
+                    零种子 bank3[1]、输出 bank2[1]，与 row_base=0 的段 0
+                    地址区不相交（共享 preload 拼合，段间无复位连续执行）。
+                    row_base>0 时强制 n_lines=1（两段各一行）。
     """
 
     def __init__(self, L: int = 16, n_lines: int = 1,
                  neg_ctrl: Optional[str] = None, miswire_at: Optional[int] = None,
-                 name: str = "sum_lane0", **kwargs):
+                 name: str = "sum_lane0", row_base: int = 0, **kwargs):
         if not (1 <= L <= 16):
             raise ValueError(f"L={L} 越出首证包络 [1,16]（输入池按 16 冻结）")
         if not (1 <= n_lines <= 2):
             raise ValueError(f"n_lines={n_lines} 越出首证包络 [1,2]（行池冻结 2 行）")
+        if row_base != 0:
+            if not (0 <= row_base <= 1):
+                raise ValueError(f"row_base={row_base} 越出 [0,1]（行池冻结 2 行）")
+            if n_lines != 1:
+                raise ValueError("row_base>0 仅供 two-stage 单行段使用（n_lines=1）")
         if neg_ctrl not in (None, "bad_seed", "miswire", "drop_last"):
             raise ValueError(f"未知负控形态: {neg_ctrl!r}")
         self.L = int(L)
         self.n_lines = int(n_lines)
+        self.row_base = int(row_base)
         self.neg_ctrl = neg_ctrl
         self.miswire_at = int(miswire_at) if miswire_at is not None else self.L // 2
         self.name = name
@@ -140,22 +151,24 @@ class SumLane0UnrollOperator(BaseOperator):
     def tensor_configs(self) -> Dict[str, Dict[str, Any]]:
         cfgs: Dict[str, Dict[str, Any]] = {}
         for r in range(self.n_lines):
+            R = self.row_base + r  # 全局行号（two-stage 段 1 用 row_base=1）
             for i in range(self.L):
                 # 每元素独立张量声明（1 词/元素）：固定地址全展开形态下
                 # num_loop_iters=len(arr)//lanes=1 的自然表达，且准入 G-addr
                 # 对每个读地址有独立声明区可核。
-                cfgs[f"x{r}_{i}"] = {"bank": _BANK_X, "offset": r * self.L + i,
+                cfgs[f"x{R}_{i}"] = {"bank": _BANK_X, "offset": R * self.L + i,
                                      "role": "input", "precision": "fp32",
                                      "length": 1}
         for r in range(self.n_lines):
-            cfgs[f"zero_{r}"] = {"bank": _BANK_Z, "offset": r,
+            R = self.row_base + r
+            cfgs[f"zero_{R}"] = {"bank": _BANK_Z, "offset": R,
                                  "role": "constant", "precision": "fp32",
                                  "length": 1}
         # 输出张量必须命名 "y" 且覆盖全部行：physical_runner.py:194-206 的
         # 终值比对按「张量名 ∈ golden_data.npz 键」过滤，runner 只写
         # golden_res["y"]——命名不符将被静默 skip（2026-10-20 实证：
         # y_0 命名下 neg_wire/neg_drop 终值比对从未执行、假绿）。
-        cfgs["y"] = {"bank": _BANK_Y, "offset": 0,
+        cfgs["y"] = {"bank": _BANK_Y, "offset": self.row_base,
                      "role": "output", "precision": "fp32",
                      "length": self.n_lines,
                      "shape": (4 * self.n_lines,)}
@@ -165,9 +178,9 @@ class SumLane0UnrollOperator(BaseOperator):
         # n_rows 有意忽略：首证输入为冻结的判别性向量（契约 §3.7-5）。
         data: Dict[str, np.ndarray] = {}
         for r in range(self.n_lines):
-            pool = _POOLS[r]
+            pool = _POOLS[self.row_base + r]
             for i in range(self.L):
-                data[f"x{r}_{i}"] = np.array(
+                data[f"x{self.row_base + r}_{i}"] = np.array(
                     [np.float32(pool[i]), 0.0, 0.0, 0.0], dtype=np.float32)
         return data
 
@@ -177,9 +190,10 @@ class SumLane0UnrollOperator(BaseOperator):
         # 负控下 golden 恒为正确值——负控的通过判据是检查器检出偏差。
         words = []
         for r in range(self.n_lines):
+            R = self.row_base + r
             s = np.float32(0.0)
             for i in range(self.L):
-                s = np.float32(s + np.float32(input_data[f"x{r}_{i}"][0]))
+                s = np.float32(s + np.float32(input_data[f"x{R}_{i}"][0]))
             words.append(np.array([s, 0.0, 0.0, 0.0], dtype=np.float32))
         return {"y": np.concatenate(words), "intermediates": []}
 
@@ -187,17 +201,18 @@ class SumLane0UnrollOperator(BaseOperator):
         b = MIROpBuilder()
         prev_row_last_add: Optional[str] = None
         for r in range(self.n_lines):
+            R = self.row_base + r  # 全局行号（two-stage 段 1 用 row_base=1）
             prev_add: Optional[str] = None
             n_adds = self.L - 1 if self.neg_ctrl == "drop_last" else self.L
             for i in range(n_adds):
                 xr = b.make_op(
-                    "UR_READ", f"xr{r}_{i}", RT.UR_READ, [],
-                    meta_name=f"x{r}_{i}",
-                    logical_addr=_BANK_X * 256 + r * self.L + i,
+                    "UR_READ", f"xr{R}_{i}", RT.UR_READ, [],
+                    meta_name=f"x{R}_{i}",
+                    logical_addr=_BANK_X * 256 + R * self.L + i,
                     stride=0, role="input", iq_id=30 + (i % 4),
                     precision="fp32")
                 rt_x = b.make_op(
-                    "RTOVR", f"rtx{r}_{i}", PS.FPADD_S0, [xr], precision="fp32")
+                    "RTOVR", f"rtx{R}_{i}", PS.FPADD_S0, [xr], precision="fp32")
 
                 use_seed_route = (
                     prev_add is None
@@ -210,26 +225,28 @@ class SumLane0UnrollOperator(BaseOperator):
                     # 物理事实「FPADD_D 为单寄存器、同时只能承载一条串行链」的
                     # DFG 级表达（anti-overwrite 公理现非活跃，ucode_solver.py:458；
                     # 无此边则求解器可合法交错两链 → 行间 D 覆盖）。
+                    # （v4：单 schedule 多行已被帧重复语义否证，该边仅作
+                    #  防御性保留；two-stage 形态下段间串行由 TB 段序天然保证。）
                     seed_deps = ([prev_row_last_add] if prev_row_last_add is not None
                                  else [])
                     zr = b.make_op(
-                        "UR_READ", f"zr{r}_{i}", RT.UR_READ, seed_deps,
-                        meta_name=f"zero_{r}",
-                        logical_addr=_BANK_Z * 256 + r,
+                        "UR_READ", f"zr{R}_{i}", RT.UR_READ, seed_deps,
+                        meta_name=f"zero_{R}",
+                        logical_addr=_BANK_Z * 256 + R,
                         stride=0, role="constant", iq_id=33,
                         precision="fp32")
                     rt_s1 = b.make_op(
-                        "RTOVR", f"rtz{r}_{i}", PS.FPADD_S1, [zr],
+                        "RTOVR", f"rtz{R}_{i}", PS.FPADD_S1, [zr],
                         precision="fp32")
                 else:
                     # 反馈边：S1 ← 前一加法的 FPADD_D（sel=4，稀疏掩码
                     # 0x1FDB 内含位，RtoVR.v:243-244 实证）。
                     rt_s1 = b.make_op(
-                        "RTOVR", f"rtc{r}_{i}", PS.FPADD_S1, [prev_add],
+                        "RTOVR", f"rtc{R}_{i}", PS.FPADD_S1, [prev_add],
                         sel=4, precision="fp32")
 
                 prev_add = b.make_op(
-                    "FPADD", f"add{r}_{i}", RT.FPADD, [rt_x, rt_s1],
+                    "FPADD", f"add{R}_{i}", RT.FPADD, [rt_x, rt_s1],
                     iq_id=4, precision="fp32")
 
             # 末次写回（每行一次）：仅末次加法的结果出链。
@@ -238,11 +255,11 @@ class SumLane0UnrollOperator(BaseOperator):
             # 逐次写会多 64 节点（16×[rt1+VOUT0+rt2+UW]），z3 在默认预算内
             # 全 UNKNOWN（matmul_q_full 先例：大展开 DFG 需拉长 per-II 超时）。
             rt_wb = b.make_op(
-                "RTOVR", f"rtwb{r}", PS.UR_W0_S, [prev_add],
+                "RTOVR", f"rtwb{R}", PS.UR_W0_S, [prev_add],
                 sel=4, precision="fp32")
             b.make_op(
-                "UR_WRITE", f"yw{r}", RT.UR_WRITE, [rt_wb],
-                logical_addr=_BANK_Y * 256 + r, stride=0,
+                "UR_WRITE", f"yw{R}", RT.UR_WRITE, [rt_wb],
+                logical_addr=_BANK_Y * 256 + R, stride=0,
                 role="output", is_output=True,
                 iq_id=35, precision="fp32")
             prev_row_last_add = prev_add
@@ -269,4 +286,4 @@ class SumLane0UnrollOperator(BaseOperator):
         # bad_seed 负控：注入 1.0 破坏 s₀=+0 冻结语义，检查器必须检出。
         seed_val = 1.0 if self.neg_ctrl == "bad_seed" else 0.0
         for r in range(self.n_lines):
-            program.inject_broadcast(_BANK_Z * 256 + r, seed_val)
+            program.inject_broadcast(_BANK_Z * 256 + self.row_base + r, seed_val)
