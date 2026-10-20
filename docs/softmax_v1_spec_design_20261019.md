@@ -102,6 +102,56 @@
 > 两行经 two-stage 组合（非单 schedule）；lane0-only 未证 packed vec4 横向归约，
 > 性能口径须注明 lane 利用率 1/4；II=5 为 sim 观察节奏（逐拍窗口产物审计全过），
 > RTL 侧本轮以行为级比对确认为准、未单独抽取逐拍轨迹。
+>
+> **v6（2026-10-20，MAX 步①取证结论——比较状态/SELECT 方向/状态配对/反馈路径，
+> 全部冻结 RTL 正面取证 + sim 对照）**。用户裁定：「最大值分别位于四个 lane」属
+> packed 布局验证，**不计入 P0 成果**；P0 每词仅 lane0 一个有效元素（其余 lane 可放
+> 干扰值查隔离，但不证明横向 MAX），四 lane 合并保留为独立缺口。
+> ① **FPADD 比较状态**（fp_adder_rtl.v）：比较器 cmp_fp32(:504-) 取**原始** S0/S1
+> （不受 SUB 符号翻转影响，:209-212），输出 one-hot 3bit = 001(LT)/010(EQ)/100(GT)；
+> UPDATE_ST=i_cru_fpadd[3] 门控，提交条件 w_commit_valid && update_st &&
+> src_prec==dest_prec；非 Xilinx 分支（冻结构建未定义 USE_XILINX_FPADD，已对
+> flist/runner 正面 grep 取证）提交于 valid_pipe[2] = **发射后第 3 拍锁存、第 4 拍
+> 可读**（与 SUM 加法结果同拍点）。特殊值规则（:545-622）：NaN→lt=1/gt=0/eq=按位等；
+> ±0→gt=lt=0 且 **eq=同号才真**；denorm→按 0 处理 gt=lt=0/eq=按位等。
+> ② **LOGIC SELECT 操作数方向**（logical.v:49-51,171-173）：OP_SELECT_GREAT(4'b0101)
+> = `st[ch][2] ? s0 : s1`（GT=1 取 s0，否则 s1）；状态按 lane 取
+> `i_dvr_logic_st[32*ch +: 3]`（fp32，与 FPADD 状态打包 [32*j +: 3] 逐位对齐）；
+> OP_COPY(4'b0100) 存在（:48，仅 s0）。编译器侧 logic.yaml OP_TYPE 编码与 RTL 一致，
+> 生成器先例 standard_kernels.py:110-118（lower_minmax：FPADD(UPDATE_ST=1,SUB=1)
+> → LOGIC SELECT_GT）。**sim 独有的 SELECT_GE/LE/NE 在 RTL 无对应 opcode，禁用**。
+> ③ **状态与数据配对**：o_dr_fpadd_st 是**全局唯一、无标签**的 128b 状态寄存器——
+> 配对纪律 = 任一时刻至多一个未消费 UPDATE_ST，且 LOGIC 在同一迭代内消费；
+> RecMII=7 周期间隔天然保证（iter i+1 状态提交于 t+10，iter i 的 LOGIC 于 t+5 采样），
+> 逐拍核验列入产物审计（同 SUM 审计 D 节）。
+> ④ **反馈路径**：全链稀疏 mask 合法（非 `ifdef 假设，已解码实值）——FPADD_S0/S1、
+> LOGIC_S0/S1 = 0x1FDB（含 LOGIC_D(10) 自环、FPADD_D(4)、VIN0/1_D(11/12)）；
+> LOGIC_ST = 0x1824 = {INTADD_ST(2), FPADD_ST(5), VIN0_D(11), VIN1_D(12)}；
+> VOUT0_S = 0x07FF ∋ LOGIC_D(10)（末次写回通道）。x_i 一路 VIN 同时供 FPADD_S0
+> 与 LOGIC_S0（广播两路由，与 SUM 的零路由同构）；m 经 LOGIC_D 自环。
+> ⑤ **首项初始化（用户裁定：取首个有效元素，弃零种子——零种子会破坏全负输入）**：
+> iter0 = LOGIC **COPY**(x₀)（不触状态寄存器），iter 1..L−1 = FPADD 比较(x_i, m)
+> UPDATE_ST=1 + LOGIC SELECT_GT(s0=x_i, s1=m)。首次路由切换（COPY 的 S0=VIN →
+> 迭代的 S1=LOGIC_D 自环）与末次写回列入检查项，同 SUM 契约口径。
+> ⑥ **候选时序（待验证值，非已证周期保证）**：RecMII=7 = FPADD 状态可读 4 + ST
+> 路由 1 + LOGIC 1 + 自环路由 1；逐拍窗口以产物审计 + VCS 行为复核为准。
+> ⑦ **选择语义冻结**：SELECT_GT 严格大于；**并列（含 +0/−0 交叉）保留现任 m**
+> （先来者存，确定但序相关）；NaN 不入 v1 输入域（已核 GT 位语义：NaN 永不置换
+> 现任，唯 x₀=NaN 时黏住——域外行为登记）；denorm 按 0 处理。
+> ⑧ **sim/RTL 已核分歧（对 P0 SELECT_GT lane0-only 无害，登记备查）**：EQ/LS 位
+> 规则不同（sim: Python 语义 ±0 eq=1、NaN ls=0；RTL: ±0 eq=同号、NaN lt=1）——
+> SELECT_GT 只读 GT 位，两侧 GT 位全值域一致（sim fp_add_unit.py:113-117 有
+> denorm flush，与 RTL 等价）；状态步进 sim=16bit stride vs RTL fp32=32bit stride，
+> lane0 同为 [2:0]，且 P0 下 SELECT 两操作数 lane1-3 恒 +0 → 输出 lane1-3 恒 +0
+> 与状态无关。**未来 MIN（SELECT_LS）会踩 NaN lt=1 分歧——登记不用**。
+> ⑨ **风险登记**：LOGIC 单元与状态路径在冻结 TB **无 VCS 先例**（已 VCS 算子全为
+> 纯 {FPMUL,FPADD}）——MAX P0 是该路径首次 VCS 行使。
+> ⑩ **工具纪律（用户 2026-10-20 令，立即生效）**：a) 运行前生成并冻结独立
+> expected（从 preload 字节重算）+ 记录 sha256，VCS golden 取自冻结文件，
+> **禁止再靠临时覆写 sim dump**（SUM neg_seed 教训）；b) 负控只接受明确预期失配
+> 签名（预期 got/want 值逐项核对）；缺文件/traceback/超时/许可证失败 = 实验失败，
+> 不得按 exit=1 计负控通过（本轮归档复跑已自食其果一次：--out 路径错致六例
+> traceback 被聚合计数掩盖，逐个签名核对后重跑方得真证据）。
 
 ---
 
